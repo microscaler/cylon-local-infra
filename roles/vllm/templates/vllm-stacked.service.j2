@@ -1,0 +1,31 @@
+[Unit]
+Description=vLLM OpenAI API (stacked, tensor parallel via Ray)
+After=network-online.target ray-head.service
+Requires=ray-head.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+{% if vllm_run_user | default('') | length > 0 %}
+User={{ vllm_run_user }}
+Group={{ vllm_run_user }}
+WorkingDirectory={{ vllm_working_directory }}
+{% endif %}
+Environment=HF_HOME={{ vllm_hf_home }}
+Environment=VLLM_HOST_IP={{ spark_interconnect_ip }}
+Environment=VLLM_ENGINE_READY_TIMEOUT_S={{ vllm_engine_ready_timeout_sec | default(1800) }}
+{% for _k, _v in (vllm_distributed_extra_env | default({}) | dictsort) %}
+Environment={{ _k }}={{ _v }}
+{% endfor %}
+ExecStart={{ vllm_wrapper_script_stacked }}
+Restart=on-failure
+RestartSec=20
+TimeoutStartSec=3600
+# Large Ray-backed engines can take minutes to release workers; avoid systemd SIGKILL mid-shutdown.
+TimeoutStopSec={{ vllm_stacked_systemd_stop_timeout_sec | default(3600) }}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vllm-stacked
+
+[Install]
+WantedBy=multi-user.target

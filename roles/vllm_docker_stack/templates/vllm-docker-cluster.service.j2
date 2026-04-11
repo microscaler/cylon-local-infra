@@ -1,0 +1,22 @@
+[Unit]
+Description=vLLM Docker cluster (spark-vllm-docker launch-cluster via Ansible)
+Documentation=file:{{ vllm_docker_install_path }}/README.md
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ vllm_docker_systemd_user }}
+Group={{ vllm_docker_systemd_group }}
+WorkingDirectory={{ vllm_docker_install_path }}
+Environment=HOME={{ vllm_docker_systemd_home }}
+ExecStart={{ vllm_docker_launcher_path }}
+ExecStop={{ vllm_docker_install_path }}/launch-cluster.sh --config {{ vllm_docker_config_dir }}/cluster.env stop
+TimeoutStartSec=3600
+TimeoutStopSec=3600
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

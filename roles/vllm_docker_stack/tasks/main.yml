@@ -1,0 +1,107 @@
+---
+# Install vendored spark-vllm-docker scripts and systemd unit (leader). Docker + SSH from leader to workers.
+
+- name: Interconnect IPv4 for cluster.env and Ray
+  ansible.builtin.import_tasks: preflight_interconnect.yml
+
+- name: Stop bare-metal Ray/vLLM stack when switching to Docker (avoid port and Ray conflicts)
+  when:
+    - vllm_docker_stop_bare_metal_stack | default(true) | bool
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  block:
+    - name: Stop vllm-stacked on leader
+      ansible.builtin.systemd:
+        name: vllm-stacked
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Stop Ray head on leader
+      ansible.builtin.systemd:
+        name: ray-head
+        state: stopped
+        enabled: false
+      failed_when: false
+
+- name: Stop bare-metal Ray worker on followers
+  when:
+    - vllm_docker_stop_bare_metal_stack | default(true) | bool
+    - inventory_hostname != (groups['sparks'] | sort | first)
+  ansible.builtin.systemd:
+    name: ray-worker
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Install Docker CE (optional)
+  ansible.builtin.include_role:
+    name: docker_ce
+  when: vllm_docker_install_docker_ce | default(false) | bool
+
+- name: Ensure spark-vllm-docker install directory exists (leader)
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+  ansible.builtin.file:
+    path: "{{ vllm_docker_install_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Sync vendored spark-vllm-docker scripts from controller (leader only)
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+  ansible.builtin.copy:
+    src: "{{ vllm_docker_contrib_src | default(playbook_dir + '/../contrib/spark-vllm-docker') }}/"
+    dest: "{{ vllm_docker_install_path }}/"
+
+- name: Ensure launch scripts are executable (leader)
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+  ansible.builtin.file:
+    path: "{{ vllm_docker_install_path }}/{{ item }}"
+    mode: "0755"
+  loop:
+    - hf-download.sh
+    - launch-cluster.sh
+    - autodiscover.sh
+
+- name: Leader — compute facts, template systemd, and start unit
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+  block:
+    - name: Compute ETH_IF and CSVs for cluster.env
+      ansible.builtin.set_fact:
+        vllm_docker_eth_if_effective: "{{ vllm_docker_eth_if if (vllm_docker_eth_if | default('') | length > 0) else nccl_interface }}"
+        vllm_docker_cluster_nodes_csv: "{{ groups['sparks'] | sort | map('extract', hostvars, 'spark_interconnect_ip') | join(',') }}"
+        vllm_docker_copy_hosts_csv: "{{ groups['sparks'] | sort | difference([groups['sparks'] | sort | first]) | map('extract', hostvars, 'spark_interconnect_ip') | join(',') }}"
+        vllm_docker_leader_interconnect_ip: "{{ spark_interconnect_ip }}"
+
+    - name: Ensure config directory exists
+      ansible.builtin.file:
+        path: "{{ vllm_docker_config_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Deploy cluster.env for launch-cluster
+      ansible.builtin.template:
+        src: cluster.env.j2
+        dest: "{{ vllm_docker_config_dir }}/cluster.env"
+        mode: "0644"
+
+    - name: Deploy vllm-docker-launch.sh
+      ansible.builtin.template:
+        src: vllm-docker-launch.sh.j2
+        dest: "{{ vllm_docker_launcher_path }}"
+        mode: "0755"
+
+    - name: Install vllm-docker-cluster systemd unit
+      ansible.builtin.template:
+        src: vllm-docker-cluster.service.j2
+        dest: /etc/systemd/system/vllm-docker-cluster.service
+        mode: "0644"
+      notify: reload systemd
+
+    - name: Flush systemd handler
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start vllm-docker-cluster
+      ansible.builtin.systemd:
+        name: vllm-docker-cluster
+        enabled: "{{ vllm_docker_service_enabled | bool }}"
+        state: "{{ vllm_docker_service_state }}"
+        daemon_reload: true

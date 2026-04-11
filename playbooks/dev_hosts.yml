@@ -1,0 +1,17 @@
+---
+# Configure dev host(s) — ms02: remote IDE dev, Kind, act/buildx (see docs/docker-dev-host.md).
+# 1) Sudoers for dev user (e.g. casibbald)
+# 2) Docker: daemon, groups (no docker.io — install CE first: playbooks/docker_dev_engine.yml)
+# 3) Kind binary in /usr/local/bin
+#
+# Run (after Docker CE is installed on ms02):
+#   ansible-playbook playbooks/dev_hosts.yml
+#   ansible-playbook playbooks/dev_hosts.yml -l ms02
+
+- name: Users, sudoers, Docker, and Kind on dev hosts
+  hosts: dev_hosts
+  roles:
+    - sudoers
+    - docker
+    - firewall
+    - kind

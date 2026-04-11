@@ -1,0 +1,10 @@
+---
+# CUDA toolkit from NVIDIA repo (keyring + apt). Used by vLLM (libcudart.so.12).
+# Override for your OS/arch: e.g. Ubuntu 22.04 x86_64 use
+#   cuda_keyring_url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+
+# Default: Debian 12 sbsa. Override in group_vars (e.g. sparks use ubuntu2404/sbsa for Ubuntu 24.04 aarch64).
+cuda_keyring_url: "https://developer.download.nvidia.com/compute/cuda/repos/debian12/sbsa/cuda-keyring_1.1-1_all.deb"
+cuda_toolkit_package: "cuda-toolkit-13-1"
+# Extra packages. Set to [] to skip. Sparks set cuda-cudart-12-8 so libcudart.so.12 exists for vLLM aarch64 wheels.
+cuda_extra_packages: []

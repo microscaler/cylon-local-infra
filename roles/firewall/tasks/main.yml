@@ -1,0 +1,95 @@
+---
+# Configure ufw: SSH + HTTP/HTTPS TCP ports. Inbound allow listed; outbound allow by default.
+# Tags on block so `ansible-playbook --tags firewall` runs all tasks (not only the include_role line).
+
+- name: Firewall configuration
+  tags: [spark, firewall, vllm]
+  block:
+    - name: Ensure ufw is installed
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: true
+
+    - name: Set ufw default incoming policy
+      ansible.builtin.shell: ufw default {{ firewall_default_incoming }} incoming
+      changed_when: true
+
+    - name: Set ufw default outgoing policy
+      ansible.builtin.shell: ufw default {{ firewall_default_outgoing }} outgoing
+      changed_when: true
+
+    - name: Allow inbound TCP ports (SSH, HTTP, dev ports)
+      ansible.builtin.shell: ufw allow {{ item }}/tcp
+      loop: "{{ firewall_allow_tcp_ports }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Allow inbound TCP from trusted LAN CIDR (explicit subnet access)
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - allow
+          - from
+          - "{{ firewall_trusted_lan_cidr }}"
+          - to
+          - any
+          - port
+          - "{{ item | string }}"
+          - proto
+          - tcp
+      loop: "{{ firewall_trusted_lan_tcp_ports }}"
+      when:
+        - firewall_trusted_lan_cidr | default('') | length > 0
+        - firewall_trusted_lan_tcp_ports | default([]) | length > 0
+      changed_when: false
+      failed_when: false
+
+    # Superseded rule from earlier iterations (narrow TCP range); full interconnect allow below replaces it.
+    - name: Remove legacy ufw rule (interconnect TCP 10000:61000) if present
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - delete
+          - allow
+          - from
+          - "{{ firewall_spark_interconnect_cidr }}"
+          - to
+          - any
+          - port
+          - "10000:61000"
+          - proto
+          - tcp
+      when: firewall_spark_interconnect_cidr | default('') | length > 0
+      failed_when: false
+      changed_when: false
+
+    # Ray multi-node: worker raylets, object managers, etc. use many TCP ports between Sparks — not only 6379.
+    # Link-local interconnect CIDR is not routed; allow full access from peers on that segment.
+    - name: Allow inbound from Spark interconnect CIDR (Ray multi-node)
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - allow
+          - from
+          - "{{ firewall_spark_interconnect_cidr }}"
+      when: firewall_spark_interconnect_cidr | default('') | length > 0
+      changed_when: true
+      failed_when: false
+
+    - name: Check if ufw is active
+      ansible.builtin.shell: "ufw status | grep -q 'Status: active'"
+      register: ufw_active
+      changed_when: false
+      failed_when: false
+
+    - name: Enable ufw (no prompt)
+      ansible.builtin.shell: ufw --force enable
+      when: ufw_active.rc != 0
+      changed_when: true
+
+    - name: Ensure ufw service is started and enabled
+      ansible.builtin.service:
+        name: ufw
+        state: started
+        enabled: true

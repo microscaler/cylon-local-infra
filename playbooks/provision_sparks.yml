@@ -1,0 +1,22 @@
+---
+# Canonical DGX Spark provisioning (single entry point).
+#
+# Phases are toggled with spark_provision_* in inventory/group_vars/sparks.yml
+# (see roles/spark_provision/defaults/main.yml).
+#
+#   ansible-playbook playbooks/provision_sparks.yml
+#   ansible-playbook playbooks/provision_sparks.yml --tags apt
+#   ansible-playbook playbooks/provision_sparks.yml --skip-tags vllm_test
+#
+# Optional — NCCL build, SSH keys, all_gather test (multi-play, not merged):
+#   ansible-playbook playbooks/nccl_sparks.yml
+#   ansible-playbook playbooks/nccl_sparks.yml --skip-tags nccl_test
+#
+# Non-Spark hosts (e.g. dev laptop): still use playbooks/dev_hosts.yml, docker_dev_engine.yml.
+
+- name: Spark cluster — provision
+  hosts: sparks
+  gather_facts: true
+  become: true
+  roles:
+    - spark_provision

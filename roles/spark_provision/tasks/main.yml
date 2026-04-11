@@ -1,0 +1,104 @@
+---
+# Canonical Spark provisioning (replaces docker_hosts, vllm_sparks, vllm_stack, bringup, etc.).
+# Phases toggled via spark_provision_* in group_vars/sparks.yml (see defaults/main.yml).
+
+- name: Phase — sudoers and operators
+  ansible.builtin.include_role:
+    name: sudoers
+  tags: [spark, base, sudoers]
+  when: spark_provision_sudoers | default(true) | bool
+
+- name: Phase — CUDA apt cleanup (before Docker/apt using NVIDIA repos)
+  ansible.builtin.include_role:
+    name: cuda
+    tasks_from: apt_cleanup.yml
+  tags: [spark, prep, cuda, docker, vllm]
+  when: spark_provision_cuda_apt_cleanup | default(true) | bool
+
+- name: Phase — APT upgrade
+  ansible.builtin.include_role:
+    name: spark_apt
+  tags: [spark, apt]
+  when: spark_provision_apt | default(true) | bool
+
+- name: Phase — Docker Engine
+  ansible.builtin.include_role:
+    name: docker
+  tags: [spark, docker]
+  when: spark_provision_docker | default(true) | bool
+
+- name: Phase — Firewall (vLLM / Ray ports)
+  ansible.builtin.include_role:
+    name: firewall
+  tags: [spark, firewall, vllm]
+  when: spark_provision_firewall | default(true) | bool
+
+- name: Phase — CUDA toolkit (NVIDIA repo)
+  ansible.builtin.include_role:
+    name: cuda
+  tags: [spark, cuda, vllm]
+  when: spark_provision_cuda_toolkit | default(true) | bool
+
+- name: Phase — vLLM venv and Ray pip
+  ansible.builtin.include_role:
+    name: vllm
+  tags: [spark, vllm]
+  when: spark_provision_vllm | default(true) | bool
+
+- name: Phase — single-node vllm.service (leader)
+  ansible.builtin.include_role:
+    name: vllm
+    tasks_from: serve.yml
+  tags: [spark, vllm, vllm_serve]
+  when:
+    - spark_provision_vllm_serve | default(true) | bool
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_sparks_deploy_single_node_service | default(true) | bool
+
+- name: Phase — vLLM API smoke test
+  ansible.builtin.include_role:
+    name: vllm
+    tasks_from: provision_api_test.yml
+  tags: [spark, vllm, vllm_test]
+  when: spark_provision_vllm_test | default(true) | bool
+
+- name: Phase — stacked vLLM (Ray head/worker + vllm-stacked)
+  ansible.builtin.include_role:
+    name: vllm
+    tasks_from: provision_stack.yml
+  tags: [spark, stack, vllm_stack]
+  when: spark_provision_vllm_stack | default(false) | bool
+
+- name: Phase — report API endpoint (leader, after stack)
+  ansible.builtin.include_role:
+    name: vllm
+    tasks_from: report_leader_endpoint.yml
+  tags: [spark, stack, report]
+  when:
+    - spark_provision_vllm_stack | default(false) | bool
+    - inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Phase — Hugging Face CLI + optional prefetch
+  ansible.builtin.include_role:
+    name: hf_spark
+  tags: [spark, hf, hf_prefetch]
+  when: spark_provision_hf | default(false) | bool
+
+- name: Phase — Docker-based vLLM (spark-vllm-docker / systemd)
+  ansible.builtin.include_role:
+    name: vllm_docker_stack
+  tags: [spark, docker_vllm]
+  when: spark_provision_docker_vllm | default(false) | bool
+
+- name: Phase — verify Ray cluster
+  ansible.builtin.include_role:
+    name: vllm
+    tasks_from: verify_ray.yml
+  tags: [spark, verify]
+  when: spark_provision_verify_ray | default(false) | bool
+
+- name: Phase — diagnostics (Docker + HF cache probes)
+  ansible.builtin.include_role:
+    name: spark_diagnostics
+  tags: [spark, diagnostics, probe]
+  when: spark_provision_diagnostics | default(false) | bool

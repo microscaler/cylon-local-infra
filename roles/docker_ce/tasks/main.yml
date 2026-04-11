@@ -1,0 +1,59 @@
+---
+# Install Docker Engine (CE) from download.docker.com — suitable for dev hosts (buildx, compose, act, Kind).
+
+- name: Map dpkg architecture to Docker apt arch
+  ansible.builtin.set_fact:
+    docker_deb_arch: >-
+      {{
+        {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(ansible_architecture, ansible_architecture)
+      }}
+
+- name: Gather installed packages (for conflict check)
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Refuse to install CE while ubuntu docker.io is present
+  ansible.builtin.fail:
+    msg: >
+      ubuntu package docker.io is installed. Remove it first (see docs/docker-cleanup.md Path A),
+      then re-run this role.
+  when:
+    - docker_ce_enforce_no_docker_io | default(true) | bool
+    - "'docker.io' in ansible_facts.packages"
+
+- name: Install prerequisites for apt HTTPS
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+
+- name: Ensure apt keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Install Docker official GPG keyring
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+    executable: /bin/bash
+
+- name: Configure Docker CE apt repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/docker.list
+    mode: "0644"
+    content: |
+      deb [arch={{ docker_deb_arch }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ docker_ce_ubuntu_release }} {{ docker_ce_channel }}
+
+- name: Install Docker CE and plugins (buildx, compose)
+  ansible.builtin.apt:
+    name: "{{ docker_ce_packages }}"
+    state: present
+    update_cache: true

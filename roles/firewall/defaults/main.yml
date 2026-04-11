@@ -1,0 +1,14 @@
+# Firewall (ufw) for dev host. Default: deny incoming, allow outgoing.
+# Inbound: SSH + listed TCP ports.
+firewall_default_incoming: deny
+firewall_default_outgoing: allow
+# TCP ports to allow inbound from anywhere (HTTP/HTTPS and dev services)
+firewall_allow_tcp_ports: [22, 80, 8080, 5000, 5001, 10350]
+# Optional: explicit allows from a trusted LAN (e.g. home/office subnet). Empty = skip.
+# Example: firewall_trusted_lan_cidr: "192.168.1.0/24"
+firewall_trusted_lan_cidr: ""
+# Ports to open to trusted LAN only (used when firewall_trusted_lan_cidr is set). Integers or Jinja ints.
+firewall_trusted_lan_tcp_ports: []
+# Spark QSFP interconnect (link-local): allow inbound from this CIDR for Ray/vLLM node-to-node traffic.
+# Ray uses many dynamic TCP ports (not only 6379 / worker range). Empty = skip.
+firewall_spark_interconnect_cidr: ""

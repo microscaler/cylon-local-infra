@@ -1,0 +1,39 @@
+---
+# Deploy Ray worker joining leader over interconnect (non-leader Sparks). Expects spark_interconnect_ip and spark_ray_head_socket.
+
+- name: Ray worker stack (tagged for vllm_stack / stack)
+  tags: [stack, vllm_stack]
+  block:
+    - name: Gather vLLM runtime library paths and cache dirs
+      ansible.builtin.import_tasks: api_runtime_facts.yml
+
+    - name: Deploy Ray worker wrapper script
+      ansible.builtin.template:
+        src: ray-worker.sh.j2
+        dest: "{{ vllm_ray_worker_script }}"
+        mode: "0755"
+        owner: "{{ vllm_run_user if (vllm_run_user | default('') | length > 0) else omit }}"
+        group: "{{ vllm_run_user if (vllm_run_user | default('') | length > 0) else omit }}"
+      notify: reload systemd
+
+    - name: Deploy Ray worker systemd unit
+      ansible.builtin.template:
+        src: ray-worker.service.j2
+        dest: /etc/systemd/system/ray-worker.service
+        mode: "0644"
+      notify: reload systemd
+
+    - name: Flush handlers (systemd reload) before starting Ray worker
+      ansible.builtin.meta: flush_handlers
+
+    - name: Clear failed state for Ray worker unit (if any)
+      ansible.builtin.command: systemctl reset-failed ray-worker
+      failed_when: false
+      changed_when: false
+
+    - name: Ensure Ray worker service is started and enabled
+      ansible.builtin.systemd:
+        name: ray-worker
+        state: started
+        enabled: true
+        daemon_reload: true

@@ -1,0 +1,48 @@
+---
+# Hugging Face CLI + PATH for the nvidia user (vLLM venv).
+
+- name: Ensure vLLM venv tree owned by runtime user
+  ansible.builtin.file:
+    path: "{{ vllm_venv_path }}"
+    state: directory
+    owner: "{{ spark_runtime_user }}"
+    group: "{{ spark_runtime_user }}"
+    recurse: true
+
+# transformers pins huggingface-hub<1.0; 1.x drops/ignores [cli] extra and breaks both CLIs + deps.
+- name: Ensure nvidia cache dirs for pip and HF (writable as runtime user)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ spark_runtime_user }}"
+    group: "{{ spark_runtime_user }}"
+    mode: "0755"
+  loop:
+    - "{{ spark_runtime_home }}/.cache"
+    - "{{ spark_runtime_home }}/.cache/pip"
+    - "{{ hf_home }}"
+
+- name: Install huggingface_hub with CLI extras in vLLM venv
+  ansible.builtin.pip:
+    name: "huggingface_hub[cli]>=0.34,<1.0"
+    state: present
+    virtualenv: "{{ vllm_venv_path }}"
+  become: true
+  become_user: "{{ spark_runtime_user }}"
+  environment:
+    HOME: "{{ spark_runtime_home }}"
+
+- name: Login shell PATH and HF_HOME for nvidia (hf; huggingface-cli deprecated upstream)
+  ansible.builtin.copy:
+    dest: /etc/profile.d/cylon-nvidia-vllm.sh
+    mode: "0644"
+    content: |
+      # Managed by Ansible (cylon-local-infra roles/hf_spark) — vLLM venv tools for user nvidia
+      if [ "$(id -un)" = "nvidia" ]; then
+        export PATH="{{ vllm_venv_path }}/bin:$PATH"
+        export HF_HOME="${HF_HOME:-{{ hf_home }}}"
+      fi
+
+- name: Include Hugging Face model prefetch list
+  ansible.builtin.include_tasks: prefetch.yml
+  when: hf_prefetch_models | default([]) | length > 0

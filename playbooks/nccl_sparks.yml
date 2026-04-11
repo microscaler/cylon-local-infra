@@ -1,0 +1,302 @@
+---
+# Build and optionally test NCCL on two DGX Sparks (idempotent).
+# Prerequisites: Connect two Sparks (enp1s0f0np0 up). Key exchange runs Spark-to-Spark
+# over 169.254.0.0/16 (link-local, only between Sparks), not from the Ansible controller.
+#
+# Optional password for ssh-copy-id (Spark-to-Spark over interconnect): only used if the playbook's
+# SSH probe (nvidia -> peer interconnect `ls`) fails. When keys already work, omit the password.
+#   ansible-playbook playbooks/nccl_sparks.yml -e nccl_test_user_password=YOUR_PASSWORD
+#
+#   ansible-playbook playbooks/nccl_sparks.yml                    # build + test
+#   ansible-playbook playbooks/nccl_sparks.yml --skip-tags nccl_test   # build only
+#   ansible-playbook playbooks/nccl_sparks.yml -e nccl_interface=enp1s0f1np1
+#   ansible-playbook playbooks/nccl_sparks.yml --tags discover_sparks  # deploy discover-sparks script + avahi-utils
+#
+# Requires nccl_test_user (default nvidia) to exist — run playbooks/provision_sparks.yml first, or rely on the play below.
+
+- name: Ensure sudoers and users on sparks (nvidia + operators)
+  hosts: sparks
+  roles:
+    - sudoers
+
+- name: Deploy discover-sparks script and avahi-utils (optional; run script manually on one Spark as nccl_test_user)
+  hosts: sparks
+  tags:
+    - discover_sparks
+  tasks:
+    - name: Install avahi-utils for discover-sparks
+      ansible.builtin.apt:
+        name: avahi-utils
+        state: present
+        update_cache: true
+
+    - name: Deploy discover-sparks.sh for nccl_test_user
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/discover-sparks.sh"
+        dest: "/home/{{ nccl_test_user }}/discover-sparks.sh"
+        mode: "0755"
+        owner: "{{ nccl_test_user }}"
+        group: "{{ nccl_test_user }}"
+
+- name: Build NCCL and nccl-tests on all Sparks
+  hosts: sparks
+  roles:
+    - nccl_sparks
+
+# Passwordless SSH for nccl_test_user (required for mpirun). Default: copy existing /root/.ssh keys
+# to nccl_test_user and merge every Spark's pubkey into each nvidia authorized_keys (reuses prior root
+# key exchange). Set nccl_reuse_root_ssh_keys: false to generate a dedicated ed25519. Optional
+# ssh-copy-id over interconnect still works if you pass nccl_test_user_password.
+- name: Ensure nccl_test_user has SSH keys (reuse root or generate)
+  hosts: sparks
+  tasks:
+    - name: Ensure .ssh directory for nccl_test_user
+      ansible.builtin.file:
+        path: "/home/{{ nccl_test_user }}/.ssh"
+        state: directory
+        mode: "0700"
+        owner: "{{ nccl_test_user }}"
+        group: "{{ nccl_test_user }}"
+
+    - name: Stat root SSH private keys (reuse when nccl_reuse_root_ssh_keys)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /root/.ssh/id_ed25519
+        - /root/.ssh/id_rsa
+      register: nccl_root_key_stats
+
+    - name: Set facts for root key paths
+      ansible.builtin.set_fact:
+        nccl_root_has_ed25519: "{{ nccl_root_key_stats.results[0].stat.exists | default(false) }}"
+        nccl_root_has_rsa: "{{ nccl_root_key_stats.results[1].stat.exists | default(false) }}"
+
+    - name: Copy root ED25519 key pair to nccl_test_user
+      when:
+        - nccl_reuse_root_ssh_keys | default(true)
+        - nccl_root_has_ed25519 | bool
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        remote_src: true
+        owner: "{{ nccl_test_user }}"
+        group: "{{ nccl_test_user }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: /root/.ssh/id_ed25519, dest: "/home/{{ nccl_test_user }}/.ssh/id_ed25519", mode: "0600" }
+        - { src: /root/.ssh/id_ed25519.pub, dest: "/home/{{ nccl_test_user }}/.ssh/id_ed25519.pub", mode: "0644" }
+
+    - name: Copy root RSA key pair to nccl_test_user
+      when:
+        - nccl_reuse_root_ssh_keys | default(true)
+        - not (nccl_root_has_ed25519 | bool)
+        - nccl_root_has_rsa | bool
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        remote_src: true
+        owner: "{{ nccl_test_user }}"
+        group: "{{ nccl_test_user }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: /root/.ssh/id_rsa, dest: "/home/{{ nccl_test_user }}/.ssh/id_rsa", mode: "0600" }
+        - { src: /root/.ssh/id_rsa.pub, dest: "/home/{{ nccl_test_user }}/.ssh/id_rsa.pub", mode: "0644" }
+
+    - name: Set identity basename when keys were copied from root
+      ansible.builtin.set_fact:
+        nccl_key_basename: "{{ 'id_ed25519' if (nccl_root_has_ed25519 | bool) else 'id_rsa' }}"
+      when:
+        - nccl_reuse_root_ssh_keys | default(true)
+        - (nccl_root_has_ed25519 | bool) or (nccl_root_has_rsa | bool)
+
+    - name: Ensure SSH key exists for nccl_test_user (ed25519) when root has no key to reuse
+      ansible.builtin.shell: |
+        ssh-keygen -t ed25519 -N "" -f /home/{{ nccl_test_user }}/.ssh/id_ed25519
+      args:
+        creates: "/home/{{ nccl_test_user }}/.ssh/id_ed25519"
+      become: true
+      become_user: "{{ nccl_test_user }}"
+      when: nccl_key_basename is not defined
+
+    - name: Set identity basename after generated key
+      ansible.builtin.set_fact:
+        nccl_key_basename: id_ed25519
+      when: nccl_key_basename is not defined
+
+    - name: Slurp nccl_test_user public key for cluster authorized_keys
+      ansible.builtin.slurp:
+        src: "/home/{{ nccl_test_user }}/.ssh/{{ nccl_key_basename }}.pub"
+      register: nccl_pub_slurp
+
+    - name: Publish cluster pubkey line for peer authorization
+      ansible.builtin.set_fact:
+        nccl_cluster_pubkey_line: "{{ nccl_pub_slurp.content | b64decode | trim }}"
+
+- name: Merge all Sparks' pubkeys into nccl_test_user authorized_keys
+  hosts: sparks
+  tasks:
+    - name: Cluster SSH pubkeys (managed block; other authorized_keys lines kept outside block)
+      ansible.builtin.blockinfile:
+        path: "/home/{{ nccl_test_user }}/.ssh/authorized_keys"
+        marker: "# {mark} ANSIBLE MANAGED nccl_sparks cluster"
+        block: |
+          {% for h in groups['sparks'] | sort %}
+          {{ hostvars[h].nccl_cluster_pubkey_line }}
+          {% endfor %}
+        create: true
+        mode: "0600"
+        owner: "{{ nccl_test_user }}"
+        group: "{{ nccl_test_user }}"
+
+# 169.254.0.0/16 is link-local: only reachable between the two Sparks, not from the Ansible controller.
+- name: Gather interconnect IPs for NCCL test and key exchange
+  hosts: sparks
+  gather_facts: true
+  tasks:
+    - name: Get IPv4 for NCCL interface
+      ansible.builtin.shell: |
+        ip -4 -o addr show dev {{ nccl_interface }} 2>/dev/null | awk '{print $4}' | cut -d/ -f1
+      register: nccl_ip_out
+      changed_when: false
+      failed_when: nccl_ip_out.rc != 0 or (nccl_ip_out.stdout | trim | length) == 0
+    - name: Set interconnect IP fact
+      ansible.builtin.set_fact:
+        nccl_interconnect_ip: "{{ nccl_ip_out.stdout | trim }}"
+
+# Key exchange over interconnect (Spark-to-Spark): probe first; only run ssh-copy-id if probe fails
+# and nccl_test_user_password is set. If SSH already works (e.g. reused root keys), nothing to do here.
+- name: Key exchange between Sparks over interconnect (Spark-to-Spark)
+  hosts: sparks
+  gather_facts: false
+  tasks:
+    - name: Resolve peer Spark for interconnect SSH
+      ansible.builtin.set_fact:
+        nccl_peer_spark: "{{ (groups['sparks'] | sort)[1] if inventory_hostname == (groups['sparks'] | sort)[0] else (groups['sparks'] | sort)[0] }}"
+
+    - name: Probe passwordless SSH to peer (interconnect) — remote ls
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -oBatchMode=yes
+          - -oConnectTimeout=10
+          - -oUserKnownHostsFile=/dev/null
+          - -oStrictHostKeyChecking=no
+          - "-oIdentityFile=/home/{{ nccl_test_user }}/.ssh/{{ nccl_key_basename }}"
+          - "{{ nccl_test_user }}@{{ hostvars[nccl_peer_spark].nccl_interconnect_ip }}"
+          - ls
+      become: true
+      become_user: "{{ nccl_test_user }}"
+      register: nccl_peer_ssh_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Stop when SSH to peer failed and no password given for ssh-copy-id
+      ansible.builtin.fail:
+        msg: >-
+          Passwordless SSH from {{ inventory_hostname }} to {{ nccl_peer_spark }} ({{ hostvars[nccl_peer_spark].nccl_interconnect_ip }}) failed.
+          Fix keys manually or re-run with -e nccl_test_user_password=... to run ssh-copy-id over the interconnect.
+      when:
+        - nccl_peer_ssh_probe.rc != 0
+        - nccl_test_user_password is not defined or (nccl_test_user_password | length) == 0
+
+    - name: Install sshpass and push key to peer when probe failed (password required above)
+      when:
+        - nccl_peer_ssh_probe.rc != 0
+        - nccl_test_user_password is defined
+        - (nccl_test_user_password | length) > 0
+      block:
+        - name: Install sshpass for non-interactive ssh-copy-id
+          ansible.builtin.apt:
+            name: sshpass
+            state: present
+            update_cache: true
+
+        - name: Push this Spark's key to the other Spark over interconnect (as nccl_test_user)
+          ansible.builtin.shell: |
+            sshpass -p '{{ nccl_test_user_password }}' ssh-copy-id \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i /home/{{ nccl_test_user }}/.ssh/{{ nccl_key_basename }}.pub \
+              {{ nccl_test_user }}@{{ hostvars[nccl_peer_spark].nccl_interconnect_ip }}
+          args:
+            executable: /bin/bash
+          become: true
+          become_user: "{{ nccl_test_user }}"
+          no_log: true
+
+    - name: Re-probe SSH to peer after optional ssh-copy-id
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -oBatchMode=yes
+          - -oConnectTimeout=10
+          - -oUserKnownHostsFile=/dev/null
+          - -oStrictHostKeyChecking=no
+          - "-oIdentityFile=/home/{{ nccl_test_user }}/.ssh/{{ nccl_key_basename }}"
+          - "{{ nccl_test_user }}@{{ hostvars[nccl_peer_spark].nccl_interconnect_ip }}"
+          - ls
+      become: true
+      become_user: "{{ nccl_test_user }}"
+      register: nccl_peer_ssh_probe_retry
+      changed_when: false
+      failed_when: false
+      when: nccl_peer_ssh_probe.rc != 0
+
+    - name: Fail if SSH to peer still fails after ssh-copy-id
+      ansible.builtin.fail:
+        msg: >-
+          SSH from {{ inventory_hostname }} to {{ nccl_peer_spark }} still failed after ssh-copy-id (rc={{ nccl_peer_ssh_probe_retry.rc | default('n/a') }}).
+      when:
+        - nccl_peer_ssh_probe.rc != 0
+        - nccl_peer_ssh_probe_retry is defined
+        - nccl_peer_ssh_probe_retry.rc != 0
+
+- name: Run NCCL all_gather_perf across both nodes
+  hosts: sparks
+  gather_facts: false
+  tags:
+    - nccl_test
+  tasks:
+    - name: Verify passwordless SSH from first Spark to second (nccl_test_user)
+      ansible.builtin.command:
+        cmd: >
+          ssh -o BatchMode=yes -o ConnectTimeout=10
+          -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
+          -o IdentityFile=/home/{{ nccl_test_user }}/.ssh/{{ hostvars[inventory_hostname].nccl_key_basename }}
+          {{ nccl_test_user }}@{{ hostvars[sparks_ordered[1]].nccl_interconnect_ip }} true
+      when: inventory_hostname == sparks_ordered[0]
+      vars:
+        sparks_ordered: "{{ groups['sparks'] | sort }}"
+      become: true
+      become_user: "{{ nccl_test_user }}"
+      register: nccl_ssh_check
+      changed_when: false
+
+    - name: Run NCCL test from first Spark as nccl_test_user (avoids mpirun root warning)
+      ansible.builtin.shell: |
+        export CUDA_HOME={{ cuda_home }}
+        export MPI_HOME={{ mpi_home }}
+        export NCCL_HOME={{ nccl_build_home }}
+        export LD_LIBRARY_PATH=$NCCL_HOME/lib:$CUDA_HOME/lib64:$MPI_HOME/lib
+        export UCX_NET_DEVICES={{ nccl_interface }}
+        export NCCL_SOCKET_IFNAME={{ nccl_interface }}
+        export OMPI_MCA_btl_tcp_if_include={{ nccl_interface }}
+        mpirun -np 2 -H {{ hostvars[sparks_ordered[0]].nccl_interconnect_ip }}:1,{{ hostvars[sparks_ordered[1]].nccl_interconnect_ip }}:1 \
+          --mca plm_rsh_agent "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o IdentityFile=/home/{{ nccl_test_user }}/.ssh/{{ hostvars[sparks_ordered[0]].nccl_key_basename }}" \
+          -x LD_LIBRARY_PATH \
+          {{ nccl_tests_home }}/build/all_gather_perf
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == sparks_ordered[0]
+      vars:
+        sparks_ordered: "{{ groups['sparks'] | sort }}"
+      become: true
+      become_user: "{{ nccl_test_user }}"
+      register: nccl_test_out
+      changed_when: false
+
+    - name: Show NCCL test output
+      ansible.builtin.debug:
+        var: nccl_test_out.stdout_lines
+      when: inventory_hostname == (groups['sparks'] | sort)[0]
+      tags:
+        - nccl_test

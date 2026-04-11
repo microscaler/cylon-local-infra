@@ -1,0 +1,12 @@
+---
+# Hint for OpenAI clients (was playbooks/vllm_stacked_bringup_sparks.yml tail play).
+
+- name: Show OpenAI-compatible base URL (leader default-route IPv4)
+  vars:
+    leader_api_ip: "{{ (ansible_default_ipv4 | default({})).address | default('', true) }}"
+  ansible.builtin.debug:
+    msg:
+      - "Leader: {{ inventory_hostname }} | model: {{ vllm_default_model }}"
+      - "API base for clients: http://{{ leader_api_ip if leader_api_ip | length > 0 else '<see-ip-addr-on-host>' }}:{{ vllm_api_port | default(8080) }}/v1"
+      - "curl -sS http://{{ leader_api_ip if leader_api_ip | length > 0 else 'LEADER_IP' }}:{{ vllm_api_port | default(8080) }}/v1/models"
+  when: inventory_hostname == (groups['sparks'] | sort | first)

@@ -1,0 +1,18 @@
+---
+# APT refresh + upgrade on Sparks (was playbooks/apt_upgrade_sparks.yml).
+
+- name: Update apt package cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: "{{ spark_apt_cache_valid_time | default(0) | int }}"
+
+- name: Upgrade installed packages (non-interactive)
+  ansible.builtin.apt:
+    upgrade: "{{ spark_apt_upgrade_mode | default('safe') }}"
+    force_apt_get: true
+  when: spark_apt_upgrade_enabled | default(true) | bool
+
+- name: Remove unused packages (optional)
+  ansible.builtin.apt:
+    autoremove: true
+  when: spark_apt_autoremove | default(false) | bool

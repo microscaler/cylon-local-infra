@@ -1,0 +1,65 @@
+---
+# vLLM on DGX Spark: Python venv + vLLM with CUDA. Idempotent.
+
+vllm_venv_path: "/opt/vllm/venv"
+vllm_python: "python3"
+vllm_package: "vllm"
+# Optional extra PyPI specs after vLLM/Ray (e.g. ["transformers>=4.51.0"] for Gemma 4 `gemma4` config).
+vllm_extra_pip_packages: []
+# If true, pip install Transformers from GitHub after vLLM (overrides PyPI; needs `git` and network). Use when `gemma4` is missing from installed wheels.
+vllm_transformers_from_git: false
+vllm_transformers_git_url: "git+https://github.com/huggingface/transformers.git"
+# Pin Ray for multi-node (e.g. ray==2.54.0); override in group_vars/sparks.yml
+vllm_ray_package: ray
+vllm_torch_extra_index_url: "https://download.pytorch.org/whl/cu124"
+# Non-empty: create venv and pip install as this user; chown /opt parent; systemd User= (see serve.yml templates).
+vllm_run_user: ""
+# Home for pip cache and systemd WorkingDirectory when vllm_run_user is set.
+vllm_working_directory: "/root"
+vllm_hf_home: "/root/.cache/huggingface"
+
+vllm_serve_enabled: false
+vllm_default_model: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+# Optional extra api_server CLI tokens (list). Example: ["--max-model-len", "32768"]
+vllm_api_server_extra_args: []
+# Optional: e.g. "fastsafetensors" (spark-vllm-docker uses this — faster weight load on Spark; needs `fastsafetensors` pip). Empty = omit flag.
+vllm_load_format: ""
+# Extra exports for Ray + vLLM on interconnect (NCCL/RAY_*). Align with ConnectX twins — see docs/vllm-timebox-and-pivot.md.
+vllm_distributed_extra_env: {}
+# Bind API on all interfaces so LAN clients can reach the service (not only 127.0.0.1).
+vllm_api_host: "0.0.0.0"
+vllm_api_port: 8080
+# Ray GCS port (head + worker address; firewall in sparks.yml)
+vllm_ray_port: 6379
+# Pin worker raylet port range so ufw can allow Spark↔Spark TCP (see firewall_spark_interconnect_*).
+# Must not include 10001 (client_server). Keep max modest — a huge range overlaps Ray’s other
+# dynamically chosen ports (e.g. dashboard_agent_http in the 50k range), which aborts startup.
+vllm_ray_min_worker_port: 10002
+vllm_ray_max_worker_port: 19999
+# Skip torch.compile / Triton inductor paths (avoids gcc/triton build failures on some aarch64 + GB10 stacks).
+vllm_enforce_eager: false
+vllm_cuda_lib_path: "{{ cuda_home | default('/usr/local/cuda') }}/lib64:{{ cuda_home | default('/usr/local/cuda') }}/lib"
+# Scripts under this directory (owned by vllm_run_user when set)
+vllm_install_script_dir: "/opt/vllm"
+vllm_wrapper_script: "{{ vllm_install_script_dir }}/run-api-server.sh"
+vllm_wrapper_script_stacked: "{{ vllm_install_script_dir }}/run-api-server-stacked.sh"
+vllm_ray_head_script: "{{ vllm_install_script_dir }}/run-ray-head.sh"
+vllm_ray_worker_script: "{{ vllm_install_script_dir }}/run-ray-worker.sh"
+# Stacked 2-node: tensor parallel size (GPUs across Sparks)
+vllm_tensor_parallel_size: 2
+# Seconds to wait after Ray head/worker before starting vLLM (worker join latency)
+vllm_stack_vllm_start_delay_sec: 25
+# vLLM waits this long for the engine before failing startup (default in vLLM is 600s — too low for large TP loads). 1800 = 30 min.
+vllm_engine_ready_timeout_sec: 1800
+# systemd SIGTERM grace before SIGKILL on stop (large Ray-backed engines can be slow to exit). 3600 = 60 min.
+vllm_stacked_systemd_stop_timeout_sec: 3600
+# Stop/disable single-node vllm.service on leader when deploying the stack (avoids port 8080 conflict)
+vllm_stack_stop_single_node_service: true
+# Before stacked Ray + vllm-stacked: stop units, ray stop -f, optional /tmp/ray session cleanup (reduces stale node_* in ray status)
+vllm_ray_reset_state_before_stack: true
+vllm_ray_remove_session_dirs: true
+# Optional override for ray stop -f (default = vllm_run_user or nvidia)
+# vllm_ray_reset_run_user: nvidia
+# Set in serve.yml from venv (torch/lib holds libtorch, libc10, etc. for vllm._C).
+vllm_torch_lib_path: ""
+vllm_skip_cudart_check: false

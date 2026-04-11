@@ -1,0 +1,13 @@
+- name: Restart Docker
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+  listen: "restart docker"
+
+- name: Clear BuildKit and restart Docker
+  ansible.builtin.shell: |
+    systemctl stop docker 2>/dev/null || true
+    rm -rf /var/lib/docker/buildkit
+    systemctl start docker
+  changed_when: true
+  listen: "docker recover buildkit"

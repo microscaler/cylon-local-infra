@@ -1,0 +1,14 @@
+# Users to grant passwordless sudo via /etc/sudoers.d/
+# Each entry: { name: username, rule: "optional sudoers line", groups: [optional extra groups] }
+# If rule is omitted, uses "username ALL=(ALL) NOPASSWD:ALL"
+# If groups is omitted, uses sudoers_user_groups below for that user.
+sudoers_users:
+  - name: casibbald
+    # rule: "casibbald ALL=(ALL) NOPASSWD:ALL"  # default when omitted
+
+# Optional: ensure these users exist (create if missing)
+sudoers_ensure_users: true
+# Additional groups for created users (e.g. sudo, docker)
+sudoers_user_groups: [sudo]
+# Login shell for ensured users (override per entry with shell: /path)
+sudoers_user_shell: /bin/bash

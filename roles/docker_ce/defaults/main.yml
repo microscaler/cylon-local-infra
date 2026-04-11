@@ -1,0 +1,18 @@
+---
+# Docker Engine from Docker’s official Ubuntu repo (CE + containerd.io + buildx + compose).
+# https://docs.docker.com/engine/install/ubuntu/
+
+docker_ce_channel: stable
+
+# Override if your Ubuntu codename is not yet in Docker’s repo (try "noble" or "jammy").
+docker_ce_ubuntu_release: "{{ docker_ce_release_override | default(ansible_distribution_release) }}"
+
+docker_ce_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# Fail the role if ubuntu docker.io is still installed (mixed stack).
+docker_ce_enforce_no_docker_io: true

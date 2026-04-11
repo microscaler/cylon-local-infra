@@ -1,0 +1,7 @@
+kind_version: "v0.31.0"
+kind_install_path: "/usr/local/bin/kind"
+# Default node image for kind create cluster (Kubernetes 1.34.3)
+kind_node_image: "kindest/node:v1.34.3"
+kind_cluster_name: "kind"
+# Set to true to create cluster with kind_node_image if it doesn't exist
+kind_create_cluster: false

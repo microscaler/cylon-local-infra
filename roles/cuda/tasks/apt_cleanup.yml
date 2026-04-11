@@ -1,0 +1,19 @@
+---
+# Run this before any apt use to fix conflicting CUDA Signed-By sources (same URI, two keyrings).
+
+- name: Remove conflicting CUDA apt sources (cuda-archive-keyring duplicates)
+  ansible.builtin.shell: |
+    removed=0
+    shopt -s nullglob
+    for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+      if [ -f "$f" ] && grep -q 'cuda-archive-keyring\.gpg' "$f" 2>/dev/null; then
+        rm -f "$f"
+        removed=1
+      fi
+    done
+    [ "$removed" -eq 1 ]
+  args:
+    executable: /bin/bash
+  register: cuda_old_sources_removed
+  changed_when: cuda_old_sources_removed.rc == 0
+  failed_when: false

@@ -1,0 +1,27 @@
+[Unit]
+Description=Ray worker for stacked vLLM (joins leader over interconnect)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+{% if vllm_run_user | default('') | length > 0 %}
+User={{ vllm_run_user }}
+Group={{ vllm_run_user }}
+WorkingDirectory={{ vllm_working_directory }}
+{% endif %}
+Environment=HF_HOME={{ vllm_hf_home }}
+Environment=VLLM_HOST_IP={{ spark_interconnect_ip }}
+{% for _k, _v in (vllm_distributed_extra_env | default({}) | dictsort) %}
+Environment={{ _k }}={{ _v }}
+{% endfor %}
+ExecStart={{ vllm_ray_worker_script }}
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ray-worker
+
+[Install]
+WantedBy=multi-user.target

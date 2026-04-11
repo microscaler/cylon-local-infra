@@ -1,0 +1,129 @@
+---
+# NCCL on DGX Spark: deps, clone/build NCCL + nccl-tests as nccl_test_user (not root).
+# Run NCCL test via playbook (see nccl_sparks.yml) with tag nccl_test.
+#
+# Skip recompile when libnccl.so exists AND the nccl git checkout is exactly nccl_version
+# (avoids slow make on every playbook run). Pass -e nccl_force_recompile=true to rebuild NCCL.
+# NCCL builds a shared library, not a standard `nccl` CLI; optional --version probes run when binaries exist.
+
+- name: Install NCCL build dependencies
+  ansible.builtin.apt:
+    name:
+      - libopenmpi-dev
+      - git
+      - build-essential
+    state: present
+    update_cache: true
+
+- name: Check if NCCL library already exists
+  ansible.builtin.stat:
+    path: "{{ nccl_build_home }}/lib/libnccl.so"
+  register: nccl_lib_stat
+  changed_when: false
+
+- name: Check if nccl-tests binary already exists
+  ansible.builtin.stat:
+    path: "{{ nccl_tests_home }}/build/all_gather_perf"
+  register: nccl_tests_bin_stat
+  changed_when: false
+
+- name: Force NCCL recompile (skip reuse detection)
+  ansible.builtin.set_fact:
+    nccl_skip_compile: false
+  when: nccl_force_recompile | default(false) | bool
+
+- name: Detect whether existing NCCL tree matches nccl_version (skip git + compile)
+  ansible.builtin.shell: |
+    set -eu
+    LIB="{{ nccl_build_home }}/lib/libnccl.so"
+    if [ ! -f "$LIB" ]; then exit 1; fi
+    if [ ! -d "{{ nccl_home }}/.git" ]; then exit 1; fi
+    TAG=$(git -C "{{ nccl_home }}" describe --tags --exact-match 2>/dev/null || true)
+    test "$TAG" = "{{ nccl_version }}"
+  register: nccl_reuse_check
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ nccl_test_user }}"
+  when: not (nccl_force_recompile | default(false) | bool)
+
+- name: Set fact — skip NCCL compile when reuse check passed
+  ansible.builtin.set_fact:
+    nccl_skip_compile: "{{ nccl_reuse_check.rc == 0 }}"
+  when: not (nccl_force_recompile | default(false) | bool)
+
+- name: Optional — try nccl / nccl-tests binary --version when present (informational)
+  ansible.builtin.shell: |
+    set +e
+    for f in "{{ nccl_build_home }}/bin/nccl" "{{ nccl_build_home }}/bin/nccl-tests" "{{ nccl_home }}/build/bin/nccl"; do
+      if [ -x "$f" ]; then
+        out=$("$f" --version 2>&1) && { echo "$out"; exit 0; }
+      fi
+    done
+    if [ -x "{{ nccl_tests_home }}/build/all_gather_perf" ]; then
+      out=$("{{ nccl_tests_home }}/build/all_gather_perf" --version 2>&1) && { echo "$out"; exit 0; }
+    fi
+    exit 0
+  register: nccl_optional_version_probe
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ nccl_test_user }}"
+  when:
+    - nccl_skip_compile | default(false) | bool
+    - nccl_version_probe | default(true) | bool
+
+- name: Decide whether to skip nccl-tests compile (NCCL unchanged + binary present)
+  ansible.builtin.set_fact:
+    nccl_tests_skip_build: "{{ (nccl_skip_compile | default(false) | bool) and (nccl_tests_bin_stat.stat.exists | bool) and not (nccl_tests_force_rebuild | default(false) | bool) }}"
+
+- name: Clone NCCL repo
+  ansible.builtin.git:
+    repo: https://github.com/NVIDIA/nccl.git
+    dest: "{{ nccl_home }}"
+    version: "{{ nccl_version }}"
+    force: false
+  register: nccl_git
+  become: true
+  become_user: "{{ nccl_test_user }}"
+  when: not (nccl_skip_compile | default(false) | bool)
+
+- name: Build NCCL from source
+  ansible.builtin.shell: |
+    cd {{ nccl_home }} && make -j src.build NVCC_GENCODE='{{ nccl_gencode }}'
+  args:
+    creates: "{{ nccl_build_home }}/lib/libnccl.so"
+  when: not (nccl_skip_compile | default(false) | bool)
+  become: true
+  become_user: "{{ nccl_test_user }}"
+  environment:
+    HOME: "{{ nccl_build_user_home }}"
+    CUDA_HOME: "{{ cuda_home }}"
+
+- name: Clone nccl-tests repo
+  ansible.builtin.git:
+    repo: https://github.com/NVIDIA/nccl-tests.git
+    dest: "{{ nccl_tests_home }}"
+    update: true
+  become: true
+  become_user: "{{ nccl_test_user }}"
+  when: not (nccl_tests_skip_build | default(false) | bool)
+
+- name: Build nccl-tests with MPI
+  ansible.builtin.shell: |
+    export CUDA_HOME={{ cuda_home }}
+    export MPI_HOME={{ mpi_home }}
+    export NCCL_HOME={{ nccl_build_home }}
+    export LD_LIBRARY_PATH=$NCCL_HOME/lib:$CUDA_HOME/lib64:$MPI_HOME/lib
+    cd {{ nccl_tests_home }} && make MPI=1
+  args:
+    creates: "{{ nccl_tests_home }}/build/all_gather_perf"
+  when: not (nccl_tests_skip_build | default(false) | bool)
+  become: true
+  become_user: "{{ nccl_test_user }}"
+  environment:
+    HOME: "{{ nccl_build_user_home }}"
+    CUDA_HOME: "{{ cuda_home }}"
+    MPI_HOME: "{{ mpi_home }}"
+    NCCL_HOME: "{{ nccl_build_home }}"
+    LD_LIBRARY_PATH: "{{ nccl_build_home }}/lib:{{ cuda_home }}/lib64:{{ mpi_home }}/lib"

@@ -1,0 +1,78 @@
+---
+# Shared CUDA / PyTorch lib discovery and cache dirs for vLLM wrappers (single-node or stacked).
+
+- name: Find directory containing libcudart.so.12 or libcudart.so.13 (for LD_LIBRARY_PATH)
+  ansible.builtin.shell: |
+    for name in libcudart.so.12 libcudart.so.13; do
+      f=$(find /usr /usr/local /opt -name "$name" 2>/dev/null | head -1)
+      [ -z "$f" ] && f=$(find {{ cuda_home | default('/usr/local/cuda') }} -maxdepth 5 -name "$name" 2>/dev/null | head -1)
+      [ -n "$f" ] && { dirname "$f"; exit 0; }
+    done
+  register: vllm_cudart_dir_out
+  changed_when: false
+  failed_when: false
+
+- name: Set detected CUDA lib path for vLLM wrapper
+  ansible.builtin.set_fact:
+    vllm_cuda_lib_path: "{{ vllm_cudart_dir_out.stdout }}"
+  when: vllm_cudart_dir_out.stdout | length > 0
+
+- name: Resolve PyTorch lib directory as runtime user (libtorch, libc10 — required for vllm._C)
+  ansible.builtin.command:
+    argv:
+      - "{{ vllm_venv_path }}/bin/python"
+      - -c
+      - "import torch, os; print(os.path.join(torch.__path__[0], 'lib'))"
+  register: vllm_torch_lib_cmd_user
+  changed_when: false
+  become: true
+  become_user: "{{ vllm_run_user }}"
+  environment:
+    HOME: "{{ vllm_working_directory }}"
+  when: vllm_run_user | default('') | length > 0
+
+- name: Resolve PyTorch lib directory as root
+  ansible.builtin.command:
+    argv:
+      - "{{ vllm_venv_path }}/bin/python"
+      - -c
+      - "import torch, os; print(os.path.join(torch.__path__[0], 'lib'))"
+  register: vllm_torch_lib_cmd_root
+  changed_when: false
+  become: true
+  when: vllm_run_user | default('') | length == 0
+
+- name: Record PyTorch lib path for wrapper template
+  ansible.builtin.set_fact:
+    vllm_torch_lib_path: >-
+      {% if vllm_torch_lib_cmd_user is defined and (vllm_torch_lib_cmd_user.stdout | default('') | length > 0) -%}
+      {{ vllm_torch_lib_cmd_user.stdout | trim }}
+      {%- elif vllm_torch_lib_cmd_root is defined and (vllm_torch_lib_cmd_root.stdout | default('') | length > 0) -%}
+      {{ vllm_torch_lib_cmd_root.stdout | trim }}
+      {%- else -%}
+      {{ '' }}
+      {%- endif %}
+
+- name: Fail when no libcudart.so.12/13 found (install CUDA toolkit or set vllm_cuda_lib_path)
+  ansible.builtin.fail:
+    msg: "libcudart.so.12 or libcudart.so.13 not found under /usr, /usr/local, /opt. Install CUDA toolkit or set vllm_cuda_lib_path in group_vars to the directory containing libcudart and re-run."
+  when:
+    - vllm_cudart_dir_out.stdout | length == 0
+    - not (vllm_skip_cudart_check | default(false) | bool)
+
+- name: Ensure vLLM script install directory exists
+  ansible.builtin.file:
+    path: "{{ vllm_install_script_dir }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ vllm_run_user if (vllm_run_user | default('') | length > 0) else omit }}"
+    group: "{{ vllm_run_user if (vllm_run_user | default('') | length > 0) else omit }}"
+
+- name: Ensure Hugging Face cache directory exists for vLLM runtime user
+  ansible.builtin.file:
+    path: "{{ vllm_hf_home }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ vllm_run_user }}"
+    group: "{{ vllm_run_user }}"
+  when: vllm_run_user | default('') | length > 0

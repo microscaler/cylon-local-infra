@@ -1,0 +1,61 @@
+---
+# Read-only probes (was docker_probe.yml + hf_cache_probe.yml on sparks).
+
+- name: dpkg lines for docker, containerd, runc, moby, nv-docker
+  ansible.builtin.shell: |
+    set -o pipefail
+    dpkg -l 2>/dev/null | grep -E '^[a-z][a-z]\s+(docker|containerd|runc|moby|nv-docker)' || true
+  args:
+    executable: /bin/bash
+  register: probe_dpkg
+  changed_when: false
+
+- name: docker version
+  ansible.builtin.command: docker version
+  register: probe_docker_ver
+  changed_when: false
+  failed_when: false
+
+- name: Show Docker probe
+  ansible.builtin.debug:
+    msg:
+      - "host={{ inventory_hostname }}"
+      - "{{ probe_dpkg.stdout_lines | default([]) }}"
+      - "{{ probe_docker_ver.stdout_lines | default(['docker: not runnable']) }}"
+
+- name: Summarize HF caches (nvidia + root)
+  ansible.builtin.shell: |
+    set -e
+    summarize() {
+      base="$1"
+      label="$2"
+      if [ ! -d "$base" ]; then echo "${label}: (no directory)"; return; fi
+      echo "${label}: $(du -sh "$base" 2>/dev/null | awk '{print $1}')  $base"
+      if [ -d "$base/hub" ]; then
+        for m in "$base/hub"/models--*; do
+          [ -d "$m" ] || continue
+          name=$(basename "$m" | sed 's/^models--//;s/--/\//g')
+          sz=$(du -sh "$m" 2>/dev/null | awk '{print $1}')
+          echo "  - $name  ($sz)"
+        done
+      fi
+    }
+    summarize /home/nvidia/.cache/huggingface "nvidia"
+    summarize /root/.cache/huggingface "root"
+  args:
+    executable: /bin/bash
+  register: hf_probe
+  changed_when: false
+
+- name: Show HF_HOME in vllm systemd unit (if present)
+  ansible.builtin.shell: |
+    grep -E '^Environment=.*HF_HOME|^User=' /etc/systemd/system/vllm.service 2>/dev/null || echo "(no vllm.service or no HF_HOME line)"
+  register: hf_vllm_unit
+  changed_when: false
+
+- name: Show HF cache probe
+  ansible.builtin.debug:
+    msg:
+      - "{{ inventory_hostname }}"
+      - "{{ hf_probe.stdout_lines }}"
+      - "vllm.service: {{ hf_vllm_unit.stdout_lines }}"

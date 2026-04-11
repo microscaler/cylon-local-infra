@@ -1,0 +1,70 @@
+---
+# Idempotent Docker install and configuration for DGX Spark hosts (vLLM).
+# Install packages, configure daemon (optional), enable/start, BuildKit recovery, docker group.
+
+- name: Install Docker packages
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: true
+  register: docker_apt
+  when:
+    - docker_install_packages | default(true) | bool
+    - docker_packages | length > 0
+
+- name: Verify Docker engine is available (when not installing packages via apt)
+  ansible.builtin.command:
+    cmd: docker version
+  changed_when: false
+  when: not (docker_install_packages | default(true) | bool)
+
+- name: Ensure Docker config directory exists
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    mode: "0755"
+
+- name: Deploy Docker daemon configuration
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: "{{ docker_daemon_config | to_nice_json }}"
+    mode: "0644"
+  when: docker_daemon_config | length > 0
+  notify: "restart docker"
+
+- name: Ensure Docker service is enabled
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+  register: docker_service
+
+- name: Check if Docker is actually running
+  ansible.builtin.command: systemctl is-active docker
+  register: docker_active
+  changed_when: false
+  failed_when: false
+
+- name: Clear BuildKit and restart Docker when service failed (e.g. invalid database)
+  ansible.builtin.shell: |
+    systemctl stop docker 2>/dev/null || true
+    rm -rf /var/lib/docker/buildkit
+    systemctl start docker
+  when: docker_active.rc != 0
+  changed_when: true
+  register: docker_recovery
+
+- name: Assert Docker is active after recovery
+  ansible.builtin.command: systemctl is-active docker
+  register: docker_active_after
+  changed_when: false
+  failed_when: docker_active_after.stdout != "active"
+  when: docker_recovery is changed
+
+- name: Add users to docker group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_group_users }}"
+  when: docker_group_users | length > 0

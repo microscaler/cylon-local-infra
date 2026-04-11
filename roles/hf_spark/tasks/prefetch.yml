@@ -1,0 +1,23 @@
+---
+# Download model snapshots into HF_HOME (hub cache layout) as spark_runtime_user — same as:
+#   hf download <repo>   (preferred; argv below)
+#   huggingface-cli download <repo>   (deprecated by HF; equivalent downloads)
+# hf_prefetch_models: list of repo ids (strings) or dicts { repo: "...", revision: "..." optional }.
+#
+# argv must be a native list — avoid folded YAML (>-) around list-building Jinja or argv breaks.
+
+- name: Prefetch Hugging Face models into HF_HOME (hf download)
+  ansible.builtin.command:
+    argv: "{{ _hf_prefetch_argv }}"
+  environment:
+    HF_HOME: "{{ hf_home }}"
+    HOME: "{{ spark_runtime_home }}"
+  become: true
+  become_user: "{{ spark_runtime_user }}"
+  loop: "{{ hf_prefetch_models }}"
+  vars:
+    # `hf` lives in the vLLM venv; only user `nvidia` gets it on PATH via /etc/profile.d/cylon-nvidia-vllm.sh (see docs/hf-cache-sparks.md).
+    _hf_bin: "{{ vllm_venv_path }}/bin/hf"
+    _hf_prefetch_argv: "{{ ([_hf_bin, 'download', item] if item is not mapping else ([_hf_bin, 'download', item.repo, '--revision', item.revision | string] if item.revision is defined else [_hf_bin, 'download', item.repo])) }}"
+  register: hf_prefetch_result
+  changed_when: false

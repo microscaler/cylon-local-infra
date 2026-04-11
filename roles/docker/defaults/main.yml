@@ -1,0 +1,13 @@
+docker_group_users: []
+
+# When true, apt-install docker_packages. Set false on DGX / Spark images that already ship Docker
+# from NVIDIA platform repos (avoid mixing docker.io with docker-ce / containerd.io).
+docker_install_packages: true
+
+# Packages to install (e.g. docker.io on generic Ubuntu, or docker-ce from Docker’s repo if you list it)
+docker_packages:
+  - docker.io
+
+# Optional: /etc/docker/daemon.json content. Set to {} or omit to leave existing config unchanged.
+# Example: {"log-driver": "json-file", "live-restore": true}
+docker_daemon_config: {}

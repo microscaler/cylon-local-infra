@@ -1,0 +1,161 @@
+# Group vars for DGX Spark hosts (nvidia1, nvidia2)
+# Override in inventory or -e for your environment.
+# See docs/PRD-nvidia-user-exo-transition.md — runtime GPU work uses `nvidia`, not root.
+
+# --- Ansible control plane (your laptop / CI) ---
+# Playbooks always connect FROM the controller TO each Spark over SSH (this is not Spark-to-Spark).
+# Use an account your controller has a key for: operator with passwordless sudo (default name below),
+# or root if PermitRootLogin + your key. Spark↔Spark SSH for NCCL/Ray is separate and runs ON the Sparks.
+# Override: -e spark_ansible_user=root  OR  set spark_ansible_user in this file.
+ansible_user: "{{ spark_ansible_user | default('casibbald') }}"
+ansible_become: true
+ansible_become_method: sudo
+
+# Primary login for NCCL / Ray / vLLM (matches NVIDIA doc examples).
+spark_runtime_user: nvidia
+spark_runtime_home: "/home/{{ spark_runtime_user }}"
+
+# Sudoers: passwordless sudo via /etc/sudoers.d/90-<name>
+# nvidia: targeted NOPASSWD (apt + systemctl + journalctl for ops); casibbald: full sudo for operators.
+# Also in systemd-journal so journalctl often works without sudo (supplementary group).
+sudoers_users:
+  - name: nvidia
+    groups: [sudo, docker, video, render, systemd-journal]
+    rule: |
+      Cmnd_Alias NVIDIA_PKG = /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg
+      Cmnd_Alias NVIDIA_SVC = /usr/bin/systemctl, /bin/systemctl
+      Cmnd_Alias NVIDIA_LOG = /usr/bin/journalctl, /bin/journalctl
+      nvidia ALL=(ALL) NOPASSWD: NVIDIA_PKG, NVIDIA_SVC, NVIDIA_LOG
+  - name: casibbald
+    groups: [sudo, docker, video, render]
+    # rule: "casibbald ALL=(ALL) NOPASSWD:ALL"   # default when omitted
+
+sudoers_ensure_users: true
+sudoers_user_groups: [sudo]
+
+# APT maintenance — roles/spark_apt via playbooks/provision_sparks.yml (refresh indices + upgrade; NVIDIA/Ubuntu/DGX repos)
+# Modes: safe (apt upgrade), full (full-upgrade), dist (dist-upgrade). Kept-back packages may need full/dist or manual steps.
+spark_apt_upgrade_enabled: true
+spark_apt_upgrade_mode: safe
+spark_apt_cache_valid_time: 0
+spark_apt_autoremove: false
+# Optional: set to 1 to upgrade one Spark at a time (string serial count)
+# spark_apt_serial: 1
+
+# Docker: use the engine from the DGX / NVIDIA platform image (repo.download.nvidia.com baseos, etc.).
+# Do not apt-install docker.io here — it conflicts with the tested Docker/containerd stack on many Sparks.
+docker_install_packages: false
+docker_group_users: [nvidia, casibbald]
+docker_packages: []
+docker_daemon_config: {}
+
+# NCCL: reuse Spark's existing root SSH keys for nccl_test_user (copy) instead of generating new keys.
+# Requires distributing pubkeys into each peer's ~nvidia/.ssh/authorized_keys (playbook handles this).
+nccl_reuse_root_ssh_keys: true
+
+# NCCL: interconnect interface (enp1s0f0np0 per Connect two Sparks)
+nccl_interface: enp1s0f0np0
+# User for NCCL build, SSH keys, and mpirun (same user on both Sparks).
+nccl_test_user: "{{ spark_runtime_user }}"
+# First-time key exchange: pass -e nccl_test_user_password=YOUR_PASSWORD (do not store in this file).
+
+# NCCL: version and build (Blackwell sm_121); trees under nvidia home (NVIDIA doc: ~/nccl)
+nccl_version: "v2.28.9-1"
+nccl_gencode: "-gencode=arch=compute_121,code=sm_121"
+nccl_home: "{{ spark_runtime_home }}/nccl"
+nccl_build_home: "{{ nccl_home }}/build"
+nccl_tests_home: "{{ spark_runtime_home }}/nccl-tests"
+cuda_home: "/usr/local/cuda"
+mpi_home: "/usr/lib/aarch64-linux-gnu/openmpi"
+
+# CUDA: installed by role cuda (NVIDIA repo). Sparks are Ubuntu 24.04 aarch64 — use ubuntu2404/sbsa.
+cuda_keyring_url: "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/cuda-keyring_1.1-1_all.deb"
+cuda_toolkit_package: "cuda-toolkit-13-0"
+# vLLM aarch64 wheels link libcudart.so.12; CUDA 13 toolkit alone provides .13 — install 12.x cudart alongside.
+cuda_extra_packages:
+  - cuda-cudart-12-8
+
+# vLLM: venv owned by nvidia; PyTorch index must match host CUDA (cu130 for CUDA 13 runtime).
+vllm_venv_path: "/opt/vllm/venv"
+vllm_run_user: "{{ spark_runtime_user }}"
+vllm_working_directory: "{{ spark_runtime_home }}"
+vllm_hf_home: "{{ spark_runtime_home }}/.cache/huggingface"
+# Pin minimum so aarch64 + cu130 stack is coherent (see cuda_extra_packages for libcudart.so.12).
+# Gemma 4 requires a vLLM build with Gemma4 support; `pip` resolves latest matching this floor — upgrade venv after edits:
+#   ansible-playbook playbooks/provision_sparks.yml --tags vllm
+# Gemma 4 needs Transformers with `gemma4` in CONFIG_MAPPING; PyPI wheels can still lag — install from main.
+vllm_package: "vllm>=0.19"
+# `fastsafetensors` enables --load-format fastsafetensors (spark-vllm-docker parity; faster loads on Spark).
+vllm_extra_pip_packages:
+  - "fastsafetensors"
+  # Uvicorn prefers uvloop; pin below Ray+vLLM TP stacks on Py3.12 if the API never binds :8080 after engine init (event loop idle).
+  - "uvloop==0.21.0"
+vllm_transformers_from_git: true
+# Optional: pin branch/commit, e.g. "git+https://github.com/huggingface/transformers.git@v4.58.0"
+# vllm_transformers_git_url: "git+https://github.com/huggingface/transformers.git"
+# Match system CUDA 13 runtime (libcudart.so.13). cu124 wheels expect libcudart.so.12 and fail under systemd.
+vllm_torch_extra_index_url: "https://download.pytorch.org/whl/cu130"
+# vLLM multi-node: API and Ray ports (used by firewall and docs).
+vllm_api_port: 8080
+vllm_ray_port: 6379
+# Pin Ray to match venv CLI and running GCS (override if your cluster standard differs).
+vllm_ray_package: "ray==2.54.0"
+# Stacked TP=2 across two Sparks (playbooks/provision_sparks.yml, spark_provision_vllm_stack). Tune --max-model-len if KV OOMs.
+vllm_default_model: "google/gemma-4-31B-it"
+# spark-vllm-docker uses fastsafetensors for weight load; revert to "" if vLLM errors or OOM during load.
+vllm_load_format: "fastsafetensors"
+# NCCL/Ray env on all nodes (Ray head, worker, vLLM).
+# RoCE IB verbs (ibv_reg_mr / ibv_create_qp) can fail with ENOMEM on GB10+ConnectX for this vLLM TP path; use socket NCCL.
+# Interconnect firewall must allow peer TCP (see firewall_spark_interconnect_cidr). Gloo must not use lo-only.
+# Align with NVIDIA stacked Sparks + vLLM (https://build.nvidia.com/spark/vllm/stacked-sparks): UCX/OpenMPI/socket iface.
+vllm_distributed_extra_env:
+  NCCL_SOCKET_IFNAME: "{{ nccl_interface }}"
+  GLOO_SOCKET_IFNAME: "{{ nccl_interface }}"
+  UCX_NET_DEVICES: "{{ nccl_interface }}"
+  OMPI_MCA_btl_tcp_if_include: "{{ nccl_interface }}"
+  TP_SOCKET_IFNAME: "{{ nccl_interface }}"
+  NCCL_IB_DISABLE: "1"
+  NCCL_NET_GDR_LEVEL: "0"
+  NCCL_NVLS_ENABLE: "0"
+  NCCL_DEBUG: "WARN"
+  RAY_memory_monitor_refresh_ms: "0"
+# Do not start single-GPU vllm.service — Gemma 31B needs Ray + TP=2 (spark_provision_vllm_stack).
+vllm_sparks_deploy_single_node_service: false
+vllm_api_server_extra_args:
+  - "--max-model-len"
+  - "32768"
+# First load downloads ~62GB+ weights; allow Ray/worker to settle before vLLM starts.
+vllm_stack_vllm_start_delay_sec: 600
+# vLLM default engine-ready wait is 600s — too short for Gemma 31B + Ray/TP; 1800 = 30 min (systemd + wrapper export).
+# Large TP=2 loads (e.g. Gemma 31B) often exceed 30m on first start — engine core wait (systemd + wrapper).
+vllm_engine_ready_timeout_sec: 7200
+vllm_stacked_systemd_stop_timeout_sec: 3600
+# Pre-download Hugging Face models into HF_HOME (spark_provision_hf in provision_sparks). Large repos — run before first stacked start.
+hf_prefetch_models:
+  - google/gemma-4-31B-it
+
+# --- playbooks/provision_sparks.yml — phase toggles (roles/spark_provision/defaults/main.yml) ---
+# Stacked Ray: ray_reset_state.yml runs before stack when vllm_ray_reset_state_before_stack is true (role default) — clears stale Ray GCS /tmp sessions.
+spark_provision_vllm_stack: true
+spark_provision_hf: true
+spark_provision_vllm_test: false
+# Optional: set true if engine fails to compile kernels on your GPU stack (slower inference).
+vllm_enforce_eager: false
+
+# Firewall (ufw) for Sparks: allow SSH, Ray (multi-node), vLLM API.
+firewall_default_incoming: deny
+firewall_default_outgoing: allow
+# Ray uses many TCP ports between Sparks (not only 6379). ufw allows full interconnect segment (link-local QSFP).
+firewall_spark_interconnect_cidr: "169.254.0.0/16"
+# Global allows (any source). LAN-scoped rules below add explicit access from your subnet.
+firewall_allow_tcp_ports: [22, "{{ vllm_ray_port }}", "{{ vllm_api_port }}"]
+# Trust home/LAN for vLLM + Ray + SSH (override if your subnet differs, e.g. 10.0.0.0/24).
+firewall_trusted_lan_cidr: "192.168.1.0/24"
+firewall_trusted_lan_tcp_ports: [22, "{{ vllm_api_port }}", "{{ vllm_ray_port }}"]
+
+# --- Optional: Docker + spark-vllm-docker (spark_provision_docker_vllm: true in provision_sparks) ---
+# firewall_allow_tcp_ports: [22, "{{ vllm_ray_port }}", "{{ vllm_api_port }}", 8000]
+# firewall_trusted_lan_tcp_ports: [22, "{{ vllm_ray_port }}", "{{ vllm_api_port }}", 8000]
+# spark_provision_docker_vllm: true
+# vllm_docker_model: "QuantTrio/MiniMax-M2-AWQ"
+# vllm_docker_api_port: 8000

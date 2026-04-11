@@ -1,0 +1,8 @@
+---
+# Align with sparks group_vars: vLLM venv + nvidia runtime user.
+vllm_venv_path: "/opt/vllm/venv"
+spark_runtime_user: nvidia
+spark_runtime_home: "/home/nvidia"
+hf_home: "{{ spark_runtime_home }}/.cache/huggingface"
+# Repo IDs to download into HF_HOME (optional). Strings or { repo, revision } — see spark_provision_hf / provision_sparks.yml
+hf_prefetch_models: []

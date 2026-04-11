@@ -1,0 +1,21 @@
+---
+# Install Docker Engine (CE) + containerd.io + buildx + compose from Docker’s official repo.
+# Intended for dev hosts (e.g. ms02): Kind, nektos/act, local builds — not for DGX Sparks.
+#
+# Prerequisites: remove mixed ubuntu docker.io / half-removed CE per docs/docker-cleanup.md (Path A) if needed.
+#
+# Run:
+#   ansible-playbook playbooks/docker_dev_engine.yml
+#   ansible-playbook playbooks/docker_dev_engine.yml -l ms02
+#
+# Then apply users/daemon/groups:
+#   ansible-playbook playbooks/dev_hosts.yml
+#
+# If Docker has no package for your Ubuntu codename yet:
+#   ansible-playbook playbooks/docker_dev_engine.yml -e docker_ce_release_override=noble
+
+- name: Docker Engine CE on dev hosts
+  hosts: dev_hosts
+  become: true
+  roles:
+    - docker_ce

@@ -1,0 +1,59 @@
+---
+# Tear down local Ray processes and (optionally) /tmp/ray session storage so the next
+# ray start --head gets a fresh GCS view — reduces hundreds of stale node_* rows in
+# `ray status` after repeated restarts/upgrades.
+
+- name: Resolve UNIX user for ray stop (prefer vllm_ray_reset_run_user, then vllm_run_user, else nvidia)
+  ansible.builtin.set_fact:
+    vllm_ray_reset_effective_user: >-
+      {{
+        vllm_ray_reset_run_user
+        if (vllm_ray_reset_run_user | default('') | length > 0)
+        else (
+          vllm_run_user
+          if (vllm_run_user | default('') | length > 0)
+          else 'nvidia'
+        )
+      }}
+
+- name: Stop stacked vLLM on leader (releases Ray placement groups)
+  ansible.builtin.systemd:
+    name: vllm-stacked
+    state: stopped
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+  failed_when: false
+
+- name: Stop Ray worker on non-leader sparks
+  ansible.builtin.systemd:
+    name: ray-worker
+    state: stopped
+  when: inventory_hostname != (groups['sparks'] | sort | first)
+  failed_when: false
+
+- name: Stop Ray head on leader
+  ansible.builtin.systemd:
+    name: ray-head
+    state: stopped
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+  failed_when: false
+
+- name: Force-stop any remaining Ray processes (venv Ray CLI)
+  ansible.builtin.shell: |
+    set -e
+    export PATH="{{ vllm_venv_path }}/bin:${PATH}"
+    if [ -x "{{ vllm_venv_path }}/bin/ray" ]; then
+      sudo -u {{ vllm_ray_reset_effective_user }} -H bash -lc 'export PATH="{{ vllm_venv_path }}/bin:$PATH"; ray stop -f' || true
+    fi
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: true
+
+- name: Remove Ray session dirs under /tmp (fresh GCS on next head start)
+  ansible.builtin.shell: |
+    rm -rf /tmp/ray/session_latest /tmp/ray/session_* 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: true
+  when: vllm_ray_remove_session_dirs | default(true) | bool

@@ -1,0 +1,23 @@
+---
+# Idempotent sudoers.d setup. Creates /etc/sudoers.d/90-<username> per user.
+# Uses visudo -cf for validation before applying.
+
+- name: Ensure sudoers users exist
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: "{{ item.groups | default(sudoers_user_groups | default(['sudo'])) }}"
+    append: true
+    state: present
+    shell: "{{ item.shell | default(sudoers_user_shell | default('/bin/bash')) }}"
+  loop: "{{ sudoers_users }}"
+  when: sudoers_ensure_users | default(true) | bool
+
+- name: Deploy sudoers.d fragment for each user
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/90-{{ item.name }}"
+    content: "{{ (item.rule | default(item.name + ' ALL=(ALL) NOPASSWD:ALL')) + '\n' }}"
+    mode: "0440"
+    validate: "visudo -cf %s"
+  loop: "{{ sudoers_users }}"
+  loop_control:
+    label: "{{ item.name }}"

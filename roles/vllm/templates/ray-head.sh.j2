@@ -1,0 +1,18 @@
+#!/bin/bash
+# Ray head on interconnect (systemd foreground). Managed by Ansible (vllm role / provision_sparks.yml).
+set -e
+export PATH="{{ vllm_venv_path }}/bin:${PATH}"
+[ -f /usr/local/cuda/bin/cuda_env.sh ] && . /usr/local/cuda/bin/cuda_env.sh
+ray stop -f 2>/dev/null || true
+export VLLM_HOST_IP="{{ spark_interconnect_ip }}"
+{% for _k, _v in (vllm_distributed_extra_env | default({}) | dictsort) %}
+export {{ _k }}={{ _v | string | quote }}
+{% endfor %}
+exec ray start --head \
+  --port {{ vllm_ray_port }} \
+  --node-ip-address "{{ spark_interconnect_ip }}" \
+  --min-worker-port {{ vllm_ray_min_worker_port | default(10002) }} \
+  --max-worker-port {{ vllm_ray_max_worker_port | default(19999) }} \
+  --dashboard-host=127.0.0.1 \
+  --disable-usage-stats \
+  --block

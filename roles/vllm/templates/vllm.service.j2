@@ -1,0 +1,26 @@
+[Unit]
+Description=vLLM OpenAI API server ({{ vllm_default_model }})
+After=network.target
+
+[Service]
+Type=simple
+{% if vllm_run_user | default('') | length > 0 %}
+User={{ vllm_run_user }}
+Group={{ vllm_run_user }}
+WorkingDirectory={{ vllm_working_directory }}
+Environment=HF_HOME={{ vllm_hf_home }}
+{% else %}
+WorkingDirectory=/root
+Environment=HF_HOME=/root/.cache/huggingface
+{% endif %}
+Environment=VLLM_ENGINE_READY_TIMEOUT_S={{ vllm_engine_ready_timeout_sec | default(1800) }}
+ExecStart={{ vllm_wrapper_script }}
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vllm
+
+[Install]
+WantedBy=multi-user.target

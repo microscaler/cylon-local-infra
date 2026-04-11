@@ -1,0 +1,17 @@
+---
+# Toggle phases (inventory/group_vars/sparks.yml). All default true except nccl and diagnostics.
+
+spark_provision_sudoers: true
+spark_provision_cuda_apt_cleanup: true
+spark_provision_apt: true
+spark_provision_docker: true
+spark_provision_firewall: true
+spark_provision_cuda_toolkit: true
+spark_provision_vllm: true
+spark_provision_vllm_serve: true
+spark_provision_vllm_test: true
+spark_provision_vllm_stack: false
+spark_provision_hf: false
+spark_provision_docker_vllm: false
+spark_provision_verify_ray: false
+spark_provision_diagnostics: false

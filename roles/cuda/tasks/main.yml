@@ -1,0 +1,38 @@
+---
+# Install CUDA toolkit from NVIDIA repo: keyring, apt update, cuda-toolkit (and optional extra packages).
+# Idempotent: keyring and packages are installed only when needed.
+
+- name: Fix CUDA apt source conflict (must run before any apt use)
+  ansible.builtin.include_tasks: apt_cleanup.yml
+
+- name: Set CUDA keyring deb filename
+  ansible.builtin.set_fact:
+    cuda_keyring_deb: "/tmp/{{ cuda_keyring_url.split('/') | last }}"
+
+- name: Download NVIDIA CUDA keyring .deb
+  ansible.builtin.get_url:
+    url: "{{ cuda_keyring_url }}"
+    dest: "{{ cuda_keyring_deb }}"
+    mode: "0644"
+    force: true
+
+- name: Install CUDA keyring
+  ansible.builtin.apt:
+    deb: "{{ cuda_keyring_deb }}"
+    state: present
+
+- name: Update apt cache (NVIDIA repo)
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install CUDA toolkit
+  ansible.builtin.apt:
+    name: "{{ cuda_toolkit_package }}"
+    state: present
+
+- name: Install extra CUDA/NVIDIA packages
+  ansible.builtin.apt:
+    name: "{{ cuda_extra_packages }}"
+    state: present
+  when: cuda_extra_packages | default([]) | length > 0

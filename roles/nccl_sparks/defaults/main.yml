@@ -1,0 +1,17 @@
+nccl_interface: enp1s0f0np0
+# Set true to ignore reuse detection and run git + make for NCCL (slow).
+nccl_force_recompile: false
+# Rebuild nccl-tests even when NCCL was skipped and all_gather_perf exists.
+nccl_tests_force_rebuild: false
+# Run optional --version on nccl/all_gather_perf binaries when skipping NCCL compile (verbose; set false to silence).
+nccl_version_probe: true
+nccl_version: "v2.28.9-1"
+nccl_gencode: "-gencode=arch=compute_121,code=sm_121"
+# Default: NVIDIA-style paths under the NCCL test user home (not /root).
+nccl_test_user: nvidia
+nccl_build_user_home: "{{ spark_runtime_home | default('/home/' ~ (nccl_test_user | default('nvidia'))) }}"
+nccl_home: "{{ nccl_build_user_home }}/nccl"
+nccl_build_home: "{{ nccl_home }}/build"
+nccl_tests_home: "{{ nccl_build_user_home }}/nccl-tests"
+cuda_home: "/usr/local/cuda"
+mpi_home: "/usr/lib/aarch64-linux-gnu/openmpi"
