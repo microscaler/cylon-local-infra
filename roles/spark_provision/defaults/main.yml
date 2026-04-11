@@ -15,3 +15,5 @@ spark_provision_hf: false
 spark_provision_docker_vllm: false
 spark_provision_verify_ray: false
 spark_provision_diagnostics: false
+# Per-host optional sysctl (see tasks/lan_ipv6_sysctl.yml, host_vars e.g. nvidia1).
+spark_provision_lan_ipv6_sysctl: true

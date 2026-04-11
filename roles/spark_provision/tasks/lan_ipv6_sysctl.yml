@@ -1,0 +1,18 @@
+---
+# Optional per-host: disable IPv6 on one interface (broken v6 default on LAN). Set spark_lan_disable_ipv6_on_interface in host_vars.
+
+- name: Persist sysctl — disable IPv6 on LAN interface only
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-spark-lan-ipv6.conf
+    content: |
+      # Managed by Ansible — see inventory/host_vars and spark_provision/tasks/lan_ipv6_sysctl.yml
+      net.ipv6.conf.{{ spark_lan_disable_ipv6_on_interface }}.disable_ipv6 = 1
+    owner: root
+    group: root
+    mode: "0644"
+  when: spark_lan_disable_ipv6_on_interface | default('') | length > 0
+
+- name: Apply spark lan ipv6 sysctl
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/99-spark-lan-ipv6.conf
+  when: spark_lan_disable_ipv6_on_interface | default('') | length > 0
+  changed_when: true

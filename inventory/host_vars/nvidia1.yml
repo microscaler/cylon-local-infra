@@ -1,0 +1,3 @@
+# Leader-only (gx10-e1ce): LAN had broken IPv6 default (black hole); httpx/HF stalled. Disabling v6 on LAN keeps QSFP fe80 on other interfaces.
+# Validated manually: sysctl net.ipv6.conf.enP7s7.disable_ipv6=1
+spark_lan_disable_ipv6_on_interface: "enP7s7"

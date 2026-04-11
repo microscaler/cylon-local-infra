@@ -33,6 +33,11 @@
   tags: [spark, firewall, vllm]
   when: spark_provision_firewall | default(true) | bool
 
+- name: Phase — optional LAN IPv6 sysctl (per host_vars, e.g. broken v6 default on LAN)
+  ansible.builtin.import_tasks: lan_ipv6_sysctl.yml
+  tags: [spark, network, sysctl, lan_ipv6]
+  when: spark_provision_lan_ipv6_sysctl | default(true) | bool
+
 - name: Phase — CUDA toolkit (NVIDIA repo)
   ansible.builtin.include_role:
     name: cuda

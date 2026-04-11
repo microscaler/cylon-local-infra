@@ -119,6 +119,8 @@ vllm_distributed_extra_env:
   NCCL_NVLS_ENABLE: "0"
   NCCL_DEBUG: "WARN"
   RAY_memory_monitor_refresh_ms: "0"
+  # If IPv6 to huggingface.co is blackholed, httpx can block during ASGI init (generation config fetch). Offline requires artifacts in HF_HOME (hf_prefetch / spark_provision_hf).
+  HF_HUB_OFFLINE: "1"
 # Do not start single-GPU vllm.service — Gemma 31B needs Ray + TP=2 (spark_provision_vllm_stack).
 vllm_sparks_deploy_single_node_service: false
 vllm_api_server_extra_args:
