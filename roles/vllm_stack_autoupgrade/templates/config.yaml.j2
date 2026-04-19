@@ -1,0 +1,42 @@
+---
+# /etc/vllm-stack-autoupgrade/config.yaml — managed by Ansible
+# (roles/vllm_stack_autoupgrade). Edit inventory, re-run `ansible-playbook`;
+# the daemon reloads on mtime change.
+
+enabled: {{ vllm_autoupgrade_enabled | bool | to_json }}
+{% if vllm_autoupgrade_pinned_tag | length > 0 %}
+pinned_tag: {{ vllm_autoupgrade_pinned_tag | to_json }}
+{% else %}
+pinned_tag: null
+{% endif %}
+
+ngc_state_path: {{ vllm_autoupgrade_ngc_state_path | to_json }}
+repo: {{ vllm_autoupgrade_repo | to_json }}
+tag_pattern: {{ vllm_autoupgrade_tag_pattern | to_json }}
+
+leader_container: {{ vllm_autoupgrade_leader_container | to_json }}
+metrics_url: {{ vllm_autoupgrade_metrics_url | trim | to_json }}
+
+poll_interval_sec: {{ vllm_autoupgrade_poll_interval_sec | int }}
+stabilization_sec: {{ vllm_autoupgrade_stabilization_sec | int }}
+quiet_window_sec: {{ vllm_autoupgrade_quiet_window_sec | int }}
+quiet_sample_sec: {{ vllm_autoupgrade_quiet_sample_sec | int }}
+max_wait_for_quiet_sec: {{ vllm_autoupgrade_max_wait_for_quiet_sec | int }}
+ray_gcs_wait_sec: {{ vllm_autoupgrade_ray_gcs_wait_sec | int }}
+ray_cluster_wait_sec: {{ vllm_autoupgrade_ray_cluster_wait_sec | int }}
+vllm_api_wait_sec: {{ vllm_autoupgrade_vllm_api_wait_sec | int }}
+
+peers:
+{% for peer in (groups['sparks'] | sort) %}
+{%   if peer != vllm_autoupgrade_leader %}
+{%     set peer_ip = hostvars[peer].vllm_autoupgrade_interconnect_ip | default('') %}
+{%     if peer_ip %}
+{%       set peer_user = hostvars[peer].spark_runtime_user | default('nvidia') %}
+{%       set peer_container = (vllm_stacked_container_ray_worker_name_prefix | default('vllm-ngc-ray-worker-')) ~ peer %}
+  - host: {{ peer_ip | to_json }}
+    user: {{ peer_user | to_json }}
+    container: {{ peer_container | to_json }}
+    name: {{ peer | to_json }}
+{%     endif %}
+{%   endif %}
+{% endfor %}

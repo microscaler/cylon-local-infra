@@ -1,0 +1,41 @@
+---
+# /etc/ngc-image-sync/config.yaml — managed by Ansible
+# (roles/ngc_image_service). Edit `ngc_image_sync_images` in inventory rather
+# than in place; the daemon reloads on mtime change so adding an image is a
+# `ansible-playbook` away.
+
+poll_interval_sec: {{ ngc_image_sync_poll_interval_sec | int }}
+startup_delay_sec: {{ ngc_image_sync_startup_delay_sec | int }}
+
+images:
+{% for img in ngc_image_sync_images %}
+  - repo: {{ img.repo | to_json }}
+{%   if img.tag_pattern is defined %}
+    tag_pattern: {{ img.tag_pattern | to_json }}
+{%   endif %}
+{%   if img.keep_latest is defined %}
+    keep_latest: {{ img.keep_latest | int }}
+{%   endif %}
+{%   if img.always_keep is defined %}
+    always_keep:
+{%     for t in img.always_keep %}
+      - {{ t | to_json }}
+{%     endfor %}
+{%   endif %}
+{%   if img.prune_stale is defined %}
+    prune_stale: {{ img.prune_stale | bool | to_json }}
+{%   endif %}
+{% endfor %}
+
+sync_targets:
+{% for peer in (groups['sparks'] | sort) %}
+{%   if peer != ngc_image_sync_leader %}
+{%     set peer_ip = hostvars[peer].ngc_image_sync_interconnect_ip | default('') %}
+{%     if peer_ip %}
+{%       set peer_user = hostvars[peer].spark_runtime_user | default('nvidia') %}
+  - host: {{ peer_ip | to_json }}
+    user: {{ peer_user | to_json }}
+    name: {{ peer | to_json }}
+{%     endif %}
+{%   endif %}
+{% endfor %}

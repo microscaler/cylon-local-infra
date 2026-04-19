@@ -1,0 +1,39 @@
+---
+# NVIDIA stacked Sparks — containerized Ray + vLLM (NGC image), Docker-managed (no systemd units).
+# Playbook: https://build.nvidia.com/spark/vllm/stacked-sparks
+# Networking / NCCL / firewall: unchanged — reuse nccl_interface + vllm_distributed_extra_env from group_vars.
+
+vllm_stacked_container_install_dir: /opt/vllm-ngc-stacked
+vllm_stacked_container_config_dir: /etc/vllm-ngc-stacked
+# Upstream helper (foreground; optional — Ansible launches equivalent docker run -d).
+vllm_stacked_container_run_cluster_url: "https://raw.githubusercontent.com/vllm-project/vllm/refs/heads/main/examples/online_serving/run_cluster.sh"
+vllm_stacked_container_install_run_cluster_script: true
+
+# NGC vLLM image (NVIDIA doc: export VLLM_IMAGE=nvcr.io/nvidia/vllm:25.11-py3)
+vllm_stacked_container_image: "nvcr.io/nvidia/vllm:25.11-py3"
+
+vllm_stacked_container_hf_home: "{{ vllm_hf_home | default(spark_runtime_home ~ '/.cache/huggingface') }}"
+# Ray GCS port on the interconnect — firewall also opens it.
+vllm_ray_port: 6379
+vllm_stacked_container_shm_size: "10.24g"
+# Fixed names for idempotent Ansible (upstream uses random node-* names).
+vllm_stacked_container_ray_head_name: vllm-ngc-ray-head
+vllm_stacked_container_ray_worker_name: "vllm-ngc-ray-worker-{{ inventory_hostname }}"
+
+# API port the container binds. Open this in the firewall (inventory/group_vars/sparks.yml).
+vllm_stacked_container_api_port: 8000
+vllm_stacked_container_api_host: "0.0.0.0"
+
+# Recreate Ray containers when true (image/env change rollout).
+vllm_stacked_container_recreate: false
+
+# Stop/disable bare-metal systemd units (ray-head, ray-worker, vllm-stacked, vllm) before starting Docker Ray.
+vllm_stacked_container_stop_bare_metal_systemd: true
+
+# Pull NGC image during provision.
+vllm_stacked_container_pull_image: true
+
+# After Ray is up on the head node, run vLLM serve inside the head container (docker exec -d).
+vllm_stacked_container_start_api: true
+# Seconds to wait after worker container before API start (Ray worker join).
+vllm_stacked_container_ray_join_delay_sec: 15

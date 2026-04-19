@@ -1,0 +1,326 @@
+---
+# playbooks/sync_workspace.yml
+#
+# Rsync the operator's local ~/Workspace (on the Mac controller) to ms02's
+# /home/casibbald/Workspace/, PRESERVING any file that exists on ms02 but has
+# been deleted locally.
+#
+# Rationale: the Mac has limited disk; ms02 has room. When we tidy the Mac
+# to reclaim space, we still want ms02 to be a superset of everything we've
+# ever had locally. Rsync without --delete gives us exactly that:
+#
+#   local additions / modifications  → pushed to ms02
+#   local deletions                  → ignored (remote copy kept)
+#
+# Usage:
+#
+#   # (recommended first) dry-run to preview what will change
+#   ansible-playbook playbooks/sync_workspace.yml -l ms02 -e workspace_sync_dry_run=true
+#
+#   # real sync
+#   ansible-playbook playbooks/sync_workspace.yml -l ms02
+#
+#   # sync a different tree
+#   ansible-playbook playbooks/sync_workspace.yml -l ms02 \
+#     -e workspace_sync_src=$HOME/Pictures/ \
+#     -e workspace_sync_dest=/home/casibbald/Backups/Pictures/
+#
+#   # bandwidth-limit for coffee-shop wifi / extra rsync flags
+#   ansible-playbook playbooks/sync_workspace.yml -l ms02 \
+#     -e '{"workspace_sync_extra_rsync_opts":["--bwlimit=2000"]}'
+#
+# Safety:
+#   - delete: never. This playbook intentionally does NOT pass `--delete`.
+#     If you want a mirror (propagating local deletions), write a separate
+#     `playbooks/sync_workspace_mirror.yml` with an explicit confirmation.
+#
+# rsync implementation:
+#   - macOS ships *openrsync* at /usr/bin/rsync (protocol 29) which lacks a
+#     few GNU flags (`--info=progress2`, `--chown`, `--human-readable`). We
+#     auto-detect the best available rsync on the controller and adjust
+#     flags accordingly. A `brew install rsync` is the cleanest upgrade —
+#     this playbook still works without it.
+#
+# See also:
+#   - docs/docker-dev-host.md              (ms02 setup)
+#   - llmwiki/concepts/workspace-sync.md   (design + ops)
+
+- name: Rsync operator's ~/Workspace → ms02 (additive; remote-only files preserved)
+  hosts: ms02
+  gather_facts: false
+
+  vars:
+    # Source on the controller. Trailing slash is important — it makes rsync
+    # sync the CONTENTS of ~/Workspace into the dest, not a nested directory.
+    workspace_sync_src: "{{ lookup('env', 'HOME') }}/Workspace/"
+
+    # Dest on the remote. We write as ansible_user (root on ms02) but the
+    # files belong to the dev user — we chown after the rsync.
+    workspace_sync_dest: "/home/casibbald/Workspace/"
+    workspace_sync_chown_user: "casibbald"
+    workspace_sync_chown_group: "casibbald"
+
+    # Dry-run mode — prints what would transfer without writing.
+    workspace_sync_dry_run: false
+
+    # LAN is usually fast enough that compression is a small net win.
+    workspace_sync_compress: true
+
+    # Preferred rsync binaries on the controller, in order. First existing
+    # and executable wins. GNU rsync (Homebrew) is preferred because it
+    # supports nicer progress output; openrsync works too but with fewer
+    # knobs. Operator can override via -e workspace_sync_rsync_bin=/path.
+    workspace_sync_rsync_candidates:
+      - "/opt/homebrew/bin/rsync"     # Apple Silicon Homebrew
+      - "/usr/local/bin/rsync"        # Intel Homebrew / manual
+      - "/usr/bin/rsync"              # macOS built-in openrsync (BSD)
+    workspace_sync_rsync_bin: ""      # overrideable; empty = auto-detect
+
+    # Standard noise we don't want to push. Applied with --exclude on rsync;
+    # these filter BOTH ends, so remote-only files that match these patterns
+    # remain untouched (which is what we want — they're noise on both sides).
+    workspace_sync_excludes:
+      - ".DS_Store"
+      - "__pycache__/"
+      - "*.pyc"
+      - "*.pyo"
+      - "*.swp"
+      - "*.swo"
+      - ".venv/"
+      - "node_modules/"
+      - "target/"            # cargo
+      - ".terraform/"
+      - ".next/"             # next.js
+      - ".pytest_cache/"
+      - ".mypy_cache/"
+      - ".ruff_cache/"
+      - ".tox/"
+      - ".cache/"
+      - ".ipynb_checkpoints/"
+
+    # Extra flags for operator overrides: --bwlimit=2000, extra --exclude=…
+    workspace_sync_extra_rsync_opts: []
+
+    # SSH options used for the remote end of the pipe. `BatchMode=yes` forces
+    # key-only auth so a missing key fails loudly instead of prompting.
+    workspace_sync_ssh_opts: >-
+      ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes
+
+  tasks:
+
+    # --------------------------------------------------------------- #
+    # Capture the ms02 connection details BEFORE any delegate_to call.  #
+    # Inside a delegate_to=localhost task, `ansible_host` / `ansible_user`
+    # resolve to the LOCALHOST's values, which would try to push to
+    # root@localhost. By stashing them on facts first we keep the real
+    # ms02 target stable across the delegation.
+    # --------------------------------------------------------------- #
+    - name: Capture remote (ms02) connection details
+      ansible.builtin.set_fact:
+        _workspace_sync_remote_host: "{{ ansible_host | default(inventory_hostname) }}"
+        _workspace_sync_remote_user: "{{ ansible_user | default('root') }}"
+
+    # --------------------------------------------------------------- #
+    # Sanity checks on the controller side.                           #
+    # --------------------------------------------------------------- #
+    - name: Sanity — source directory exists on the controller
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.stat:
+        path: "{{ workspace_sync_src }}"
+      register: _workspace_src_stat
+
+    - name: Fail with a clear message if the source is missing
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.assert:
+        that:
+          - _workspace_src_stat.stat.exists
+          - _workspace_src_stat.stat.isdir
+        fail_msg: >-
+          workspace_sync_src ({{ workspace_sync_src }}) does not exist or is
+          not a directory on the Ansible controller. Override with
+          -e workspace_sync_src=/absolute/path/ (trailing slash kept).
+
+    # --------------------------------------------------------------- #
+    # Detect the best rsync binary available on the controller.        #
+    # --------------------------------------------------------------- #
+    - name: Probe candidate rsync binaries on the controller
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ workspace_sync_rsync_candidates }}"
+      register: _workspace_rsync_probe
+      when: workspace_sync_rsync_bin | length == 0
+
+    - name: Resolve rsync binary + capability class (gnu | openrsync)
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.set_fact:
+        _workspace_rsync_bin: >-
+          {{
+            workspace_sync_rsync_bin
+            if workspace_sync_rsync_bin | length > 0
+            else (_workspace_rsync_probe.results
+                  | selectattr('stat.exists', 'equalto', true)
+                  | selectattr('stat.executable', 'equalto', true)
+                  | map(attribute='item')
+                  | list
+                  | first)
+          }}
+
+    - name: Query rsync version to classify GNU vs openrsync
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.command:
+        argv:
+          - "{{ _workspace_rsync_bin }}"
+          - "--version"
+      register: _workspace_rsync_version
+      changed_when: false
+
+    - name: Classify rsync flavour
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.set_fact:
+        _workspace_rsync_is_gnu: "{{ 'rsync  version' in _workspace_rsync_version.stdout or 'version 3.' in _workspace_rsync_version.stdout }}"
+
+    - name: Report detected rsync
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.debug:
+        msg: >-
+          Using {{ _workspace_rsync_bin }} —
+          flavour={{ 'GNU (full flags)' if _workspace_rsync_is_gnu | bool else 'openrsync (reduced flags)' }};
+          first line: {{ _workspace_rsync_version.stdout_lines[0] }}
+
+    # --------------------------------------------------------------- #
+    # Ensure the destination root exists, owned by the dev user.       #
+    # --------------------------------------------------------------- #
+    - name: Ensure destination root exists and is owned by the dev user
+      ansible.builtin.file:
+        path: "{{ workspace_sync_dest }}"
+        state: directory
+        owner: "{{ workspace_sync_chown_user }}"
+        group: "{{ workspace_sync_chown_group }}"
+        mode: "0755"
+
+    # --------------------------------------------------------------- #
+    # The actual sync.                                                 #
+    #                                                                  #
+    # Rsync's progress output can contain raw byte sequences from      #
+    # filenames with non-UTF8 encoding (common on macOS over the       #
+    # years). Ansible's strict UTF8 deserializer refuses those. We     #
+    # sidestep the whole problem by redirecting rsync's full output to #
+    # a local log file and only feeding Ansible a sanitized tail.      #
+    # --------------------------------------------------------------- #
+    - name: Pick a log file for the rsync run
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.set_fact:
+        _workspace_sync_log: "/tmp/sync_workspace-{{ inventory_hostname }}.rsync.log"
+
+    - name: Rsync (controller → ms02) — additive, preserving remote-only files
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: "{{ _workspace_sync_shell }}"
+      args:
+        executable: /bin/bash
+      register: workspace_sync_result
+      changed_when: >-
+        not (workspace_sync_dry_run | bool) and
+        ('Number of regular files transferred: 0' not in (workspace_sync_result.stdout | default('')))
+      vars:
+        _workspace_sync_exclude_args: >-
+          {{ workspace_sync_excludes | map('regex_replace', '^(.+)$', '--exclude=\1') | list }}
+        # Flags that work on BOTH GNU rsync and openrsync.
+        _workspace_sync_common_opts:
+          - "--recursive"
+          - "--links"
+          - "--perms"
+          - "--times"
+          - "--stats"
+          - "--progress"
+          - "--partial"
+          - "--partial-dir=.rsync-partial"
+          - "--chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r"
+        # Flags only available on GNU rsync 3.x.
+        _workspace_sync_gnu_only_opts:
+          - "--human-readable"
+          - "--info=stats2,progress2"
+          - "--chown={{ workspace_sync_chown_user }}:{{ workspace_sync_chown_group }}"
+        _workspace_sync_opt_args: >-
+          {{
+            _workspace_sync_common_opts
+            + (_workspace_sync_gnu_only_opts if _workspace_rsync_is_gnu | bool else [])
+            + (['--compress'] if workspace_sync_compress | bool else [])
+            + (['--dry-run'] if workspace_sync_dry_run | bool else [])
+            + _workspace_sync_exclude_args
+            + workspace_sync_extra_rsync_opts
+          }}
+        _workspace_sync_remote_spec: >-
+          {{ _workspace_sync_remote_user }}@{{ _workspace_sync_remote_host }}:{{ workspace_sync_dest }}
+        # Shell pipeline: run rsync with output > log file, then emit a
+        # sanitized summary to stdout. `tr -cd` strips any non-printable
+        # bytes so ansible's UTF8 deserializer doesn't choke on a filename.
+        _workspace_sync_shell: |
+          set -o pipefail
+          {{ _workspace_rsync_bin | quote }} \
+            {% for o in _workspace_sync_opt_args %}{{ o | quote }} {% endfor %} \
+            --rsh={{ workspace_sync_ssh_opts | quote }} \
+            {{ workspace_sync_src | quote }} \
+            {{ _workspace_sync_remote_spec | quote }} \
+            > {{ _workspace_sync_log | quote }} 2>&1
+          rc=$?
+          printf '=== rsync stats ===\n'
+          grep -E '^(Number of|Total|sent|total size|Literal|Matched|File list)' \
+            {{ _workspace_sync_log | quote }} \
+            | head -40 | LC_ALL=C tr -cd '[:print:][:space:]' || true
+          printf '=== rsync tail (last 20 lines) ===\n'
+          tail -n 20 {{ _workspace_sync_log | quote }} \
+            | LC_ALL=C tr -cd '[:print:][:space:]' || true
+          printf '=== full log: %s ===\n' {{ _workspace_sync_log | quote }}
+          exit $rc
+
+    # --------------------------------------------------------------- #
+    # Post-sync chown. Always runs, covers the case where openrsync   #
+    # was used (can't do --chown inline).                             #
+    # --------------------------------------------------------------- #
+    - name: Ensure dev user owns the synced tree (belt-and-braces after openrsync)
+      when: not (workspace_sync_dry_run | bool)
+      ansible.builtin.command:
+        argv:
+          - "chown"
+          - "-R"
+          - "{{ workspace_sync_chown_user }}:{{ workspace_sync_chown_group }}"
+          - "{{ workspace_sync_dest }}"
+      register: _workspace_chown
+      changed_when: false   # chown always exits 0; no cheap way to detect real change
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: |-
+          Mode:    {{ 'DRY RUN (no writes)' if workspace_sync_dry_run | bool else 'APPLIED' }}
+          rsync:   {{ _workspace_rsync_bin }} ({{ 'GNU' if _workspace_rsync_is_gnu | bool else 'openrsync' }})
+          Source:  {{ workspace_sync_src }}
+          Dest:    {{ _workspace_sync_remote_user }}@{{ _workspace_sync_remote_host }}:{{ workspace_sync_dest }}
+          Chown:   {{ workspace_sync_chown_user }}:{{ workspace_sync_chown_group }}
+          Delete:  never — remote-only files preserved
+          ---
+          Last rsync output (tail):
+          {% for line in (workspace_sync_result.stdout_lines | default([]))[-15:] %}
+            {{ line }}
+          {% endfor %}
+      vars:
+        _workspace_sync_remote_user: "{{ _workspace_sync_remote_user }}"
+        _workspace_sync_remote_host: "{{ _workspace_sync_remote_host }}"

@@ -1,0 +1,37 @@
+[Unit]
+Description=Hugging Face prefetch + peer-sync daemon (Cylon local-infra)
+Documentation=file://{{ hf_prefetch_install_dir }}/hf_prefetch_service.py
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User={{ hf_prefetch_run_user }}
+Group={{ hf_prefetch_run_group }}
+WorkingDirectory={{ hf_prefetch_runtime_home }}
+# Ensure ssh (via rsync -e ssh) finds the runtime user's keys at ~/.ssh/,
+# and docker honours the user's XDG config if any.
+Environment=HOME={{ hf_prefetch_runtime_home }}
+Environment=XDG_CONFIG_HOME={{ hf_prefetch_runtime_home }}/.config
+ExecStart=/usr/bin/python3 {{ hf_prefetch_install_dir }}/hf_prefetch_service.py \
+  --config {{ hf_prefetch_config_dir }}/config.yaml \
+  --state {{ hf_prefetch_state_file }} \
+  -v
+Restart=always
+RestartSec=15
+{% if hf_prefetch_env_from_file | length > 0 %}
+EnvironmentFile={{ hf_prefetch_env_from_file }}
+{% endif %}
+
+# Give the daemon time to terminate an in-flight `docker run` / rsync cleanly.
+TimeoutStopSec=60
+KillMode=mixed
+KillSignal=SIGTERM
+
+# journalctl -u hf-prefetch
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hf-prefetch
+
+[Install]
+WantedBy=multi-user.target

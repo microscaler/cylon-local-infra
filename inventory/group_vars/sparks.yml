@@ -1,23 +1,22 @@
-# Group vars for DGX Spark hosts (nvidia1, nvidia2)
-# Override in inventory or -e for your environment.
-# See docs/PRD-nvidia-user-exo-transition.md — runtime GPU work uses `nvidia`, not root.
+# Group vars for DGX Spark hosts (nvidia1, nvidia2) — container-only stack.
+# Pattern: NGC nvcr.io/nvidia/vllm image, Docker Ray head + worker, `vllm serve`.
+# Bare-metal venv and custom-image paths were removed 2026-04;
+# see llmwiki/runs/2026-04-18-rip-out-bare-metal.md.
 
-# --- Ansible control plane (your laptop / CI) ---
-# Playbooks always connect FROM the controller TO each Spark over SSH (this is not Spark-to-Spark).
-# Use an account your controller has a key for: operator with passwordless sudo (default name below),
-# or root if PermitRootLogin + your key. Spark↔Spark SSH for NCCL/Ray is separate and runs ON the Sparks.
-# Override: -e spark_ansible_user=root  OR  set spark_ansible_user in this file.
+# --- Ansible control plane (operator laptop / CI) ---
+# Playbooks always connect FROM the controller TO each Spark (this is not Spark-to-Spark).
+# Default login is casibbald (passwordless sudo). Override with -e spark_ansible_user=root
+# if you prefer root SSH. Do NOT use the `nvidia` runtime user as ansible_user — its
+# sudo is deliberately narrow (apt / systemctl / journalctl only).
 ansible_user: "{{ spark_ansible_user | default('casibbald') }}"
 ansible_become: true
 ansible_become_method: sudo
 
-# Primary login for NCCL / Ray / vLLM (matches NVIDIA doc examples).
+# Runtime user for Ray/vLLM/NCCL (inside / outside containers). HF cache lives under this user's home.
 spark_runtime_user: nvidia
 spark_runtime_home: "/home/{{ spark_runtime_user }}"
 
-# Sudoers: passwordless sudo via /etc/sudoers.d/90-<name>
-# nvidia: targeted NOPASSWD (apt + systemctl + journalctl for ops); casibbald: full sudo for operators.
-# Also in systemd-journal so journalctl often works without sudo (supplementary group).
+# Sudoers — nvidia is targeted NOPASSWD (apt + systemctl + journalctl); casibbald is full NOPASSWD.
 sudoers_users:
   - name: nvidia
     groups: [sudo, docker, video, render, systemd-journal]
@@ -28,86 +27,87 @@ sudoers_users:
       nvidia ALL=(ALL) NOPASSWD: NVIDIA_PKG, NVIDIA_SVC, NVIDIA_LOG
   - name: casibbald
     groups: [sudo, docker, video, render]
-    # rule: "casibbald ALL=(ALL) NOPASSWD:ALL"   # default when omitted
 
 sudoers_ensure_users: true
 sudoers_user_groups: [sudo]
 
-# APT maintenance — roles/spark_apt via playbooks/provision_sparks.yml (refresh indices + upgrade; NVIDIA/Ubuntu/DGX repos)
-# Modes: safe (apt upgrade), full (full-upgrade), dist (dist-upgrade). Kept-back packages may need full/dist or manual steps.
+# APT maintenance — roles/spark_apt (refresh indices + upgrade). Kept-back packages may need full/dist mode.
 spark_apt_upgrade_enabled: true
 spark_apt_upgrade_mode: safe
 spark_apt_cache_valid_time: 0
 spark_apt_autoremove: false
-# Optional: set to 1 to upgrade one Spark at a time (string serial count)
-# spark_apt_serial: 1
 
-# Docker: use the engine from the DGX / NVIDIA platform image (repo.download.nvidia.com baseos, etc.).
-# Do not apt-install docker.io here — it conflicts with the tested Docker/containerd stack on many Sparks.
+# Docker: use the engine from the DGX / NVIDIA platform image. Do NOT apt-install docker.io.
 docker_install_packages: false
 docker_group_users: [nvidia, casibbald]
 docker_packages: []
 docker_daemon_config: {}
 
-# NCCL: reuse Spark's existing root SSH keys for nccl_test_user (copy) instead of generating new keys.
-# Requires distributing pubkeys into each peer's ~nvidia/.ssh/authorized_keys (playbook handles this).
-nccl_reuse_root_ssh_keys: true
-
-# NCCL: interconnect interface (enp1s0f0np0 per Connect two Sparks)
-nccl_interface: enp1s0f0np0
-# User for NCCL build, SSH keys, and mpirun (same user on both Sparks).
-nccl_test_user: "{{ spark_runtime_user }}"
-# First-time key exchange: pass -e nccl_test_user_password=YOUR_PASSWORD (do not store in this file).
-
-# NCCL: version and build (Blackwell sm_121); trees under nvidia home (NVIDIA doc: ~/nccl)
-nccl_version: "v2.28.9-1"
-nccl_gencode: "-gencode=arch=compute_121,code=sm_121"
-nccl_home: "{{ spark_runtime_home }}/nccl"
-nccl_build_home: "{{ nccl_home }}/build"
-nccl_tests_home: "{{ spark_runtime_home }}/nccl-tests"
-cuda_home: "/usr/local/cuda"
-mpi_home: "/usr/lib/aarch64-linux-gnu/openmpi"
-
-# CUDA: installed by role cuda (NVIDIA repo). Sparks are Ubuntu 24.04 aarch64 — use ubuntu2404/sbsa.
+# CUDA: host-side toolkit is NOT required for the container stack (NGC image is self-contained).
+# Variables below are kept for playbooks/nccl_sparks.yml which builds NCCL on the host.
 cuda_keyring_url: "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/cuda-keyring_1.1-1_all.deb"
 cuda_toolkit_package: "cuda-toolkit-13-0"
-# vLLM aarch64 wheels link libcudart.so.12; CUDA 13 toolkit alone provides .13 — install 12.x cudart alongside.
-cuda_extra_packages:
-  - cuda-cudart-12-8
+cuda_extra_packages: []
 
-# vLLM: venv owned by nvidia; PyTorch index must match host CUDA (cu130 for CUDA 13 runtime).
-vllm_venv_path: "/opt/vllm/venv"
-vllm_run_user: "{{ spark_runtime_user }}"
-vllm_working_directory: "{{ spark_runtime_home }}"
-vllm_hf_home: "{{ spark_runtime_home }}/.cache/huggingface"
-# Pin minimum so aarch64 + cu130 stack is coherent (see cuda_extra_packages for libcudart.so.12).
-# Gemma 4 requires a vLLM build with Gemma4 support; `pip` resolves latest matching this floor — upgrade venv after edits:
-#   ansible-playbook playbooks/provision_sparks.yml --tags vllm
-# Gemma 4 needs Transformers with `gemma4` in CONFIG_MAPPING; PyPI wheels can still lag — install from main.
-vllm_package: "vllm>=0.19"
-# `fastsafetensors` enables --load-format fastsafetensors (spark-vllm-docker parity; faster loads on Spark).
-vllm_extra_pip_packages:
-  - "fastsafetensors"
-  # Uvicorn prefers uvloop; pin below Ray+vLLM TP stacks on Py3.12 if the API never binds :8080 after engine init (event loop idle).
-  - "uvloop==0.21.0"
-vllm_transformers_from_git: true
-# Optional: pin branch/commit, e.g. "git+https://github.com/huggingface/transformers.git@v4.58.0"
-# vllm_transformers_git_url: "git+https://github.com/huggingface/transformers.git"
-# Match system CUDA 13 runtime (libcudart.so.13). cu124 wheels expect libcudart.so.12 and fail under systemd.
-vllm_torch_extra_index_url: "https://download.pytorch.org/whl/cu130"
-# vLLM multi-node: API and Ray ports (used by firewall and docs).
-vllm_api_port: 8080
+# Interconnect interface (QSFP link-local). Used by NCCL socket networking and Ray.
+nccl_interface: enp1s0f0np0
+
+# --- NGC stacked container stack (roles/vllm_stacked_container) ---
+# Image tag: pinned to match what is currently on the Sparks (nvidia1, nvidia2).
+# 26.03-py3 unlocks Qwen3.6-35B-A3B (`Qwen3_5MoeForConditionalGeneration` is in
+# vLLM 0.17.1's ModelRegistry and vllm's get_config loads the qwen3_5_moe
+# architecture cleanly even though transformers 4.57.5 still lacks it in
+# CONFIG_MAPPING). Also carries Qwen3-Next / Qwen3-VL-Moe / Qwen3-Omni arches
+# for future use.
+vllm_stacked_container_image: "nvcr.io/nvidia/vllm:26.03-py3"
+# API port the container binds. Add this to firewall_allow_tcp_ports.
+vllm_stacked_container_api_port: 8000
+# Flip to true to force container recreation when the image tag or env-file changes.
+vllm_stacked_container_recreate: false
+# Model + TP configuration.
+#
+# CURRENT: TinyLlama for validated smoke service on 26.03-py3. Swap to one of
+# the Qwen targets below once the hf-prefetch daemon reports them `ready` on
+# both hosts (see hf_prefetch_models at bottom of this file).
+#
+# Future targets (now unlocked by 26.03-py3's bundled vLLM 0.17.1):
+#   Qwen/Qwen3.6-35B-A3B                     — best-in-class coder, hybrid DeltaNet+attn MoE,
+#                                                35B total / 3B active. Arch: `Qwen3_5MoeForConditionalGeneration` ✓
+#   Qwen/Qwen3-Coder-30B-A3B-Instruct        — July-2025 coder specialist,
+#                                                30B total / 3B active. Arch: `Qwen3MoeForCausalLM` ✓
+#   Qwen/Qwen2.5-Coder-32B-Instruct          — rock-solid dense fallback. Arch: `Qwen2ForCausalLM` ✓
+#
+# Earlier blockers (preserved for institutional memory):
+#   Gemma-4 — requires `vllm/vllm-openai:gemma4-cu130` (different image from NGC).
+#   Gemma-3-27b-it — HF-gated, account not yet approved.
+vllm_default_model: "Qwen/Qwen3.6-35B-A3B"
+vllm_tensor_parallel_size: 2
+# Leave empty unless you know the NGC image ships `fastsafetensors` (26.01-py3 does NOT).
+# Empty = omit --load-format flag → vLLM uses `auto`, which is safe.
+vllm_load_format: ""
+# Extra `vllm serve` args.
+# Qwen3.6-35B-A3B supports 262144 native / 1M extended context, but KV cache
+# on 2× GB10 unified memory caps us much earlier. 32768 is the proven-safe
+# first-boot value; raise once we've measured KV footprint. To revert to
+# TinyLlama for smoke: clear this list and set vllm_default_model above.
+vllm_api_server_extra_args:
+  - "--max-model-len"
+  - "32768"
+# Skip torch.compile / inductor kernels only if compilation fails on this GPU stack.
+vllm_enforce_eager: false
+# Ray GCS port (firewall + preflight). Container Ray still uses the same default.
 vllm_ray_port: 6379
-# Pin Ray to match venv CLI and running GCS (override if your cluster standard differs).
-vllm_ray_package: "ray==2.54.0"
-# Stacked TP=2 across two Sparks (playbooks/provision_sparks.yml, spark_provision_vllm_stack). Tune --max-model-len if KV OOMs.
-vllm_default_model: "google/gemma-4-31B-it"
-# spark-vllm-docker uses fastsafetensors for weight load; revert to "" if vLLM errors or OOM during load.
-vllm_load_format: "fastsafetensors"
-# NCCL/Ray env on all nodes (Ray head, worker, vLLM).
-# RoCE IB verbs (ibv_reg_mr / ibv_create_qp) can fail with ENOMEM on GB10+ConnectX for this vLLM TP path; use socket NCCL.
-# Interconnect firewall must allow peer TCP (see firewall_spark_interconnect_cidr). Gloo must not use lo-only.
-# Align with NVIDIA stacked Sparks + vLLM (https://build.nvidia.com/spark/vllm/stacked-sparks): UCX/OpenMPI/socket iface.
+# HF cache path on host — mounted into the container at /root/.cache/huggingface.
+vllm_hf_home: "{{ spark_runtime_home }}/.cache/huggingface"
+
+# --- NCCL / distributed env (carried into head.env + worker-<host>.env) ---
+# See llmwiki/concepts/ncclcommInitRank-abort-tp2.md for the root cause analysis.
+# Key finding (2026-04-18): NCCL_NET_PLUGIN=none disables plugin auto-load. The NGC
+# image ships four NCCL net plugins (aws-ofi-nccl, hpcx rdma-sharp, spectrum-x, ibext)
+# that probe RoCE/IB devices — on GB10 + ConnectX link-local this aborts before
+# NCCL's logger even starts. Forcing the built-in socket transport avoids the whole
+# plugin path. RAY_CGRAPH_get_timeout: v1 compiled DAG default (300s) can kill TP
+# workers on long steps.
 vllm_distributed_extra_env:
   NCCL_SOCKET_IFNAME: "{{ nccl_interface }}"
   GLOO_SOCKET_IFNAME: "{{ nccl_interface }}"
@@ -117,47 +117,96 @@ vllm_distributed_extra_env:
   NCCL_IB_DISABLE: "1"
   NCCL_NET_GDR_LEVEL: "0"
   NCCL_NVLS_ENABLE: "0"
+  # Proven-green 2026-04-18: drop NET plugin auto-load (AWS OFI / HPC-X RDMA SHARP /
+  # Spectrum-X / IB ext) and rely on NCCL's built-in socket transport.
+  NCCL_NET_PLUGIN: "none"
+  # Defensive pairings (set at the same time as the fix; not individually re-verified):
+  NCCL_P2P_DISABLE: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_SHM_DISABLE: "1"
+  # WARN after the stack is stable; bump to INFO when diagnosing.
   NCCL_DEBUG: "WARN"
   RAY_memory_monitor_refresh_ms: "0"
-  # If IPv6 to huggingface.co is blackholed, httpx can block during ASGI init (generation config fetch). Offline requires artifacts in HF_HOME (hf_prefetch / spark_provision_hf).
-  HF_HUB_OFFLINE: "1"
-# Do not start single-GPU vllm.service — Gemma 31B needs Ray + TP=2 (spark_provision_vllm_stack).
-vllm_sparks_deploy_single_node_service: false
-vllm_api_server_extra_args:
-  - "--max-model-len"
-  - "32768"
-# First load downloads ~62GB+ weights; allow Ray/worker to settle before vLLM starts.
-vllm_stack_vllm_start_delay_sec: 600
-# vLLM default engine-ready wait is 600s — too short for Gemma 31B + Ray/TP; 1800 = 30 min (systemd + wrapper export).
-# Large TP=2 loads (e.g. Gemma 31B) often exceed 30m on first start — engine core wait (systemd + wrapper).
-vllm_engine_ready_timeout_sec: 7200
-vllm_stacked_systemd_stop_timeout_sec: 3600
-# Pre-download Hugging Face models into HF_HOME (spark_provision_hf in provision_sparks). Large repos — run before first stacked start.
-hf_prefetch_models:
-  - google/gemma-4-31B-it
+  RAY_CGRAPH_get_timeout: "900"
 
-# --- playbooks/provision_sparks.yml — phase toggles (roles/spark_provision/defaults/main.yml) ---
-# Stacked Ray: ray_reset_state.yml runs before stack when vllm_ray_reset_state_before_stack is true (role default) — clears stale Ray GCS /tmp sessions.
-spark_provision_vllm_stack: true
+# --- NGC / OCI image sync daemon (roles/ngc_image_service) ---
+# Leader-only systemd service that polls each tracked repo's Docker Registry v2
+# tags/list endpoint, keeps the newest `keep_latest` matching tags pulled on
+# nvidia1, replicates them to every peer Spark over the QSFP interconnect via
+# `docker save | ssh nvidia@<peer-ic-ip> docker load`, and (opt-in) prunes
+# stale tags not in use by any container. State lives at
+# /var/lib/ngc-image-sync/state.json — poll it with `jq`.
+#
+# Add an image = edit ngc_image_sync_images + rerun Ansible. Daemon reloads on
+# mtime change (no systemctl restart needed).
+spark_provision_ngc_image_sync: true
+ngc_image_sync_poll_interval_sec: 604800          # weekly (60 = 1 min for testing)
+ngc_image_sync_images:
+  - repo: "nvcr.io/nvidia/vllm"
+    tag_pattern: '^\d{2}\.\d{2}-py3$'              # YY.MM-py3 only
+    keep_latest: 2                                  # keep 2 newest matching tags
+    # Always preserve the tag we're actually serving, even if a newer one lands.
+    always_keep:
+      - "{{ vllm_stacked_container_image | regex_replace('^[^:]+:', '') }}"
+    prune_stale: false                              # flip to true once we trust the service
+
+# --- Auto-upgrade the stacked vLLM container when ngc-image-sync lands a newer tag ---
+# Leader-only systemd daemon (roles/vllm_stack_autoupgrade). Default disabled
+# so image management stays separate from stack lifecycle. Once we trust the
+# service, set `vllm_autoupgrade_enabled: true` to hand over cutover.
+#
+# Safety rails:
+#   - stabilization_sec: tag must have been `ready` on all nodes for this long
+#   - quiet_window_sec:  vLLM API must be quiescent (no in-flight or queued
+#                        requests, no new completions) for this long
+#   - pinned_tag:        if set, overrides "newest-ready" — lets operators roll
+#                        back a surprise promotion by pinning the prior tag.
+#   - Ansible still controls the service's `enabled:` flag via this inventory.
+spark_provision_vllm_autoupgrade: true
+# Armed 2026-04-19 after the 26.01 → 26.03 manual cutover baseline run
+# ([runs/2026-04-19-26.03-py3-upgrade.md]). The bounce path the daemon will
+# take is identical to what Ansible just did with `recreate=true`, and the
+# stabilization + quiet-window gates add safety on top.
+vllm_autoupgrade_enabled: true
+vllm_autoupgrade_pinned_tag: ""          # e.g. "26.03-py3" to pin
+vllm_autoupgrade_poll_interval_sec: 300  # 5 min
+vllm_autoupgrade_stabilization_sec: 3600 # 1 h ready-time before promotion
+vllm_autoupgrade_quiet_window_sec: 300   # 5 min quiet API before bouncing
+vllm_autoupgrade_max_wait_for_quiet_sec: 86400  # give up after 24 h if busy
+
+# --- Hugging Face prefetch daemon (roles/hf_prefetch_service) ---
+# Downloads are driven by a long-running systemd service on the leader Spark.
+# It reads /etc/hf-prefetch/config.yaml (rendered from hf_prefetch_models),
+# downloads each model once via the NGC image's `hf` CLI, then rsyncs the
+# repo's hub subtree to every other Spark over the QSFP interconnect as
+# `nvidia@169.254.x` (key exchange already done by playbooks/nccl_sparks.yml).
+# State is a pollable JSON file: /var/lib/hf-prefetch/state.json. Adding a
+# model = edit this list + rerun ansible; the daemon picks up the config on
+# its next poll cycle (no downtime, no blocking in Ansible).
+#
+# Poll readiness (leader):
+#   ssh casibbald@nvidia1 'jq ".models" /var/lib/hf-prefetch/state.json'
+#   ssh casibbald@nvidia1 'journalctl -u hf-prefetch -f'
 spark_provision_hf: true
-spark_provision_vllm_test: false
-# Optional: set true if engine fails to compile kernels on your GPU stack (slower inference).
-vllm_enforce_eager: false
+# Order matters — daemon processes sequentially. Qwen3.6 first because it's
+# the current best-in-class coder (see concepts/qwen-model-ladder in the wiki
+# for the comparison). Total WAN cost ≈ 130 GB; QSFP save/sync cost ≈ 300 s per
+# model. Background; poll `jq .models /var/lib/hf-prefetch/state.json`.
+hf_prefetch_models:
+  - TinyLlama/TinyLlama-1.1B-Chat-v1.0            # keep, smoke model
+  - Qwen/Qwen3.6-35B-A3B                          # primary target (35B / 3B MoE, hybrid DeltaNet)
+  - Qwen/Qwen3-Coder-30B-A3B-Instruct             # fallback / A-B comparison
+# Flip this to true in CI / blocking workflows to have Ansible wait for
+# every model to land (default: false, returns immediately).
+hf_prefetch_wait_for_ready: false
 
-# Firewall (ufw) for Sparks: allow SSH, Ray (multi-node), vLLM API.
+# --- Firewall (ufw) ---
 firewall_default_incoming: deny
 firewall_default_outgoing: allow
-# Ray uses many TCP ports between Sparks (not only 6379). ufw allows full interconnect segment (link-local QSFP).
+# Ray uses many TCP ports across Sparks; trust the full interconnect segment.
 firewall_spark_interconnect_cidr: "169.254.0.0/16"
-# Global allows (any source). LAN-scoped rules below add explicit access from your subnet.
-firewall_allow_tcp_ports: [22, "{{ vllm_ray_port }}", "{{ vllm_api_port }}"]
-# Trust home/LAN for vLLM + Ray + SSH (override if your subnet differs, e.g. 10.0.0.0/24).
+# Global allow list (any source). Port 8000 is the NGC container API port.
+firewall_allow_tcp_ports: [22, "{{ vllm_ray_port }}", "{{ vllm_stacked_container_api_port }}"]
+# Trust home/LAN for vLLM API + Ray + SSH (override if your subnet differs).
 firewall_trusted_lan_cidr: "192.168.1.0/24"
-firewall_trusted_lan_tcp_ports: [22, "{{ vllm_api_port }}", "{{ vllm_ray_port }}"]
-
-# --- Optional: Docker + spark-vllm-docker (spark_provision_docker_vllm: true in provision_sparks) ---
-# firewall_allow_tcp_ports: [22, "{{ vllm_ray_port }}", "{{ vllm_api_port }}", 8000]
-# firewall_trusted_lan_tcp_ports: [22, "{{ vllm_ray_port }}", "{{ vllm_api_port }}", 8000]
-# spark_provision_docker_vllm: true
-# vllm_docker_model: "QuantTrio/MiniMax-M2-AWQ"
-# vllm_docker_api_port: 8000
+firewall_trusted_lan_tcp_ports: [22, "{{ vllm_stacked_container_api_port }}", "{{ vllm_ray_port }}"]

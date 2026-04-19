@@ -44,6 +44,26 @@ ansible-playbook playbooks/docker_dev_engine.yml -l ms02 -e docker_ce_release_ov
 
 If you later run GPU containers on `ms02`, add the **[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)** and run `nvidia-ctk runtime configure --runtime=docker` (and **`containerd`** only if something on the host uses it directly). Kind + GPU is a separate topic ([docker-cleanup.md](docker-cleanup.md) Kind note).
 
+## Syncing `~/Workspace` from the Mac (additive, no delete)
+
+When moving day-to-day development onto `ms02`, it's useful to push the
+operator's `~/Workspace` tree from the Mac controller. The
+[`playbooks/sync_workspace.yml`](../playbooks/sync_workspace.yml) playbook
+handles it — crucially **without** `--delete`, so files tidied off the Mac
+to reclaim disk stay put on `ms02`.
+
+```bash
+# preview
+ansible-playbook playbooks/sync_workspace.yml -l ms02 -e workspace_sync_dry_run=true
+
+# real sync
+ansible-playbook playbooks/sync_workspace.yml -l ms02
+```
+
+The playbook auto-detects whether you have Homebrew's GNU rsync (prefers it)
+or falls back to macOS's bundled `openrsync` with a reduced flag set. Full
+details + rationale: [`llmwiki/concepts/workspace-sync.md`](../llmwiki/concepts/workspace-sync.md).
+
 ## References
 
 - [Docker Engine install (Ubuntu)](https://docs.docker.com/engine/install/ubuntu/)

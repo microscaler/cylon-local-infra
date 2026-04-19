@@ -1,0 +1,32 @@
+---
+- name: Stop and disable bare-metal vllm-stacked on leader
+  ansible.builtin.systemd:
+    name: vllm-stacked
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Stop and disable bare-metal Ray head on leader
+  ansible.builtin.systemd:
+    name: ray-head
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Stop and disable bare-metal Ray worker on followers
+  ansible.builtin.systemd:
+    name: ray-worker
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: inventory_hostname != (groups['sparks'] | sort | first)
+
+- name: Stop and disable single-node vllm.service on leader
+  ansible.builtin.systemd:
+    name: vllm
+    state: stopped
+    enabled: false
+  failed_when: false
+  when: inventory_hostname == (groups['sparks'] | sort | first)

@@ -1,0 +1,29 @@
+[Unit]
+Description=vLLM stacked-container auto-upgrade daemon (Cylon local-infra)
+Documentation=file://{{ vllm_autoupgrade_install_dir }}/vllm_stack_autoupgrade.py
+After=network-online.target docker.service ngc-image-sync.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User={{ vllm_autoupgrade_run_user }}
+Group={{ vllm_autoupgrade_run_group }}
+WorkingDirectory={{ vllm_autoupgrade_runtime_home }}
+Environment=HOME={{ vllm_autoupgrade_runtime_home }}
+Environment=XDG_CONFIG_HOME={{ vllm_autoupgrade_runtime_home }}/.config
+ExecStart=/usr/bin/python3 {{ vllm_autoupgrade_install_dir }}/vllm_stack_autoupgrade.py \
+  --config {{ vllm_autoupgrade_config_dir }}/config.yaml \
+  --state {{ vllm_autoupgrade_state_file }} \
+  -v
+Restart=always
+RestartSec=30
+TimeoutStopSec=90
+KillMode=mixed
+KillSignal=SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vllm-stack-autoupgrade
+
+[Install]
+WantedBy=multi-user.target

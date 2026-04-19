@@ -1,0 +1,90 @@
+---
+# Install vllm-stack-autoupgrade on the leader Spark only. Peers just need
+# the already-provisioned nvidia@host → nvidia@peer QSFP ssh key so the
+# daemon can start their worker containers.
+
+- name: Set fact — leader host
+  ansible.builtin.set_fact:
+    vllm_autoupgrade_leader: "{{ (groups['sparks'] | sort | first) }}"
+  run_once: true
+
+- name: Determine each host's IPv4 on the interconnect (for peer entries)
+  ansible.builtin.shell: |
+    ip -4 -o addr show dev {{ nccl_interface }} 2>/dev/null | awk '{print $4}' | cut -d/ -f1
+  args:
+    executable: /bin/bash
+  register: vllm_autoupgrade_ic_ip_out
+  changed_when: false
+  check_mode: false
+
+- name: Record interconnect IP for this host
+  ansible.builtin.set_fact:
+    vllm_autoupgrade_interconnect_ip: "{{ vllm_autoupgrade_ic_ip_out.stdout | trim }}"
+
+- name: Leader-only — install and configure vllm-stack-autoupgrade daemon
+  when: inventory_hostname == vllm_autoupgrade_leader
+  block:
+
+    - name: Install runtime dependencies (python3-yaml, openssh-client)
+      ansible.builtin.apt:
+        name:
+          - python3-yaml
+          - openssh-client
+        state: present
+        update_cache: false
+
+    - name: Create install / config / state directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode | default('0755') }}"
+      loop:
+        - { path: "{{ vllm_autoupgrade_install_dir }}" }
+        - { path: "{{ vllm_autoupgrade_config_dir }}" }
+        - { path: "{{ vllm_autoupgrade_state_dir }}",
+            owner: "{{ vllm_autoupgrade_run_user }}",
+            group: "{{ vllm_autoupgrade_run_group }}",
+            mode: "0755" }
+
+    - name: Deliver vllm_stack_autoupgrade.py
+      ansible.builtin.copy:
+        src: vllm_stack_autoupgrade.py
+        dest: "{{ vllm_autoupgrade_install_dir }}/vllm_stack_autoupgrade.py"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart vllm-stack-autoupgrade
+
+    - name: Render daemon config
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: "{{ vllm_autoupgrade_config_dir }}/config.yaml"
+        owner: root
+        group: "{{ vllm_autoupgrade_run_group }}"
+        mode: "0640"
+
+    - name: Render systemd unit
+      ansible.builtin.template:
+        src: vllm-stack-autoupgrade.service.j2
+        dest: "/etc/systemd/system/{{ vllm_autoupgrade_unit_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart vllm-stack-autoupgrade
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable vllm-stack-autoupgrade service
+      ansible.builtin.systemd:
+        name: "{{ vllm_autoupgrade_unit_name }}"
+        enabled: "{{ vllm_autoupgrade_enable_service | bool }}"
+
+    - name: Start vllm-stack-autoupgrade service
+      ansible.builtin.systemd:
+        name: "{{ vllm_autoupgrade_unit_name }}"
+        state: started
+      when: vllm_autoupgrade_start_service | bool

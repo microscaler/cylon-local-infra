@@ -1,0 +1,30 @@
+[Unit]
+Description=NGC/OCI image prefetch + peer-sync daemon (Cylon local-infra)
+Documentation=file://{{ ngc_image_sync_install_dir }}/ngc_image_service.py
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User={{ ngc_image_sync_run_user }}
+Group={{ ngc_image_sync_run_group }}
+WorkingDirectory={{ ngc_image_sync_runtime_home }}
+# ssh needs ~/.ssh/; HOME must point at the runtime user's home.
+Environment=HOME={{ ngc_image_sync_runtime_home }}
+Environment=XDG_CONFIG_HOME={{ ngc_image_sync_runtime_home }}/.config
+ExecStart=/usr/bin/python3 {{ ngc_image_sync_install_dir }}/ngc_image_service.py \
+  --config {{ ngc_image_sync_config_dir }}/config.yaml \
+  --state {{ ngc_image_sync_state_file }} \
+  -v
+Restart=always
+RestartSec=30
+TimeoutStopSec=90
+KillMode=mixed
+KillSignal=SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ngc-image-sync
+
+[Install]
+WantedBy=multi-user.target

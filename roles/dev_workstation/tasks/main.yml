@@ -1,0 +1,41 @@
+---
+# Remote-IDE friendliness (Cursor / VS Code / JetBrains Gateway over SSH).
+#
+# Why a separate role:
+#   These sysctls are dev-only noise on the Sparks (inference nodes — no
+#   editor ever attaches), but must survive a host rebuild on ms02 so the
+#   next agent that opens a Remote-SSH session doesn't get silent ENOSPC.
+#
+# What this role does NOT do:
+#   - Install the Cursor/VSCode remote server — those are written by the IDE
+#     itself on first connection into ~/.cursor-server / ~/.vscode-server.
+#   - Manage ~/.ssh/config — that's operator-side (on the Mac), not ms02.
+
+- name: Remote-IDE friendliness on dev workstation
+  tags: [dev_workstation, dev-workstation, ide]
+  block:
+    - name: Set inotify limits (persistent) for remote IDE file watchers
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-dev-workstation.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by cylon-local-infra :: roles/dev_workstation.
+          # Raise inotify limits so Cursor/VS Code remote file-watchers don't
+          # hit ENOSPC on large multi-repo workspaces.
+          fs.inotify.max_user_watches = {{ dev_workstation_inotify_max_user_watches }}
+          fs.inotify.max_user_instances = {{ dev_workstation_inotify_max_user_instances }}
+      notify: Reload sysctl
+
+    - name: Apply sysctl limits immediately (live-tunable)
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-dev-workstation.conf
+      loop:
+        - { name: fs.inotify.max_user_watches,   value: "{{ dev_workstation_inotify_max_user_watches }}" }
+        - { name: fs.inotify.max_user_instances, value: "{{ dev_workstation_inotify_max_user_instances }}" }

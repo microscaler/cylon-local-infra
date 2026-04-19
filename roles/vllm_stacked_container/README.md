@@ -1,0 +1,54 @@
+# vllm_stacked_container — NVIDIA stacked Sparks (container, NGC image)
+
+The **only supported** vLLM stack on Sparks in this repo. Implements the
+[NVIDIA stacked-sparks](https://build.nvidia.com/spark/vllm/stacked-sparks) flow using
+the **NGC** image (`nvcr.io/nvidia/vllm`), **Docker** (`docker run` /
+`--restart unless-stopped`), and the interconnect + `vllm_distributed_extra_env` from
+`inventory/group_vars/sparks.yml`. No systemd units for Ray or vLLM.
+
+## Topology
+
+- **Leader**: Ray head container (`vllm-ngc-ray-head`) + `vllm serve` exec'd inside it.
+- **Follower(s)**: Ray worker container (`vllm-ngc-ray-worker-<host>`) that joins the
+  leader over the QSFP interconnect.
+- Both containers use `--network host --gpus all` and an `env-file` rendered from
+  `vllm_distributed_extra_env` plus per-host `VLLM_HOST_IP` / `MASTER_ADDR`.
+
+## Enable
+
+Container-only is the default in `roles/spark_provision/defaults/main.yml`
+(`spark_provision_vllm_stacked_container: true`). To run:
+
+```bash
+ansible-playbook playbooks/provision_sparks.yml --tags vllm_ngc_stack
+```
+
+## Key variables
+
+See `defaults/main.yml`. Most-edited:
+
+| Var | Default | Notes |
+|---|---|---|
+| `vllm_stacked_container_image` | `nvcr.io/nvidia/vllm:26.01-py3` (set in `sparks.yml`) | Pin per model / platform. |
+| `vllm_stacked_container_api_port` | `8000` | Open in `firewall_allow_tcp_ports`. |
+| `vllm_stacked_container_recreate` | `false` | Set `true` when image or env changes. |
+| `vllm_stacked_container_stop_bare_metal_systemd` | `true` | Stops legacy `vllm-stacked` / `ray-head` / `ray-worker` / `vllm` units (from old bare-metal deployments). |
+| `vllm_default_model`, `vllm_tensor_parallel_size`, `vllm_load_format`, `vllm_api_server_extra_args`, `vllm_enforce_eager` | — | Same names as before the bare-metal removal; they now feed the `vllm serve` command inside the head container. |
+
+## Operating
+
+```bash
+# Tail API (leader)
+ssh casibbald@nvidia1 'docker logs -f vllm-ngc-ray-head'
+
+# Tail Ray worker (follower)
+ssh casibbald@nvidia2 'docker logs -f vllm-ngc-ray-worker-nvidia2'
+
+# Smoke test
+curl -s http://nvidia1:8000/v1/models | jq
+```
+
+## See also
+
+- `llmwiki/concepts/ngc-stacked-container-stack.md`
+- `llmwiki/runs/2026-04-18-rip-out-bare-metal.md`

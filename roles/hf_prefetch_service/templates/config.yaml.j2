@@ -1,0 +1,45 @@
+---
+# /etc/hf-prefetch/config.yaml — managed by Ansible (roles/hf_prefetch_service).
+# Edit via inventory (hf_prefetch_models) rather than in place; re-run Ansible
+# to push changes. The service reloads this file on mtime change, so adding a
+# model is a `ansible-playbook … --tags hf_prefetch` away.
+
+cache_dir: "{{ hf_prefetch_cache_dir }}"
+image: "{{ hf_prefetch_image }}"
+poll_interval_sec: {{ hf_prefetch_poll_interval_sec | int }}
+
+models:
+{% for m in hf_prefetch_models %}
+{%   if m is string %}
+  - {{ m | to_json }}
+{%   else %}
+  - repo: {{ m.repo | to_json }}
+{%     if m.revision is defined %}
+    revision: {{ m.revision | to_json }}
+{%     endif %}
+{%   endif %}
+{% endfor %}
+
+sync_targets:
+{% for peer in (groups['sparks'] | sort) %}
+{%   if peer != hf_prefetch_leader %}
+{%     set peer_ip = hostvars[peer].hf_prefetch_interconnect_ip | default('') %}
+{%     if peer_ip %}
+{%       set peer_user = hostvars[peer].spark_runtime_user | default('nvidia') %}
+{%       set peer_home = hostvars[peer].spark_runtime_home | default('/home/nvidia') %}
+{%       set peer_hf_home = hostvars[peer].vllm_hf_home | default(peer_home ~ '/.cache/huggingface') %}
+{%       set peer_cache = peer_hf_home ~ '/hub' %}
+  - host: {{ peer_ip | to_json }}
+    user: {{ peer_user | to_json }}
+    cache_dir: {{ peer_cache | to_json }}
+    name: {{ peer | to_json }}
+{%     endif %}
+{%   endif %}
+{% endfor %}
+
+{% if hf_prefetch_env | length > 0 %}
+hf_env:
+{%   for k, v in (hf_prefetch_env | dictsort) %}
+  {{ k }}: {{ v | to_json }}
+{%   endfor %}
+{% endif %}

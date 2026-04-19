@@ -1,0 +1,48 @@
+---
+# hf_prefetch_service — long-running HF download + peer-sync daemon on the
+# leader Spark. Downloads once, rsyncs to every other Spark over the QSFP
+# interconnect, updates a JSON state file operators can poll.
+
+hf_prefetch_install_dir: /opt/hf-prefetch
+hf_prefetch_config_dir: /etc/hf-prefetch
+hf_prefetch_state_dir: /var/lib/hf-prefetch
+hf_prefetch_state_file: "{{ hf_prefetch_state_dir }}/state.json"
+hf_prefetch_unit_name: hf-prefetch.service
+
+# Runs under the runtime user (nvidia) — needs the docker + ssh key setup
+# already provisioned by sudoers + nccl_sparks.
+hf_prefetch_run_user: "{{ spark_runtime_user | default('nvidia') }}"
+hf_prefetch_run_group: "{{ spark_runtime_user | default('nvidia') }}"
+hf_prefetch_runtime_home: "{{ spark_runtime_home | default('/home/nvidia') }}"
+hf_prefetch_cache_dir: "{{ vllm_hf_home | default(hf_prefetch_runtime_home ~ '/.cache/huggingface') }}/hub"
+
+# Container image that provides the `hf` CLI. Defaults to the same tag we
+# serve with — always in sync by construction.
+hf_prefetch_image: "{{ vllm_stacked_container_image | default('nvcr.io/nvidia/vllm:26.01-py3') }}"
+
+# Reconciliation cadence. Keep > 5 s so poll loops don't spin.
+hf_prefetch_poll_interval_sec: 30
+
+# List of repo ids (strings) or dicts { repo, revision } to keep cached.
+# Override in inventory/group_vars/sparks.yml.
+hf_prefetch_models: []
+
+# Optional extra env vars passed into the `hf` container (e.g. HF_TOKEN).
+# IMPORTANT: this file is rendered from the YAML config — do NOT put real
+# secrets here; prefer `hf_prefetch_env_from_file` pointing at a sops/env file.
+hf_prefetch_env: {}
+
+# If set, systemd loads this file as `EnvironmentFile=` (for HF_TOKEN etc.).
+hf_prefetch_env_from_file: ""
+
+# Enable + start the service on install. Flip to `false` to install the unit
+# but leave operators to start it manually.
+hf_prefetch_enable: true
+hf_prefetch_start: true
+
+# Optional readiness gate. When true, after installing the service the role
+# waits for the state file to report `ready` for every model. Useful in CI
+# or when the operator explicitly wants to block; default is false so the
+# daemon simply runs in the background as the user requested.
+hf_prefetch_wait_for_ready: false
+hf_prefetch_wait_timeout_sec: 7200

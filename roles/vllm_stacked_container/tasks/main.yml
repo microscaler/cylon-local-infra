@@ -1,0 +1,174 @@
+---
+# NGC stacked Sparks — Docker Ray cluster + vllm serve (no systemd units for the stack).
+# Reference: https://build.nvidia.com/spark/vllm/stacked-sparks
+
+- name: Stop any legacy bare-metal Ray/vLLM systemd units (safe on clean hosts)
+  ansible.builtin.import_tasks: stop_bare_metal_systemd.yml
+  when: vllm_stacked_container_stop_bare_metal_systemd | bool
+
+- name: Interconnect IPv4 for Ray and NCCL env templates
+  ansible.builtin.import_tasks: preflight_interconnect.yml
+
+- name: Set fact — head interconnect IP (Ray worker join address)
+  ansible.builtin.set_fact:
+    spark_ray_head_ip: "{{ hostvars[groups['sparks'] | sort | first].spark_interconnect_ip }}"
+
+- name: Ensure install and config directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ vllm_stacked_container_install_dir }}"
+    - "{{ vllm_stacked_container_config_dir }}"
+
+- name: Download upstream run_cluster.sh (optional operator reference)
+  ansible.builtin.get_url:
+    url: "{{ vllm_stacked_container_run_cluster_url }}"
+    dest: "{{ vllm_stacked_container_install_dir }}/run_cluster.sh"
+    mode: "0755"
+    force: true
+  when: vllm_stacked_container_install_run_cluster_script | bool
+
+- name: Pull NGC vLLM image
+  ansible.builtin.command:
+    cmd: docker pull {{ vllm_stacked_container_image }}
+  register: vllm_stacked_container_pull_out
+  changed_when: >-
+    'Image is up to date' not in (
+    (vllm_stacked_container_pull_out.stdout | default(''))
+    ~ (vllm_stacked_container_pull_out.stderr | default(''))
+    )
+  when: vllm_stacked_container_pull_image | bool
+
+- name: Deploy Ray head env file
+  ansible.builtin.template:
+    src: ngc-ray-head.env.j2
+    dest: "{{ vllm_stacked_container_config_dir }}/head.env"
+    mode: "0644"
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Deploy Ray worker env file
+  ansible.builtin.template:
+    src: ngc-ray-worker.env.j2
+    dest: "{{ vllm_stacked_container_config_dir }}/worker-{{ inventory_hostname }}.env"
+    mode: "0644"
+  when: inventory_hostname != (groups['sparks'] | sort | first)
+
+# --- Ray head (leader only) ---
+- name: Remove Ray head container when recreating
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_stacked_container_ray_head_name }}"
+  failed_when: false
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_stacked_container_recreate | bool
+
+- name: Inspect Ray head container state
+  ansible.builtin.command:
+    cmd: docker container inspect -f "{{ '{{' }}json .State.Running{{ '}}' }}" "{{ vllm_stacked_container_ray_head_name }}"
+  register: vllm_stacked_container_head_running
+  failed_when: false
+  changed_when: false
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Start Ray head container (NGC image, host network)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker run -d --restart unless-stopped \
+      --name "{{ vllm_stacked_container_ray_head_name }}" \
+      --entrypoint /bin/bash \
+      --network host \
+      --shm-size "{{ vllm_stacked_container_shm_size }}" \
+      --gpus all \
+      --env-file "{{ vllm_stacked_container_config_dir }}/head.env" \
+      -v "{{ vllm_stacked_container_hf_home }}:/root/.cache/huggingface" \
+      "{{ vllm_stacked_container_image }}" \
+      -c 'ray start --block --head --node-ip-address="{{ spark_interconnect_ip }}" --port="{{ vllm_ray_port }}"'
+  args:
+    executable: /bin/bash
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_stacked_container_recreate | bool
+      or vllm_stacked_container_head_running.rc != 0
+      or (vllm_stacked_container_head_running.stdout | default("") | trim) == "false"
+  register: vllm_stacked_container_head_start
+
+- name: Wait for Ray GCS on head node
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ vllm_ray_port | int }}"
+    delay: 3
+    timeout: 300
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+
+# --- Ray workers (followers) ---
+- name: Remove Ray worker container when recreating
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_stacked_container_ray_worker_name }}"
+  failed_when: false
+  when:
+    - inventory_hostname != (groups['sparks'] | sort | first)
+    - vllm_stacked_container_recreate | bool
+
+- name: Inspect Ray worker container state
+  ansible.builtin.command:
+    cmd: docker container inspect -f "{{ '{{' }}json .State.Running{{ '}}' }}" "{{ vllm_stacked_container_ray_worker_name }}"
+  register: vllm_stacked_container_worker_running
+  failed_when: false
+  changed_when: false
+  when: inventory_hostname != (groups['sparks'] | sort | first)
+
+- name: Start Ray worker container
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker run -d --restart unless-stopped \
+      --name "{{ vllm_stacked_container_ray_worker_name }}" \
+      --entrypoint /bin/bash \
+      --network host \
+      --shm-size "{{ vllm_stacked_container_shm_size }}" \
+      --gpus all \
+      --env-file "{{ vllm_stacked_container_config_dir }}/worker-{{ inventory_hostname }}.env" \
+      -v "{{ vllm_stacked_container_hf_home }}:/root/.cache/huggingface" \
+      "{{ vllm_stacked_container_image }}" \
+      -c 'ray start --block --address="{{ spark_ray_head_ip }}:{{ vllm_ray_port }}" --node-ip-address="{{ spark_interconnect_ip }}"'
+  args:
+    executable: /bin/bash
+  when:
+    - inventory_hostname != (groups['sparks'] | sort | first)
+    - vllm_stacked_container_recreate | bool
+      or vllm_stacked_container_worker_running.rc != 0
+      or (vllm_stacked_container_worker_running.stdout | default("") | trim) == "false"
+  register: vllm_stacked_container_worker_start
+
+- name: Pause for Ray worker registration before vLLM serve
+  ansible.builtin.pause:
+    seconds: "{{ vllm_stacked_container_ray_join_delay_sec | int }}"
+  run_once: true
+  when: vllm_stacked_container_start_api | bool
+
+- name: Check for vLLM serve in head container
+  ansible.builtin.command:
+    cmd: docker exec "{{ vllm_stacked_container_ray_head_name }}" bash -lc "pgrep -af '[v]llm serve' || true"
+  register: vllm_stacked_container_vllm_ps
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_stacked_container_start_api | bool
+
+- name: Start vLLM OpenAI server inside head container (detached)
+  # `docker exec -d` orphans the child shell's stdout/stderr — without this redirect
+  # the output vanishes and any crash is undiagnosable. Tail the log with:
+  #   ssh casibbald@<leader> 'docker exec {{ vllm_stacked_container_ray_head_name }} tail -f /root/vllm-serve.log'
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -d "{{ vllm_stacked_container_ray_head_name }}" bash -lc \
+    'exec > /root/vllm-serve.log 2>&1; vllm serve "{{ vllm_default_model }}" --tensor-parallel-size {{ vllm_tensor_parallel_size | int }} --host "{{ vllm_stacked_container_api_host }}" --port {{ vllm_stacked_container_api_port | int }} --distributed-executor-backend ray{% if vllm_load_format | default("") | length > 0 %} --load-format {{ vllm_load_format }}{% endif %}{% if vllm_enforce_eager | default(false) | bool %} --enforce-eager{% endif %} {{ vllm_api_server_extra_args | default([]) | join(" ") }}'
+  args:
+    executable: /bin/bash
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_stacked_container_start_api | bool
+    - vllm_stacked_container_vllm_ps.stdout | default("") | length == 0
+  register: vllm_stacked_container_api_start

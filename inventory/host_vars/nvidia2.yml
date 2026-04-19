@@ -1,0 +1,2 @@
+# Follower (gx10-47b5): same LAN iface as leader; persist IPv6-off on LAN for consistent ops (manual sysctl applied 2026-04).
+spark_lan_disable_ipv6_on_interface: "enP7s7"

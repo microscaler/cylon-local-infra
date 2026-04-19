@@ -1,0 +1,107 @@
+---
+# Install the ngc-image-sync daemon on the leader Spark. Peers just need
+# the interconnect ssh key already provisioned by playbooks/nccl_sparks.yml —
+# the sync goes nvidia@leader -> nvidia@peer over 169.254.x.
+
+- name: Set fact — leader host
+  ansible.builtin.set_fact:
+    ngc_image_sync_leader: "{{ (groups['sparks'] | sort | first) }}"
+  run_once: true
+
+- name: Determine each host's IPv4 on the interconnect (for sync targets)
+  ansible.builtin.shell: |
+    ip -4 -o addr show dev {{ nccl_interface }} 2>/dev/null | awk '{print $4}' | cut -d/ -f1
+  args:
+    executable: /bin/bash
+  register: ngc_image_sync_ic_ip_out
+  changed_when: false
+  check_mode: false
+
+- name: Record interconnect IP for this host
+  ansible.builtin.set_fact:
+    ngc_image_sync_interconnect_ip: "{{ ngc_image_sync_ic_ip_out.stdout | trim }}"
+
+- name: Leader-only — install and configure ngc-image-sync daemon
+  when: inventory_hostname == ngc_image_sync_leader
+  block:
+
+    - name: Install runtime dependencies (python3-yaml, openssh-client)
+      ansible.builtin.apt:
+        name:
+          - python3-yaml
+          - openssh-client
+        state: present
+        update_cache: false
+
+    - name: Create install / config / state directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode | default('0755') }}"
+      loop:
+        - { path: "{{ ngc_image_sync_install_dir }}" }
+        - { path: "{{ ngc_image_sync_config_dir }}" }
+        - { path: "{{ ngc_image_sync_state_dir }}",
+            owner: "{{ ngc_image_sync_run_user }}",
+            group: "{{ ngc_image_sync_run_group }}",
+            mode: "0755" }
+
+    - name: Deliver ngc_image_service.py
+      ansible.builtin.copy:
+        src: ngc_image_service.py
+        dest: "{{ ngc_image_sync_install_dir }}/ngc_image_service.py"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart ngc-image-sync
+
+    - name: Render daemon config (images + sync targets + poll interval)
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: "{{ ngc_image_sync_config_dir }}/config.yaml"
+        owner: root
+        group: "{{ ngc_image_sync_run_group }}"
+        mode: "0640"
+
+    - name: Render systemd unit
+      ansible.builtin.template:
+        src: ngc-image-sync.service.j2
+        dest: "/etc/systemd/system/{{ ngc_image_sync_unit_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart ngc-image-sync
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable ngc-image-sync service
+      ansible.builtin.systemd:
+        name: "{{ ngc_image_sync_unit_name }}"
+        enabled: "{{ ngc_image_sync_enable | bool }}"
+
+    - name: Start ngc-image-sync service
+      ansible.builtin.systemd:
+        name: "{{ ngc_image_sync_unit_name }}"
+        state: started
+      when: ngc_image_sync_start | bool
+
+    - name: (Optional) Wait for every tracked image to be READY
+      when:
+        - ngc_image_sync_wait_for_ready | bool
+        - ngc_image_sync_images | length > 0
+      ansible.builtin.command:
+        cmd: >-
+          python3 -c 'import json,sys;d=json.load(open("{{ ngc_image_sync_state_file }}"));
+          images=d.get("images",{});
+          errored=[k for k,v in images.items() if v.get("status")=="error"];
+          pending=[k for k,v in images.items() if v.get("status") not in ("ready","pruned")];
+          sys.exit(0 if not errored and not pending else 1)'
+      register: ngc_image_sync_ready_probe
+      retries: "{{ (ngc_image_sync_wait_timeout_sec | int // 30) }}"
+      delay: 30
+      until: ngc_image_sync_ready_probe.rc == 0
+      changed_when: false

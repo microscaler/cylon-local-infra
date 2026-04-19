@@ -1,0 +1,14 @@
+---
+- name: Reload hf-prefetch config
+  # The daemon re-reads config.yaml on mtime change; no systemctl restart needed.
+  # We still want a handler hook so operators see "config updated" in the play.
+  ansible.builtin.command:
+    cmd: /bin/true
+  changed_when: false
+
+- name: Restart hf-prefetch
+  ansible.builtin.systemd:
+    name: "{{ hf_prefetch_unit_name }}"
+    state: restarted
+    daemon_reload: true
+  when: hf_prefetch_start | bool

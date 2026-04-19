@@ -1,0 +1,7 @@
+---
+- name: Restart ngc-image-sync
+  ansible.builtin.systemd:
+    name: "{{ ngc_image_sync_unit_name }}"
+    state: restarted
+    daemon_reload: true
+  when: ngc_image_sync_start | bool

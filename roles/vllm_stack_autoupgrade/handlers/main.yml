@@ -1,0 +1,7 @@
+---
+- name: Restart vllm-stack-autoupgrade
+  ansible.builtin.systemd:
+    name: "{{ vllm_autoupgrade_unit_name }}"
+    state: restarted
+    daemon_reload: true
+  when: vllm_autoupgrade_start_service | bool

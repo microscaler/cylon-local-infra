@@ -1,0 +1,36 @@
+---
+# ngc_image_service — leader-only systemd daemon that keeps configured OCI
+# images current on nvidia1 and replicates new tags to peer Sparks over the
+# QSFP interconnect. Polls weekly by default.
+
+ngc_image_sync_install_dir: /opt/ngc-image-sync
+ngc_image_sync_config_dir: /etc/ngc-image-sync
+ngc_image_sync_state_dir: /var/lib/ngc-image-sync
+ngc_image_sync_state_file: "{{ ngc_image_sync_state_dir }}/state.json"
+ngc_image_sync_unit_name: ngc-image-sync.service
+
+# Runs as the runtime user so it inherits nvidia@host→nvidia@peer ssh (set up
+# by playbooks/nccl_sparks.yml) and the docker group membership from
+# roles/sudoers defaults.
+ngc_image_sync_run_user: "{{ spark_runtime_user | default('nvidia') }}"
+ngc_image_sync_run_group: "{{ spark_runtime_user | default('nvidia') }}"
+ngc_image_sync_runtime_home: "{{ spark_runtime_home | default('/home/nvidia') }}"
+
+# Weekly (operator override in inventory when first bringing a new model online
+# — set to 3600 to pick up a newly-published tag within the hour).
+ngc_image_sync_poll_interval_sec: 604800
+ngc_image_sync_startup_delay_sec: 0
+
+# List of image specs — override in inventory/group_vars/sparks.yml.
+# Each item: { repo, tag_pattern?, keep_latest?, always_keep?, prune_stale? }
+ngc_image_sync_images: []
+
+# Whether to install + start the service.
+ngc_image_sync_enable: true
+ngc_image_sync_start: true
+
+# Optional: block the Ansible run until every configured image has reached
+# status=ready (first-time bring-up / CI). Default off — daemon runs in the
+# background as designed.
+ngc_image_sync_wait_for_ready: false
+ngc_image_sync_wait_timeout_sec: 7200

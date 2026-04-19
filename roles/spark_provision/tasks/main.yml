@@ -1,6 +1,7 @@
 ---
-# Canonical Spark provisioning (replaces docker_hosts, vllm_sparks, vllm_stack, bringup, etc.).
-# Phases toggled via spark_provision_* in group_vars/sparks.yml (see defaults/main.yml).
+# Canonical Spark provisioning — container-only (NGC).
+# Bare-metal venv path (roles/vllm) and custom-image path (roles/vllm_docker_stack)
+# were removed 2026-04; see llmwiki/runs/2026-04-18-rip-out-bare-metal.md.
 
 - name: Phase — sudoers and operators
   ansible.builtin.include_role:
@@ -12,7 +13,7 @@
   ansible.builtin.include_role:
     name: cuda
     tasks_from: apt_cleanup.yml
-  tags: [spark, prep, cuda, docker, vllm]
+  tags: [spark, prep, cuda, docker]
   when: spark_provision_cuda_apt_cleanup | default(true) | bool
 
 - name: Phase — APT upgrade
@@ -27,10 +28,10 @@
   tags: [spark, docker]
   when: spark_provision_docker | default(true) | bool
 
-- name: Phase — Firewall (vLLM / Ray ports)
+- name: Phase — Firewall (vLLM API + Ray ports)
   ansible.builtin.include_role:
     name: firewall
-  tags: [spark, firewall, vllm]
+  tags: [spark, firewall]
   when: spark_provision_firewall | default(true) | bool
 
 - name: Phase — optional LAN IPv6 sysctl (per host_vars, e.g. broken v6 default on LAN)
@@ -38,69 +39,35 @@
   tags: [spark, network, sysctl, lan_ipv6]
   when: spark_provision_lan_ipv6_sysctl | default(true) | bool
 
-- name: Phase — CUDA toolkit (NVIDIA repo)
+- name: Phase — CUDA toolkit on host (only for playbooks/nccl_sparks.yml host-side build)
   ansible.builtin.include_role:
     name: cuda
-  tags: [spark, cuda, vllm]
-  when: spark_provision_cuda_toolkit | default(true) | bool
+  tags: [spark, cuda]
+  when: spark_provision_cuda_toolkit | default(false) | bool
 
-- name: Phase — vLLM venv and Ray pip
+- name: Phase — Hugging Face prefetch daemon (leader-only; downloads once, rsyncs to peers)
   ansible.builtin.include_role:
-    name: vllm
-  tags: [spark, vllm]
-  when: spark_provision_vllm | default(true) | bool
-
-- name: Phase — single-node vllm.service (leader)
-  ansible.builtin.include_role:
-    name: vllm
-    tasks_from: serve.yml
-  tags: [spark, vllm, vllm_serve]
-  when:
-    - spark_provision_vllm_serve | default(true) | bool
-    - inventory_hostname == (groups['sparks'] | sort | first)
-    - vllm_sparks_deploy_single_node_service | default(true) | bool
-
-- name: Phase — vLLM API smoke test
-  ansible.builtin.include_role:
-    name: vllm
-    tasks_from: provision_api_test.yml
-  tags: [spark, vllm, vllm_test]
-  when: spark_provision_vllm_test | default(true) | bool
-
-- name: Phase — stacked vLLM (Ray head/worker + vllm-stacked)
-  ansible.builtin.include_role:
-    name: vllm
-    tasks_from: provision_stack.yml
-  tags: [spark, stack, vllm_stack]
-  when: spark_provision_vllm_stack | default(false) | bool
-
-- name: Phase — report API endpoint (leader, after stack)
-  ansible.builtin.include_role:
-    name: vllm
-    tasks_from: report_leader_endpoint.yml
-  tags: [spark, stack, report]
-  when:
-    - spark_provision_vllm_stack | default(false) | bool
-    - inventory_hostname == (groups['sparks'] | sort | first)
-
-- name: Phase — Hugging Face CLI + optional prefetch
-  ansible.builtin.include_role:
-    name: hf_spark
+    name: hf_prefetch_service
   tags: [spark, hf, hf_prefetch]
   when: spark_provision_hf | default(false) | bool
 
-- name: Phase — Docker-based vLLM (spark-vllm-docker / systemd)
+- name: Phase — NGC image sync daemon (leader-only; weekly pull + save/load → peers)
   ansible.builtin.include_role:
-    name: vllm_docker_stack
-  tags: [spark, docker_vllm]
-  when: spark_provision_docker_vllm | default(false) | bool
+    name: ngc_image_service
+  tags: [spark, ngc, ngc_image_sync]
+  when: spark_provision_ngc_image_sync | default(false) | bool
 
-- name: Phase — verify Ray cluster
+- name: Phase — vLLM stack auto-upgrade daemon (leader-only; quiet-window guarded)
   ansible.builtin.include_role:
-    name: vllm
-    tasks_from: verify_ray.yml
-  tags: [spark, verify]
-  when: spark_provision_verify_ray | default(false) | bool
+    name: vllm_stack_autoupgrade
+  tags: [spark, vllm_autoupgrade]
+  when: spark_provision_vllm_autoupgrade | default(false) | bool
+
+- name: Phase — NGC stacked vLLM (Docker Ray + `vllm serve`)
+  ansible.builtin.include_role:
+    name: vllm_stacked_container
+  tags: [spark, vllm_ngc_stack, stack_ngc, vllm_container]
+  when: spark_provision_vllm_stacked_container | default(true) | bool
 
 - name: Phase — diagnostics (Docker + HF cache probes)
   ansible.builtin.include_role:

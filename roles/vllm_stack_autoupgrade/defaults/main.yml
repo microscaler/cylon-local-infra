@@ -1,0 +1,54 @@
+---
+# vllm_stack_autoupgrade — leader-only daemon that promotes newer NGC vLLM
+# images into the running stacked-Ray + vllm-serve deployment when:
+#   (a) ngc-image-sync has marked the tag `ready` on every node for at least
+#       `stabilization_sec`, and
+#   (b) the vLLM API has been quiescent for `quiet_window_sec` (no requests
+#       running / waiting / completing).
+# Opt-in per cluster — off by default.
+
+vllm_autoupgrade_install_dir: /opt/vllm-stack-autoupgrade
+vllm_autoupgrade_config_dir: /etc/vllm-stack-autoupgrade
+vllm_autoupgrade_state_dir: /var/lib/vllm-stack-autoupgrade
+vllm_autoupgrade_state_file: "{{ vllm_autoupgrade_state_dir }}/state.json"
+vllm_autoupgrade_unit_name: vllm-stack-autoupgrade.service
+
+vllm_autoupgrade_run_user: "{{ spark_runtime_user | default('nvidia') }}"
+vllm_autoupgrade_run_group: "{{ spark_runtime_user | default('nvidia') }}"
+vllm_autoupgrade_runtime_home: "{{ spark_runtime_home | default('/home/nvidia') }}"
+
+# The big kill switch. Set true in inventory/group_vars/sparks.yml when you're
+# ready to delegate image cutovers to the service.
+vllm_autoupgrade_enabled: false
+# Optional: pin to a specific tag (e.g. "26.03-py3"). When set, the service
+# promotes to this tag regardless of what ngc-image-sync has discovered —
+# handy for rolling back an auto-upgrade.
+vllm_autoupgrade_pinned_tag: ""
+
+# Where ngc-image-sync writes its state. Matches ngc_image_service defaults.
+vllm_autoupgrade_ngc_state_path: "{{ ngc_image_sync_state_file | default('/var/lib/ngc-image-sync/state.json') }}"
+
+# Image repo the service is watching. Must match exactly (with registry host).
+vllm_autoupgrade_repo: "nvcr.io/nvidia/vllm"
+vllm_autoupgrade_tag_pattern: '^\d{2}\.\d{2}-py3$'
+
+# Stack topology — inferred from the vllm_stacked_container role's defaults.
+vllm_autoupgrade_leader_container: "{{ vllm_stacked_container_ray_head_name | default('vllm-ngc-ray-head') }}"
+
+# Timing — the safety rails.
+vllm_autoupgrade_poll_interval_sec: 300       # 5 min outer loop
+vllm_autoupgrade_stabilization_sec: 3600      # 1 h: tag must be `ready` this long
+vllm_autoupgrade_quiet_window_sec: 300        # 5 min of quiet before bouncing
+vllm_autoupgrade_quiet_sample_sec: 30         # sample /metrics this often
+vllm_autoupgrade_max_wait_for_quiet_sec: 86400  # give up chasing quiet after 24 h
+vllm_autoupgrade_ray_gcs_wait_sec: 120
+vllm_autoupgrade_ray_cluster_wait_sec: 180
+vllm_autoupgrade_vllm_api_wait_sec: 3600      # first-boot load for a big model
+
+# vLLM metrics endpoint. Defaults to the port the role serves on.
+vllm_autoupgrade_metrics_url: >-
+  http://127.0.0.1:{{ vllm_stacked_container_api_port | default(8000) }}/metrics
+
+# Enable + start the systemd service on install.
+vllm_autoupgrade_enable_service: true
+vllm_autoupgrade_start_service: true

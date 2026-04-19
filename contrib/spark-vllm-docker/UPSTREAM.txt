@@ -1,5 +1,0 @@
-Repository: https://github.com/eugr/spark-vllm-docker
-Snapshot commit (local clone at vendor time): 288da8e91170b643845099455769818080e8d4a1
-Vendored files: hf-download.sh, launch-cluster.sh, autodiscover.sh, .env.example, LICENSE
-
-Refresh: copy from upstream or bump submodule when behavior changes.

@@ -1,0 +1,18 @@
+---
+# Defaults for the dev_workstation role.
+#
+# This role applies small, IDE-friendly tweaks on hosts that act as a remote
+# development target (Cursor Remote-SSH, VS Code Remote-SSH, JetBrains Gateway
+# all hit the same limits). Kept in a dedicated role because the tweaks are
+# orthogonal to Docker / Kind / firewall concerns and must survive host
+# rebuilds without pulling any other role in.
+
+# inotify watchers — one per file/dir the editor observes. Default 65536 is
+# not enough for a monorepo like shared-kind-cluster + cylon-local-infra +
+# minion-farm concurrently open. Cursor / VS Code hit ENOSPC instantly.
+dev_workstation_inotify_max_user_watches: 524288
+
+# inotify user instances — one per inotify_init() call. Each language-server
+# extension (rust-analyzer, gopls, pylance, tsserver) spawns a watcher; large
+# workspaces easily exhaust the default 128.
+dev_workstation_inotify_max_user_instances: 512

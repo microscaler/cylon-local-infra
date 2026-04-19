@@ -15,8 +15,17 @@ docker_group_users: [casibbald]
 docker_packages: []
 docker_daemon_config: {}
 
-# Firewall (ufw): SSH + TCP 80, 8080, 5000, 5001; default deny incoming, allow outgoing
-firewall_allow_tcp_ports: [22, 80, 8080, 5000, 5001, 10350]
+# Firewall (ufw):
+#   - Inbound from anywhere: SSH + HTTPs + a handful of long-standing dev ports.
+#     Tilt's UI (port 10348) is left OFF the any-source list on purpose — use LAN.
+#   - Inbound from local LAN only: big microservices range 8000-11000 (covers
+#     Tilt 10348, PW API :8000, BRRTRouter :8080, MinIO :9000/9001, Prom
+#     :9090/9091, etc.) + SSH. ufw accepts the `8000:11000` range verbatim.
+firewall_allow_tcp_ports: [22, 80, 5000, 5001, 10350]
+firewall_trusted_lan_cidr: "192.168.1.0/24"
+firewall_trusted_lan_tcp_ports:
+  - 22
+  - "8000:11000"
 
 # Kind: binary, node image (Kubernetes 1.34.3), and create cluster on playbook run
 kind_version: "v0.31.0"
