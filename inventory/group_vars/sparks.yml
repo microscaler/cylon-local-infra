@@ -131,29 +131,67 @@ vllm_ray_port: 6379
 vllm_hf_home: "{{ spark_runtime_home }}/.cache/huggingface"
 
 # --- NCCL / distributed env (carried into head.env + worker-<host>.env) ---
-# See llmwiki/concepts/ncclcommInitRank-abort-tp2.md for the root cause analysis.
-# Key finding (2026-04-18): NCCL_NET_PLUGIN=none disables plugin auto-load. The NGC
-# image ships four NCCL net plugins (aws-ofi-nccl, hpcx rdma-sharp, spectrum-x, ibext)
-# that probe RoCE/IB devices — on GB10 + ConnectX link-local this aborts before
-# NCCL's logger even starts. Forcing the built-in socket transport avoids the whole
-# plugin path. RAY_CGRAPH_get_timeout: v1 compiled DAG default (300s) can kill TP
-# workers on long steps.
+# See llmwiki/concepts/ncclcommInitRank-abort-tp2.md and
+# llmwiki/runs/2026-04-19-roce-cutover.md for the full arc.
+#
+# 2026-04-18 bring-up (TP=2 socket path):
+#   NCCL_NET_PLUGIN=none disables external NCCL net plugins. The NGC image ships
+#   four of them (aws-ofi-nccl, hpcx rdma-sharp, spectrum-x, ibext) that probe
+#   RoCE/IB devices — on GB10 + ConnectX-7 link-local this aborts before NCCL's
+#   own logger even starts. So: plugins off.
+#   We also set NCCL_IB_DISABLE=1, forcing the fallback to NCCL's built-in TCP
+#   socket transport over the QSFP IP. Rock-solid but slow.
+#
+# 2026-04-19 RoCE cutover (what the block below does today):
+#   Measured all-reduce bandwidth on the 200 Gb/s QSFP: sockets ≈ 2.0 GB/s,
+#   RoCE v2 + GPUDirect RDMA ≈ 13.9 GB/s (6.9× @ 1 GiB msgs, 12× @ 1 MiB msgs).
+#   Prefill is network-bound (a 3001-token prefill pushed 2.08 GB through the
+#   ring; TTFT dropped ~2× on long contexts after this change). Decode is
+#   unchanged — it's memory-bandwidth bound on the GPU, not interconnect.
+#
+# KEY INSIGHT: NCCL_NET_PLUGIN=none is NOT the same as NCCL_IB_DISABLE=1.
+#   "Plugin" = external tertiary NCCL extension (OFI / HPC-X / Spectrum-X / IB ext).
+#   "IB"     = NCCL's *internal* verbs transport, statically linked.
+#   The 26.01-py3 crash was inside the external OFI plugin. NCCL's internal IB
+#   path is untouched by that bug. So we keep plugins off (belt + braces) and
+#   flip ONLY NCCL_IB_DISABLE=0 to unlock RoCE safely on 26.03-py3.
+#
+# To roll back to the socket path, set NCCL_IB_DISABLE=1, NCCL_NET_GDR_LEVEL=0,
+# and `vllm_stacked_container_rdma_enabled: false`, then rerun the role with
+# --tags vllm_ngc_stack and `-e vllm_stacked_container_recreate=true`.
+#
+# RAY_CGRAPH_get_timeout: v1 compiled DAG default (300s) can kill TP workers on
+# long steps, hence 900s.
+
+# RoCE v2 HCA name (same on nvidia1 and nvidia2 — `rdma link show` on each).
+# This is the ConnectX-7 port that terminates the QSFP link to the peer Spark;
+# its sibling rocep1s0f1 and the second-ASIC roceP2p1s0f* devices are not cabled.
+nccl_ib_hca: rocep1s0f0
+
 vllm_distributed_extra_env:
+  # Bootstrap / out-of-band transports still ride the QSFP IP socket — NCCL
+  # uses it for the ncclUniqueId exchange even when the data path is RDMA.
   NCCL_SOCKET_IFNAME: "{{ nccl_interface }}"
   GLOO_SOCKET_IFNAME: "{{ nccl_interface }}"
   UCX_NET_DEVICES: "{{ nccl_interface }}"
   OMPI_MCA_btl_tcp_if_include: "{{ nccl_interface }}"
   TP_SOCKET_IFNAME: "{{ nccl_interface }}"
-  NCCL_IB_DISABLE: "1"
-  NCCL_NET_GDR_LEVEL: "0"
-  NCCL_NVLS_ENABLE: "0"
-  # Proven-green 2026-04-18: drop NET plugin auto-load (AWS OFI / HPC-X RDMA SHARP /
-  # Spectrum-X / IB ext) and rely on NCCL's built-in socket transport.
+  # --- RoCE v2 fast path (data plane) ---
+  NCCL_IB_DISABLE: "0"                    # enable NCCL's built-in verbs transport
+  NCCL_IB_HCA: "{{ nccl_ib_hca }}"        # pin to the cabled port (others are DOWN)
+  NCCL_NET_GDR_LEVEL: "PHB"               # GPUDirect RDMA: GPU↔NIC across PCIe host bridge.
+                                          #   Per `nvidia-smi topo -m` the GB10 GPU
+                                          #   sits at NODE distance from every NIC,
+                                          #   so PHB is the permissive floor.
+  # Keep external plugins off — the 26.01 abort was inside aws-ofi/hpcx/spectrum-x,
+  # not inside NCCL's internal IB transport. Belt-and-braces until we re-qualify.
   NCCL_NET_PLUGIN: "none"
-  # Defensive pairings (set at the same time as the fix; not individually re-verified):
+  # 2026-04-18 defensive pairings retained: no NVLink between separate Sparks,
+  # no shm between separate nodes, no NVLS, and CUMEM off to dodge the 26.01 bug.
   NCCL_P2P_DISABLE: "1"
   NCCL_CUMEM_ENABLE: "0"
   NCCL_SHM_DISABLE: "1"
+  NCCL_NVLS_ENABLE: "0"
   # WARN after the stack is stable; bump to INFO when diagnosing.
   NCCL_DEBUG: "WARN"
   RAY_memory_monitor_refresh_ms: "0"

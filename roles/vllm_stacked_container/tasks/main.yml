@@ -81,6 +81,7 @@
       --network host \
       --shm-size "{{ vllm_stacked_container_shm_size }}" \
       --gpus all \
+      {{ ('--device ' + vllm_stacked_container_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_stacked_container_rdma_enabled | bool) else '' }} \
       --env-file "{{ vllm_stacked_container_config_dir }}/head.env" \
       -v "{{ vllm_stacked_container_hf_home }}:/root/.cache/huggingface" \
       "{{ vllm_stacked_container_image }}" \
@@ -128,6 +129,7 @@
       --network host \
       --shm-size "{{ vllm_stacked_container_shm_size }}" \
       --gpus all \
+      {{ ('--device ' + vllm_stacked_container_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_stacked_container_rdma_enabled | bool) else '' }} \
       --env-file "{{ vllm_stacked_container_config_dir }}/worker-{{ inventory_hostname }}.env" \
       -v "{{ vllm_stacked_container_hf_home }}:/root/.cache/huggingface" \
       "{{ vllm_stacked_container_image }}" \

@@ -37,3 +37,17 @@ vllm_stacked_container_pull_image: true
 vllm_stacked_container_start_api: true
 # Seconds to wait after worker container before API start (Ray worker join).
 vllm_stacked_container_ray_join_delay_sec: 15
+
+# --- RDMA (RoCE v2) device passthrough ---
+# When true, Ray head/worker containers get access to the Mellanox verbs
+# character devices under /dev/infiniband, CAP_IPC_LOCK for pinning the
+# NCCL send/recv buffers, and an unlimited memlock rlimit. Required whenever
+# `vllm_distributed_extra_env.NCCL_IB_DISABLE` is "0" (i.e. the RoCE fast path).
+# Proven on 26.03-py3 / GB10 Blackwell 2026-04-19 — see
+# llmwiki/runs/2026-04-19-roce-cutover.md. Bandwidth went from ~2 GB/s (TCP
+# sockets) to ~13.9 GB/s (RoCE+GDR) on the 200 Gb/s QSFP fabric.
+#
+# Set to false to revert to the pure-socket path (also flip NCCL_IB_DISABLE=1
+# and NCCL_NET_GDR_LEVEL=0 in inventory/group_vars/sparks.yml to match).
+vllm_stacked_container_rdma_enabled: true
+vllm_stacked_container_rdma_device_path: /dev/infiniband

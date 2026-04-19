@@ -1,0 +1,29 @@
+---
+# One-shot RoCE cutover of the stacked vLLM container.
+#
+# Flips the NCCL data path from TCP sockets to RoCE v2 + GPUDirect RDMA by
+# recreating both Ray containers with new env vars + /dev/infiniband passthrough.
+# Also restarts `vllm serve` inside the head container.
+#
+# Designed to sidestep the known tag-propagation issue in spark_provision where
+# `--tags vllm_ngc_stack` hits only the outer include_role and skips inner
+# tasks. This play invokes the role directly so every task runs unconditionally.
+#
+# Usage (from the controller):
+#   ansible-playbook playbooks/cutover_roce.yml
+#
+# Rollback (revert to sockets):
+#   1) Edit inventory/group_vars/sparks.yml:
+#        NCCL_IB_DISABLE: "1"
+#        NCCL_NET_GDR_LEVEL: "0"
+#      and set vllm_stacked_container_rdma_enabled: false
+#   2) ansible-playbook playbooks/cutover_roce.yml
+
+- name: Spark cluster — cutover to RoCE v2 + GPUDirect RDMA
+  hosts: sparks
+  gather_facts: true
+  become: true
+  vars:
+    vllm_stacked_container_recreate: true
+  roles:
+    - vllm_stacked_container

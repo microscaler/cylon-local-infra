@@ -375,3 +375,33 @@ mode also needs task-aware budgets: the 12-ball puzzle hit the 2048
 length cap mid-procedure in OFF mode. No inventory changes, pure
 validation. Writeup, raw reasoning samples, and per-task budget table:
 [runs/2026-04-19-qwen3-thinking-validation.md](./runs/2026-04-19-qwen3-thinking-validation.md).
+
+## [2026-04-19] run | roce-cutover | shipped
+Flipped the NCCL data plane off TCP sockets and onto RoCE v2 + GPUDirect
+RDMA over the ConnectX-7 QSFP link. The 2026-04-18 workaround conflated
+two orthogonal knobs: `NCCL_NET_PLUGIN=none` (disables *external* plugins
+— the one that crashed on 26.01) and `NCCL_IB_DISABLE=1` (disables
+NCCL's *internal* verbs path — which was never the crasher). Kept the
+former off as belt-and-braces, flipped the latter on. Standalone
+two-rank `all_reduce_perf` proved the internal path: **sockets 2.02 GB/s
+→ RoCE+GDR 13.93 GB/s (6.9×)** at 1 GiB messages, **12× on 1 MiB**
+(latency-sensitive) — log line `NCCL INFO NET/IB : Using
+[0]rocep1s0f0:1/RoCE [RO]`. Container role updated to inject `--device
+/dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1:-1` (gated on a
+new `vllm_stacked_container_rdma_enabled` default=true). Shipped
+one-shot `playbooks/cutover_roce.yml` that invokes the role directly to
+sidestep the known `spark_provision` tag-propagation issue. Cutover
+recap: nvidia1 ok=18 changed=4, nvidia2 ok=12 changed=3, 30 s. Workload
+post-cutover (Qwen3.6-35B-A3B, TP=2, 262144 ctx): single-stream decode
+35→47.6 tok/s (+36%); batch=16 aggregate 164→265.9 tok/s (+62%); new
+ceiling batch=64 at **638 tok/s**; 3k prefill 0.85s→0.44s (1.9×); 40k
+prefill ~22s→5.78s (**3.8×**). Verified on RoCE HCA port counters:
+3000-token prefill moved 1008 MiB xmit + 1008 MiB rcv through
+`rocep1s0f0`, 0 MiB through the socket interface — 100% RDMA data
+plane. Rollback is two env vars + one flag (documented). Concept page
+[concepts/nccl-on-spark.md](./concepts/nccl-on-spark.md) rewritten as
+the RoCE+GDR canonical. Deferred follow-ups: MTU 1024→4096 (native HCA
+max), second-ASIC QSFP bond (roceP2p1s0f0 is ACTIVE but uncabled),
+re-qualify external OFI plugin on 26.03-py3, fix include_role tag
+propagation in `spark_provision`. Writeup:
+[runs/2026-04-19-roce-cutover.md](./runs/2026-04-19-roce-cutover.md).
