@@ -346,3 +346,32 @@ needed. Follow-ups still on the table for future sessions: speculative
 decoding, FP8 weights, and an EP-vs-TP bake-off for the 256-expert MoE
 shape. Writeup:
 [runs/2026-04-19-qwen3-throughput-and-256k.md](./runs/2026-04-19-qwen3-throughput-and-256k.md).
+
+## [2026-04-19] run | qwen3-thinking-validation | shipped
+Validated reasoning output on the 262k-context stack across four prompt
+categories (hard math, code bug fix, 12-ball logic puzzle, creative
+haiku) in both thinking-ON and thinking-OFF modes with Qwen's
+recommended sampling profiles (ON: temp=0.6, top_p=0.95, top_k=20;
+OFF: temp=0.7, top_p=0.8, top_k=20). **Field-naming gotcha found**:
+the `qwen3` reasoning parser on vLLM 0.17.1 / 26.03-py3 populates
+`message.reasoning` (OpenAI o1 style), not `message.reasoning_content`
+(DeepSeek-R1 style) — earlier smoke tests were reading the wrong field
+and concluded the parser was broken; it was not. Reasoning quality is
+genuinely high: traces include numbered analysis, self-correction,
+verification steps, alternative solution methods, and edge-case
+identification (e.g. "density irrelevant because fully submerged",
+"no-water-underneath case is outside standard displacement
+assumption"). Decode rate is a flat 30-35 tok/s per stream regardless
+of mode or prompt. Thinking adds a 7-96× wall-time multiplier: bug-fix
++7.4× (clearer answer), math +9.4× (ran out of budget at 8192), haiku
++96× for the same 21-token output (overthink pathology, 88.7% of
+tokens were reasoning on the creative task). Key operational finding:
+**the sweet spot is not a single config — it's per-request
+`enable_thinking` with task-matched `max_tokens`**. Cluster settings
+stay at today's throughput-tuned values. Task-budget recipe:
+hard-math→ON+16384, logic/planning→ON+8192, code-debug→ON+4096,
+code-gen→OFF+4096, summary→OFF+2048, creative→OFF+1024. Non-thinking
+mode also needs task-aware budgets: the 12-ball puzzle hit the 2048
+length cap mid-procedure in OFF mode. No inventory changes, pure
+validation. Writeup, raw reasoning samples, and per-task budget table:
+[runs/2026-04-19-qwen3-thinking-validation.md](./runs/2026-04-19-qwen3-thinking-validation.md).
