@@ -85,14 +85,44 @@ vllm_tensor_parallel_size: 2
 # Leave empty unless you know the NGC image ships `fastsafetensors` (26.01-py3 does NOT).
 # Empty = omit --load-format flag → vLLM uses `auto`, which is safe.
 vllm_load_format: ""
-# Extra `vllm serve` args.
-# Qwen3.6-35B-A3B supports 262144 native / 1M extended context, but KV cache
-# on 2× GB10 unified memory caps us much earlier. 32768 is the proven-safe
-# first-boot value; raise once we've measured KV footprint. To revert to
-# TinyLlama for smoke: clear this list and set vllm_default_model above.
+# Extra `vllm serve` args — tuned for full-cluster throughput.
+#
+# Context: 262144 = Qwen3.6-35B-A3B native max_position_embeddings (no rope
+# extension). With 10 attention layers × 2 KV heads × 256 head_dim (BF16) the
+# per-token KV is ~20 KB total / ~10 KB per rank on TP=2, so one full-length
+# sequence costs ~5 GB — trivially fits the 70.66 GiB KV cache vLLM reported
+# at init on 26.03-py3. Paged KV only allocates what's used; ceiling is safe.
+#
+# Throughput: --gpu-memory-utilization 0.95 (up from 0.90) reclaims ~6.5 GB
+# KV headroom. --max-num-batched-tokens 16384 (8× the 2048 default) is the
+# chunked-prefill batch — bigger chunks = higher GB10 utilization at the
+# cost of bigger peak prefill memory, which we have headroom for.
+# --max-num-seqs 128 keeps the concurrent-sequence cap at something the KV
+# budget comfortably supports at mixed context lengths.
+#
+# Reasoning parser: qwen3 splits <think> into the OpenAI-compat
+# `reasoning_content` field so coder / agent consumers can suppress the
+# chain-of-thought monologue while keeping it available for debuggers.
+# See llmwiki/runs/2026-04-19-qwen3-throughput-and-256k.md for the
+# before/after measurements.
+#
+# Revert to smoke defaults: clear this list and set
+# vllm_default_model: "TinyLlama/TinyLlama-1.1B-Chat-v1.0".
 vllm_api_server_extra_args:
   - "--max-model-len"
-  - "32768"
+  - "262144"
+  - "--gpu-memory-utilization"
+  # GB10 reports 119.61 GiB visible to CUDA on boot, ~111.5 GiB free after
+  # host OS / dockerd / ray runtime overhead — 0.95 (→ 113.6 GiB) crashed
+  # init_device with "Free memory … less than desired GPU memory
+  # utilization". 0.92 (→ 110.0 GiB) leaves ~1.5 GiB safety margin.
+  - "0.92"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--max-num-seqs"
+  - "128"
+  - "--reasoning-parser"
+  - "qwen3"
 # Skip torch.compile / inductor kernels only if compilation fails on this GPU stack.
 vllm_enforce_eager: false
 # Ray GCS port (firewall + preflight). Container Ray still uses the same default.

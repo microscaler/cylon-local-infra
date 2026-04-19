@@ -317,3 +317,32 @@ today's run:
 operator doc: [`docs/dev_hosts.md`](../docs/dev_hosts.md) § Local names
 for kind services; public guide:
 [`msmctl_docs/KIND_HOSTS_FILE.md`](../../msmctl_docs/KIND_HOSTS_FILE.md).
+
+## [2026-04-19] run | qwen3-throughput-and-256k | shipped
+Follow-up to the Qwen3.6-35B-A3B promotion: raised `--max-model-len`
+from 32768 to the model's native **262144**, and tuned three throughput
+knobs that were still at defaults. Concrete flags landed in
+`vllm_api_server_extra_args`: `--gpu-memory-utilization 0.92` (0.95
+crashed `init_device` because GB10 only has ~111.5 / 119.61 GiB free on
+boot — ~8 GiB is permanently pinned by host / docker / ray), and
+`--max-num-batched-tokens 16384` (8× the 2048 default, which was the
+actual bottleneck in concurrent prefill), and `--max-num-seqs 128`,
+plus `--reasoning-parser qwen3` so OpenAI consumers get
+`reasoning_content` separated from `content`. KV cache doubled on the
+bump: per-rank 70.66 → 72.24 GiB, cluster-total **144.48 GiB holding
+1,890,240 tokens = 28.42× concurrency at full 256k context**. Measured
+throughput with proper batch-size-sweep warmup (not just batch=1 —
+which is what made my first post-change bench look like a regression):
+single-stream 29 → **35 tok/s (+22%)**, saturated aggregate 86 (batch=4)
+→ **164 tok/s (batch=16, +90%)**. Logger also reported steady-state
+decode of 63 tok/s when fed a hot single request. Long-context proof:
+fed a deliberately oversized 46,023-token prompt (would have been
+rejected pre-change), completed end-to-end in 25 s at ~1,833 tok/s
+effective rate. At 25k prompt + 4096-token response the model returned
+a clean 3-bullet summary with `finish_reason: stop` and no OOM /
+eviction. Autoupgrade daemon inherits the new argv automatically
+(`docker inspect` captures live command on bounce), no daemon change
+needed. Follow-ups still on the table for future sessions: speculative
+decoding, FP8 weights, and an EP-vs-TP bake-off for the 256-expert MoE
+shape. Writeup:
+[runs/2026-04-19-qwen3-throughput-and-256k.md](./runs/2026-04-19-qwen3-throughput-and-256k.md).
