@@ -1,0 +1,20 @@
+---
+# Handlers for the nfs_server role.
+#
+# Re-export is cheap and preserves existing mounts; a full service restart
+# is expensive and kills live NFS sessions — prefer `exportfs -ra` for
+# exports.j2 changes. Thread count changes DO require a service restart.
+
+- name: Reexport NFS shares
+  ansible.builtin.command: exportfs -ra
+  changed_when: true
+
+- name: Restart nfs-server
+  ansible.builtin.service:
+    name: nfs-server
+    state: restarted
+
+- name: Restart nfs-idmapd
+  ansible.builtin.service:
+    name: nfs-idmapd
+    state: restarted

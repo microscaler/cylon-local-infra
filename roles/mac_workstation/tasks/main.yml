@@ -1,0 +1,128 @@
+---
+# Mac-side workstation config — local-connection, per-task become.
+#
+# Runs: ansible-playbook playbooks/mac_workstation.yml --ask-become-pass
+#   or: ansible-playbook playbooks/mac_workstation.yml --tags mdutil  (just Spotlight)
+#   or: ansible-playbook playbooks/mac_workstation.yml --tags nfs     (just nfs.conf + mount-point)
+#
+# Check-mode friendly: `ansible-playbook playbooks/mac_workstation.yml --check --diff`
+
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "mac_workstation role targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+
+# ── Mount-point directories ──────────────────────────────────────────────
+- name: Ensure workspace root exists
+  ansible.builtin.file:
+    path: "{{ mac_workstation_workspace_root }}"
+    state: directory
+    mode: "0755"
+  tags: [mac, dirs]
+
+- name: Ensure NFS mount point exists
+  ansible.builtin.file:
+    path: "{{ mac_workstation_nfs_mount }}"
+    state: directory
+    mode: "0755"
+  tags: [mac, dirs, nfs]
+
+# Self-documenting placeholder. Only written when the dir is empty so it
+# doesn't clobber a live NFS mount (NFS mount_nfs will overlay this dir's
+# contents while mounted — operator sees the README only when unmounted).
+- name: Check whether NFS mount point is empty (idempotent README guard)
+  ansible.builtin.command: "ls -A {{ mac_workstation_nfs_mount }}"
+  register: nfs_mount_contents
+  changed_when: false
+  tags: [mac, dirs, nfs]
+
+- name: Write README in empty NFS mount point
+  ansible.builtin.copy:
+    dest: "{{ mac_workstation_nfs_mount }}/README.md"
+    mode: "0644"
+    content: |
+      # remote — NFSv4 mount point for ms02:/home/casibbald/Workspace
+
+      This directory is managed by `cylon-local-infra`.
+      When mounted, it shows `ms02:/home/casibbald/Workspace` via NFSv4.
+      (Formerly hosted an SSHFS mount at the same path; NFSv4 has reclaimed it.)
+
+      Lifecycle:
+        just nfs-up       # mount (over SSH tunnel until wired LAN lands)
+        just nfs-status   # show mount state + one diagnostic ls
+        just nfs-down     # unmount
+
+      See:
+        - llmwiki/concepts/workspace-mount-protocols.md
+        - llmwiki/concepts/starlink-wifi-lan-port-filter.md
+  when: (nfs_mount_contents.stdout | default('')) | length == 0
+  tags: [mac, dirs, nfs]
+
+# ── Spotlight exclusions ─────────────────────────────────────────────────
+# `mdutil -s <path>` prints the current indexing status. Parse to avoid
+# needless state-changing `mdutil -X` invocations (which always print
+# "Indexing and searching disabled." regardless of prior state, so their
+# exit code is useless for idempotency).
+- name: Probe Spotlight indexing status for each managed path
+  ansible.builtin.command: "mdutil -s {{ item }}"
+  register: mdutil_status
+  loop: "{{ mac_workstation_spotlight_excluded_paths }}"
+  changed_when: false
+  failed_when: false
+  tags: [mac, mdutil, spotlight]
+
+- name: Disable Spotlight indexing on managed paths
+  become: true
+  ansible.builtin.command: "mdutil -X {{ item.item }}"
+  loop: "{{ mdutil_status.results }}"
+  when:
+    - item.rc == 0
+    - "'disabled' not in (item.stdout | lower)"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  tags: [mac, mdutil, spotlight]
+
+# ── /etc/nfs.conf — NFSv4 idmap domain ──────────────────────────────────
+# Macs ship with an empty /etc/nfs.conf (or no file at all). The only key
+# we need is `nfs.client.default_nfs4domain` so NFSv4 username mapping
+# lines up with ms02's /etc/idmapd.conf. Use lineinfile to preserve any
+# other config (user may hand-tune for other mounts).
+- name: Ensure /etc/nfs.conf exists
+  become: true
+  ansible.builtin.file:
+    path: /etc/nfs.conf
+    state: touch
+    owner: root
+    group: wheel
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+  when: mac_workstation_configure_nfs
+  changed_when: false
+  tags: [mac, nfs, nfs_client]
+
+- name: Set NFSv4 default domain on Mac client
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/nfs.conf
+    regexp: '^\s*nfs\.client\.default_nfs4domain\s*='
+    line: "nfs.client.default_nfs4domain = {{ mac_workstation_nfs4_domain }}"
+    state: present
+    owner: root
+    group: wheel
+    mode: "0644"
+  when: mac_workstation_configure_nfs
+  tags: [mac, nfs, nfs_client]
+
+# ── Diagnostic summary ───────────────────────────────────────────────────
+- name: Summarize managed Mac-side state
+  ansible.builtin.debug:
+    msg:
+      - "workspace root:   {{ mac_workstation_workspace_root }}"
+      - "NFS  mount:       {{ mac_workstation_nfs_mount }}   (managed by `just nfs-up`)"
+      - "NFSv4 domain:     {{ mac_workstation_nfs4_domain }}"
+      - "Spotlight excl.:  {{ mac_workstation_spotlight_excluded_paths | join(', ') }}"
+  tags: [mac, summary]

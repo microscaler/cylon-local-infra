@@ -1,0 +1,57 @@
+---
+# Mac-side narrow NOPASSWD sudoers drop-in. See defaults/main.yml for scope
+# and security rationale.
+#
+# Runs:  ansible-playbook playbooks/mac_workstation.yml --tags sudoers --ask-become-pass
+#    or: ansible-playbook playbooks/mac_workstation.yml --ask-become-pass      (part of normal mac-provision)
+#
+# Bootstrap: the very first run prompts for a sudo password (nothing to
+# authorise the drop-in yet). Every subsequent run — and every justfile
+# recipe listed in mac_sudoers_rules — is passwordless for the operator.
+
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "mac_sudoers role targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [mac, sudoers, mac_sudoers]
+
+- name: Sanity-check that /etc/sudoers.d exists and is included
+  ansible.builtin.stat:
+    path: /etc/sudoers.d
+  register: mac_sudoers_dir
+  tags: [mac, sudoers, mac_sudoers]
+
+- name: Fail if /etc/sudoers.d is missing
+  ansible.builtin.fail:
+    msg: "/etc/sudoers.d does not exist on this Mac — was /etc/sudoers edited to remove the #includedir directive?"
+  when: not mac_sudoers_dir.stat.exists
+  tags: [mac, sudoers, mac_sudoers]
+
+# Drop the rule file via `template` with a visudo validator. `visudo -cf %s`
+# parses the file and aborts the task (without writing to /etc/sudoers.d/)
+# if syntax is invalid — critical because a broken sudoers file can lock
+# you out of sudo entirely. mode: 0440 matches the macOS convention for
+# files in /etc/sudoers.d/ (awsconnect is 0644 but 0440 is safer).
+- name: Install narrow NOPASSWD sudoers drop-in for operator
+  become: true
+  ansible.builtin.template:
+    src: sudoers.j2
+    dest: "/etc/sudoers.d/{{ mac_sudoers_dropin_name }}"
+    owner: root
+    group: wheel
+    mode: "0440"
+    validate: "/usr/sbin/visudo -cf %s"
+  tags: [mac, sudoers, mac_sudoers]
+
+# Diagnostic: show which rules are active so the operator can confirm the
+# scope without needing to `sudo cat /etc/sudoers.d/…`.
+- name: Summarize installed sudoers rules
+  ansible.builtin.debug:
+    msg:
+      - "operator:       {{ mac_sudoers_operator }}"
+      - "drop-in file:   /etc/sudoers.d/{{ mac_sudoers_dropin_name }}"
+      - "rules:          {{ mac_sudoers_rules | length }}"
+      - "passwordless:   {{ mac_sudoers_rules | map(attribute='command') | list }}"
+  tags: [mac, sudoers, mac_sudoers, summary]

@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# Managed by cylon-local-infra :: roles/nfs_server.
+# Source of truth: inventory/host_vars/{{ inventory_hostname }}.yml → nfs_server_exports
+# Do NOT edit by hand — changes will be overwritten on next ansible run.
+#
+# Format: <path> <cidr>(<options>)   — one line per (export, client) pair.
+# See exports(5). Re-read with `sudo exportfs -ra` (role handler does this).
+#
+{% if nfs_server_exports | length == 0 %}
+# (no exports configured for this host)
+{% else %}
+{% for export in nfs_server_exports %}
+{% for client in export.clients %}
+{{ export.path }}	{{ client.cidr }}({{ client.options }})
+{% endfor %}
+{% endfor %}
+{% endif %}

@@ -1,0 +1,58 @@
+---
+# Host-specific config for ms02 (Intel desktop dev host — Docker CE, Kind,
+# Cursor Remote-SSH target, soon NFSv4 exporter). Defaults from the invoked
+# roles apply unless overridden here.
+
+# ── Firewall (ufw) — opens NFSv4 to the LAN ───────────────────────────────
+# The base `firewall` role leaves LAN exposure empty by default. Explicitly
+# grant the Mac's subnet access to 2049/tcp (NFS). Port 445 (SMB) is NOT
+# added — see llmwiki/concepts/workspace-mount-protocols.md for why we're
+# not picking SMB. SSH (22) is already in firewall_allow_tcp_ports so it's
+# universally open; the NFS port is LAN-only.
+#
+# Note: until the USB 2.5GbE wired adapter arrives, Mac → ms02 NFS traffic
+# goes over the SSH ControlMaster tunnel (~/.ssh/config.d/ms02-dev-tunnel
+# has `LocalForward 2049 localhost:2049`), so the LAN allow here is mostly
+# preparation for the post-Starlink path. Leaving it on now is harmless —
+# the Starlink router still drops the packets before they reach ufw.
+firewall_trusted_lan_cidr: "192.168.1.0/24"
+firewall_trusted_lan_tcp_ports:
+  - 2049    # NFSv4 — only port we need for v4 (no portmapper, no mountd)
+
+# ── NFSv4 server — exports /home/casibbald/Workspace ──────────────────────
+# Two client blocks because they need different option sets:
+#
+#   192.168.1.0/24  — the Mac's LAN subnet. Default `secure` (server
+#                     requires privileged-port source, which the Mac's NFS
+#                     client does natively when mounting directly). Used
+#                     once the wired 2.5GbE adapter retires the Starlink
+#                     port filter.
+#
+#   127.0.0.1/32    — the loopback, for SSH-tunneled NFS (port 2049 on ms02
+#                     is reached via `ssh -L 2049:localhost:2049`). Needs
+#                     `insecure` because ssh-forwarded connections arrive
+#                     at nfsd with a non-privileged source port. Safe: the
+#                     SSH tunnel itself is authenticated before any NFS
+#                     traffic is allowed through.
+#
+# Both use `sec=sys` (trust the UID/username asserted by the client) which
+# is the right level for single-user LAN. Upgrade path to `sec=krb5p` when
+# the LAN moves to a zero-trust posture.
+#
+# Both also use `all_squash,anonuid=1000,anongid=1000` — single-operator
+# dev mount. Discovered during the 2026-04-20 cutover: the Mac's casibbald
+# is UID 502 / gid 20 (staff), while ms02's is UID 1000 / gid 1000
+# (casibbald). `sec=sys` transmits raw UIDs over the wire, so unless
+# something translates them the Mac would get EACCES on every write.
+# NFSv4 idmap only helps the anonymous user with sec=sys — real per-user
+# translation needs sec=krb5. The server-side `all_squash` remaps every
+# inbound RPC to UID 1000 regardless of source, which is correct for a
+# single-user mount: writes work, reads work, and file ownership on disk
+# stays consistent.
+nfs_server_exports:
+  - path: /home/casibbald/Workspace
+    clients:
+      - cidr: 192.168.1.0/24
+        options: "rw,sync,no_subtree_check,sec=sys,all_squash,anonuid=1000,anongid=1000"
+      - cidr: 127.0.0.1/32
+        options: "rw,sync,no_subtree_check,sec=sys,insecure,all_squash,anonuid=1000,anongid=1000"

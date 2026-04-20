@@ -5,7 +5,7 @@
 docker_ce_channel: stable
 
 # Override if your Ubuntu codename is not yet in Docker’s repo (try "noble" or "jammy").
-docker_ce_ubuntu_release: "{{ docker_ce_release_override | default(ansible_distribution_release) }}"
+docker_ce_ubuntu_release: "{{ docker_ce_release_override | default(ansible_facts['distribution_release']) }}"
 
 docker_ce_packages:
   - docker-ce

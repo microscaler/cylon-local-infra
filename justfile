@@ -144,100 +144,210 @@ sync-path-to-ms02 path:
 #             there. Nothing in this justfile is strictly required for that
 #             flow — ssh itself is enough.
 #
-# SECONDARY:  SSHFS mount for Finder/grep/tree convenience. Read/write, but
-#             do NOT build against the mount — use the Remote-SSH terminal
-#             (or `just ms02-ssh -t …`) for builds. The mount is for quick
-#             file-level browsing from Mac tools, not as a replacement for
-#             a real on-ms02 file system.
+# SECONDARY:  NFSv4 mount at ~/Workspace/remote (see `nfs-*` recipes below)
+#             for Finder/grep/tree convenience. Read/write, but do NOT build
+#             against the mount — use the Remote-SSH terminal (or
+#             `just ms02-shell`) for builds. The mount is for quick file-level
+#             browsing from Mac tools, not a replacement for a real on-ms02
+#             filesystem.
+#
+# HISTORICAL: SSHFS was the original mount protocol here (`sshfs-*` recipes
+#             lived in this section). Retired 2026-04-20 — NFSv4 with
+#             READDIRPLUS + TCP streaming beats SSHFS's per-file stat storms
+#             badly enough that the side-by-side bench became uninteresting.
+#             Git history + llmwiki/concepts/workspace-mount-protocols.md
+#             have the full transition details if you need to reconstruct it.
 
-# Mac-side install prerequisites for SSHFS. Requires Homebrew + cask, and a
-# one-time Security & Privacy → "Allow" for Benjamin Fleischer's kernel ext.
-sshfs-install:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ! command -v brew >/dev/null; then
-        echo "Homebrew not found. Install from https://brew.sh first." >&2
-        exit 1
-    fi
-    brew install --cask macfuse
-    brew install gromgit/fuse/sshfs-mac
-    echo
-    echo "macFUSE may prompt for a kernel-extension approval."
-    echo "System Settings → Privacy & Security → 'Allow' → reboot if asked."
-    echo "Then run: just sshfs-up"
-
-# Mount ms02:/home/casibbald/Workspace at ~/Workspace/remote on the Mac.
+# ── NFSv4 mount at ~/Workspace/remote ───────────────────────────────────────
+#
+# Mounts ms02:/home/casibbald/Workspace at ~/Workspace/remote on the Mac.
+# Superseded SSHFS at the same path on 2026-04-20.
 #
 # Layout the operator lives in:
 #   ~/Workspace/local/        — Mac-native clones (this repo lives here)
-#   ~/Workspace/remote/       — SSHFS view of ms02:~/Workspace
-#   ~/Workspace/Workspace_old — archived old ~/Workspace contents
+#   ~/Workspace/remote/       — NFSv4 view of ms02:~/Workspace
 #
 # Cursor opens ~/Workspace as the workspace root, so both `local/` and
 # `remote/` sit side by side in the file tree. Use local/ for Mac-side
-# edits (small scripts, infra, anything fast); use remote/ for real
-# builds-on-ms02 via Cursor Remote-SSH or the `just ms02-*` helpers.
-# Flags chosen for editor-friendly browsing:
-#   reconnect, ServerAliveInterval, auto_cache  → survive link blips
-#   defer_permissions                           → macOS Finder shows files
-#   noappledouble, noapplexattr                 → no ._DS_Store spray on ms02
-#   volname                                     → friendly mount name in Finder
-sshfs-up:
+# edits (small scripts, infra, anything fast); use remote/ for browsing
+# files that are built/run on ms02 via Cursor Remote-SSH or `just ms02-*`
+# helpers. Don't build against the mount — run builds on ms02.
+#
+# Pre-wired-LAN phase: NFS traffic rides the SSH ControlMaster tunnel via
+# `LocalForward 2049` — see ~/.ssh/config.d/ms02-dev-tunnel. So `nfs-up`
+# requires `just dev-tunnel-up` first. Once the USB 2.5GbE adapter lands
+# and Starlink Wi-Fi↔LAN filtering is out of the way, the source can flip
+# from `127.0.0.1:...` to `ms02:...` with no other client-side change
+# (server export already covers both 127.0.0.1/32 and 192.168.1.0/24).
+#
+# Server-side prerequisite: `ansible-playbook playbooks/nfs_server.yml -l ms02`
+# Mac-side prerequisite:    `ansible-playbook playbooks/mac_workstation.yml --ask-become-pass`
+#
+# See: llmwiki/concepts/workspace-mount-protocols.md
+
+# Mount NFSv4 at ~/Workspace/remote over the SSH LocalForward:2049 tunnel.
+nfs-up:
     #!/usr/bin/env bash
     set -euo pipefail
-    local_mount="$HOME/Workspace/remote"
-    remote="ms02:/home/casibbald/Workspace"
-    if mount | grep -q "on $local_mount "; then
-        echo "✓ already mounted at $local_mount"
+    mount_pt="$HOME/Workspace/remote"
+    # Source matches the export on ms02 (see inventory/host_vars/ms02.yml).
+    # Using 127.0.0.1 so the SSH LocalForward:2049 tunnel carries the traffic.
+    source="127.0.0.1:/home/casibbald/Workspace"
+    if mount | grep -q "on $mount_pt "; then
+        echo "✓ already mounted at $mount_pt"
         exit 0
     fi
-    mkdir -p "$local_mount"
-    if ! command -v sshfs >/dev/null; then
-        echo "sshfs not installed. Run 'just sshfs-install' first." >&2
+    if [ ! -d "$mount_pt" ]; then
+        echo "✗ $mount_pt does not exist — run:  just mac-provision"
         exit 1
     fi
-    sshfs "$remote" "$local_mount" \
-        -o reconnect \
-        -o ServerAliveInterval=15 \
-        -o ServerAliveCountMax=3 \
-        -o auto_cache \
-        -o defer_permissions \
-        -o noappledouble \
-        -o noapplexattr \
-        -o volname=ms02-workspace
-    echo "✓ mounted $remote at $local_mount"
-    echo "Browse in Finder: open $local_mount"
+    # Tunnel check: NFS needs port 2049 on loopback, which the ControlMaster
+    # tunnel provides via LocalForward. If the forward isn't up, fail loudly
+    # rather than produce an opaque NFS timeout.
+    if ! nc -z -G 2 127.0.0.1 2049 >/dev/null 2>&1; then
+        echo "✗ 127.0.0.1:2049 not reachable — SSH LocalForward:2049 is down"
+        echo "  Run:  just dev-tunnel-up"
+        echo "  And confirm ~/.ssh/config.d/ms02-dev-tunnel has 'LocalForward 2049 localhost:2049'"
+        exit 1
+    fi
+    # NFSv4 client options (macOS mount_nfs):
+    #   vers=4                 — force v4 (no v3 fallback to portmapper/mountd)
+    #   rsize/wsize=1048576    — 1 MiB; NFSv4 negotiates down if server caps
+    #   hard                   — block on server down rather than fail I/O with EIO
+    #   noresvport             — use an unprivileged source port; the SSH
+    #                            LocalForward rewrites it anyway, and the
+    #                            127.0.0.1/32 export has `insecure` to accept
+    #                            non-privileged source ports
+    #   nfc                    — normalize filenames to NFC (Unicode) so
+    #                            Mac-created names don't break on ext4
+    # Deliberately NOT set (the "why" matters for future-us):
+    #   nolocks + locallocks   — these two conflict, passing both returns
+    #                            EINVAL from mount_nfs; NFSv4 uses in-protocol
+    #                            locking so specifying either is unnecessary
+    #   rdirplus               — Linux-only option, rejected by macOS mount_nfs
+    #   intr                   — Linux-only, rejected by macOS mount_nfs
+    #   bg                     — backgrounding on EINVAL leaves zombie retries
+    #                            fighting with new mount attempts; fail-fast
+    #                            is much easier to debug
+    echo "mounting $source → $mount_pt (via SSH LocalForward:2049)"
+    sudo mount_nfs \
+        -o vers=4,rsize=1048576,wsize=1048576,hard,noresvport,nfc \
+        "$source" "$mount_pt"
+    echo "✓ mounted $mount_pt"
+    echo "inspect:  just nfs-status"
 
-# Unmount the SSHFS share. Uses umount -f because macOS sometimes leaves a
-# stale mount after a sleep cycle; the -f is safe for a userspace FUSE mount.
-sshfs-down:
+# Unmount the NFS share.
+nfs-down:
     #!/usr/bin/env bash
     set -euo pipefail
-    local_mount="$HOME/Workspace/remote"
-    if mount | grep -q "on $local_mount "; then
-        umount -f "$local_mount" 2>/dev/null || diskutil unmount force "$local_mount"
-        echo "✓ unmounted $local_mount"
-    else
-        echo "not mounted"
-    fi
+    mount_pt="$HOME/Workspace/remote"
+    # Loop umount to clean up any stacked mounts (can happen if an earlier
+    # mount attempt used `bg` and retried in the background while we
+    # re-issued the mount command manually).
+    while mount | grep -q "on $mount_pt "; do
+        sudo umount "$mount_pt" 2>/dev/null || diskutil unmount force "$mount_pt"
+    done
+    echo "✓ unmounted $mount_pt"
 
-# Show mount status + quick readability check (list top-level entries).
-sshfs-status:
+# Show mount status + quick readability check.
+nfs-status:
     #!/usr/bin/env bash
     set -u
-    local_mount="$HOME/Workspace/remote"
-    if ! mount | grep -q "on $local_mount "; then
+    mount_pt="$HOME/Workspace/remote"
+    if ! mount | grep -q "on $mount_pt "; then
         echo "✗ NOT mounted"
         exit 1
     fi
-    echo "✓ mounted $local_mount"
+    # Count mount entries — should be 1. >1 means a stacked mount (fix via nfs-reconnect).
+    count=$(mount | grep -c "on $mount_pt ")
+    if [ "$count" -gt 1 ]; then
+        echo "⚠ $count mounts stacked at $mount_pt — run:  just nfs-reconnect"
+    else
+        echo "✓ mounted $mount_pt"
+    fi
+    mount | grep "on $mount_pt " | sed 's/^/   /'
     echo
     echo "Top-level entries (first 15):"
-    ls "$local_mount" 2>/dev/null | head -15
+    ls "$mount_pt" 2>/dev/null | head -15
 
-# Reconnect cycle. Use after sleep-cycle or network change leaves the mount
-# in a "Transport endpoint not connected" zombie state.
-sshfs-reconnect: sshfs-down sshfs-up
+# NFS metadata throughput smoke test. Run after mounting to confirm the mount
+# is reasonable (dir walk should complete in seconds over SSH-tunneled NFS,
+# minutes would indicate a problem — check `just dev-tunnel-status` first).
+#
+# Deliberately NOT `set -o pipefail`: the `find | head -N` pipeline closes
+# early (head exits at N lines), which sends SIGPIPE upstream to find and
+# returns 141. pipefail would propagate that as a recipe failure, but the
+# timings above SIGPIPE are what we actually care about.
+nfs-bench:
+    #!/usr/bin/env bash
+    set -u
+    nfs_mount="$HOME/Workspace/remote"
+    if ! mount | grep -q "on $nfs_mount "; then
+        echo "✗ $nfs_mount is not mounted — run 'just nfs-up' first"
+        exit 1
+    fi
+    echo "=== dir walk (depth 3) ==="
+    time (find "$nfs_mount" -maxdepth 3 -type d 2>/dev/null | wc -l)
+    echo
+    # Collect filenames first, THEN stat — decouples metadata collection
+    # from head-driven pipe closure so the timing reflects only the stat
+    # phase (no SIGPIPE noise in the exit code).
+    echo "=== stat storm (first 500 regular files) ==="
+    files=$(find "$nfs_mount" -type f 2>/dev/null | head -500 || true)
+    time (echo "$files" | xargs stat -f "%N" >/dev/null 2>&1)
+    echo
+    echo "=== sequential read (largest file in root, capped at 64 MiB) ==="
+    target=$(find "$nfs_mount" -maxdepth 2 -type f -size +1M 2>/dev/null | head -1 || true)
+    if [ -n "$target" ]; then
+        echo "reading: $target"
+        time dd if="$target" of=/dev/null bs=1m count=64 2>&1 | tail -2
+    else
+        echo "(no file >1 MiB found within depth 2 — skipping)"
+    fi
+
+# Reconnect cycle for the NFS mount. Use after sleep/wake or a network blip
+# that left the mount in a stale state, or to clean up stacked mounts.
+nfs-reconnect: nfs-down nfs-up
+
+# ── Mac-side Ansible provisioning ───────────────────────────────────────────
+#
+# Runs the local-connection mac_workstation playbook. Ensures NFS mount point
+# exists, Spotlight exclusions are in place, and /etc/nfs.conf has the NFSv4
+# idmap domain set so file ownership maps correctly (Mac UID 501 ↔ ms02 UID
+# 1000, resolved as `casibbald@microscaler.lan` on the wire).
+#
+# Uses --ask-become-pass because a handful of tasks need sudo (mdutil -X,
+# lineinfile against /etc/nfs.conf). Expected sudo prompts: at most once per
+# run; cached creds cover the rest.
+
+# Provision the Mac (this machine). Safe to re-run.
+mac-provision:
+    ansible-playbook playbooks/mac_workstation.yml --ask-become-pass
+
+# Dry-run the Mac provisioning — see what would change without touching disk.
+mac-provision-check:
+    ansible-playbook playbooks/mac_workstation.yml --check --diff --ask-become-pass
+
+# Apply ONLY the sudoers NOPASSWD drop-in. Handy on first bootstrap — run this
+# once, enter your password, and thereafter every mount_nfs/umount/mdutil/
+# tmutil/killall-mds invocation from this justfile is silent. The full
+# mac-provision playbook also installs this (it runs mac_sudoers first),
+# but this recipe exists for fast iteration on the sudoers rule list.
+mac-sudoers:
+    ansible-playbook playbooks/mac_workstation.yml --tags sudoers --ask-become-pass
+
+# Dry-run just the sudoers rules. Shows the diff vs what's currently in
+# /etc/sudoers.d/cylon-local-infra-ops (or confirms it would be created).
+mac-sudoers-check:
+    ansible-playbook playbooks/mac_workstation.yml --tags sudoers --check --diff --ask-become-pass
+
+# Provision the NFS server on ms02. Safe to re-run.
+nfs-server-provision:
+    ansible-playbook playbooks/nfs_server.yml -l ms02
+
+# Dry-run the NFS server provisioning.
+nfs-server-check:
+    ansible-playbook playbooks/nfs_server.yml -l ms02 --check --diff
 
 # Disable Spotlight / Time Machine on ~/Workspace/remote so macOS doesn't try
 # to index or back up 100+ remote dirs over the FUSE link (would saturate SSH
@@ -259,7 +369,7 @@ spotlight-exclude-remote:
     set -uo pipefail
     local_mount="$HOME/Workspace/remote"
     if [ ! -d "$local_mount" ]; then
-        echo "✗ $local_mount does not exist — mount it first (just sshfs-up)"
+        echo "✗ $local_mount does not exist — mount it first (just nfs-up)"
         exit 1
     fi
     echo "==> 1/3  mdutil -X (disable + unregister Spotlight on the mount)"

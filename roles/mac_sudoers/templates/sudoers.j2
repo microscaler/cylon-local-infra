@@ -1,0 +1,28 @@
+# {{ ansible_managed }}
+# Managed by cylon-local-infra :: roles/mac_sudoers.
+# Source of truth: roles/mac_sudoers/defaults/main.yml → mac_sudoers_rules
+# (override per-host via inventory/host_vars/<host>.yml if needed).
+#
+# Syntax: sudoers(5). Validated via `visudo -cf` before placement.
+# Each rule is:
+#   <user> ALL=(root) NOPASSWD: <Cmnd_Spec>
+# meaning: <user>, from any host, running as root, no password required,
+# for the exact command+args pattern in Cmnd_Spec.
+#
+# Do NOT edit by hand — changes will be overwritten on next ansible run.
+# Re-apply cleanly after role changes with:
+#   ansible-playbook playbooks/mac_workstation.yml --tags sudoers --ask-become-pass
+#
+# Revert: `sudo rm /etc/sudoers.d/{{ mac_sudoers_dropin_name }}` (no handler
+# needed — sudoers.d is re-read on every sudo invocation).
+
+# Tighten defaults for this operator: don't demand a tty (so subshells +
+# justfile recipes work even under `nohup` / CI-like contexts), and keep
+# HOME so tools using $HOME from the user's env don't accidentally root.
+Defaults:{{ mac_sudoers_operator }} !requiretty
+Defaults:{{ mac_sudoers_operator }} env_keep += "HOME"
+
+{% for rule in mac_sudoers_rules %}
+# {{ rule.comment }}
+{{ mac_sudoers_operator }} ALL=(root) NOPASSWD: {{ rule.command }}
+{% endfor %}

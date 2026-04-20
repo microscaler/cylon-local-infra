@@ -1,0 +1,51 @@
+---
+# Defaults for the mac_workstation role.
+#
+# Scope: Mac-side, local-connection Ansible. Manages the minimal set of
+# Mac configuration needed to run `~/Workspace/remote` as the NFSv4 mount
+# of ms02:/home/casibbald/Workspace. The SSHFS path that previously held
+# this mount point has been retired (see docs/remote-dev.md + the
+# workspace-mount-protocols wiki for the transition history).
+#
+# This role owns:
+#   1. Mount-point directory at ~/Workspace/remote
+#   2. Spotlight exclusions (network FS indexing is a well-known disaster)
+#   3. /etc/nfs.conf for NFSv4 idmap domain (client side of idmap)
+#
+# Out of scope for this role:
+#   - ~/.zshrc edits (blast radius: all shell sessions)
+#   - Homebrew package installs (separate role if/when we need it)
+#   - SSH config (~/.ssh/config.d/* — operator-owned, see justfile for tunnel)
+#   - /etc/fstab-style auto-mount (manual `just nfs-up` until proven stable)
+#   - Actually mounting NFS (lifecycle owned by justfile, not Ansible)
+#
+# Idempotent, safe to re-run. Each task has a narrow `become: true` where
+# required rather than elevating the whole play.
+
+mac_workstation_user: casibbald
+mac_workstation_user_home: "/Users/{{ mac_workstation_user }}"
+
+# ── Workspace mount points ────────────────────────────────────────────────
+# ~/Workspace/remote is the NFSv4 mount of ms02:/home/casibbald/Workspace.
+# Historically this path hosted an SSHFS mount; NFSv4 has now reclaimed
+# it (same path, different protocol, no change for downstream tooling).
+mac_workstation_workspace_root: "{{ mac_workstation_user_home }}/Workspace"
+mac_workstation_nfs_mount: "{{ mac_workstation_workspace_root }}/remote"
+
+# ── Spotlight ─────────────────────────────────────────────────────────────
+# Paths Spotlight should NEVER index. Remote filesystems cause mdworker
+# storms that saturate the link and make Finder feel unresponsive.
+mac_workstation_spotlight_excluded_paths:
+  - "{{ mac_workstation_nfs_mount }}"
+
+# ── NFSv4 client (macOS) ──────────────────────────────────────────────────
+# Must match `nfs_server_idmap_domain` on ms02 (inventory/host_vars/ms02.yml)
+# so NFSv4 idmap resolves `casibbald@microscaler.lan` symmetrically across
+# the Mac/Linux UID mismatch (Mac 502 ↔ ms02 1000). Note: with sec=sys the
+# server still uses raw UIDs for permission checks — the 127.0.0.1/32 and
+# LAN exports on ms02 apply all_squash+anonuid=1000 to compensate.
+mac_workstation_nfs4_domain: microscaler.lan
+
+# Whether to manage /etc/nfs.conf. Leave on. File is tiny; our only line is
+# the NFSv4 domain; we preserve other lines via lineinfile (not template).
+mac_workstation_configure_nfs: true

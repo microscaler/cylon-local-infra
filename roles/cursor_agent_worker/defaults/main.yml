@@ -25,14 +25,14 @@
 cursor_agent_worker_version: "2026.04.17-787b533"
 
 # Direct tarball URL (avoids curl | bash in ansible). {os}/{arch} are filled
-# at runtime from ansible_system / ansible_architecture. The install script
-# maps x86_64 → x64, aarch64 → arm64 (we do the same in tasks/main.yml).
+# at runtime from ansible_facts["system"] / ansible_facts["architecture"]. The
+# install script maps x86_64 → x64, aarch64 → arm64 (we do the same below).
 cursor_agent_worker_download_url_template: "https://downloads.cursor.com/lab/{{ cursor_agent_worker_version }}/{{ cursor_agent_worker_os }}/{{ cursor_agent_worker_arch }}/agent-cli-package.tar.gz"
 
 # OS/arch mapping (resolved in tasks). Populated from facts — overrides
 # only needed for exotic cross-install scenarios.
-cursor_agent_worker_os: "{{ {'Linux': 'linux', 'Darwin': 'darwin'}[ansible_system] | default('linux') }}"
-cursor_agent_worker_arch: "{{ {'x86_64': 'x64', 'aarch64': 'arm64', 'arm64': 'arm64'}[ansible_architecture] | default('x64') }}"
+cursor_agent_worker_os: "{{ {'Linux': 'linux', 'Darwin': 'darwin'}[ansible_facts['system']] | default('linux') }}"
+cursor_agent_worker_arch: "{{ {'x86_64': 'x64', 'aarch64': 'arm64', 'arm64': 'arm64'}[ansible_facts['architecture']] | default('x64') }}"
 
 # --- Runtime user ---
 # The worker inherits the user's groups (docker, kvm, etc.), home, and

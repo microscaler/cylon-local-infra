@@ -1,0 +1,72 @@
+---
+# Defaults for the mac_sudoers role.
+#
+# Scope: narrow, binary-path-based NOPASSWD sudo rules for the operator on
+# macOS. Drops a single file into /etc/sudoers.d so operational commands
+# invoked by the top-level justfile (mount_nfs, umount, mdutil, tmutil,
+# killall mds) don't prompt for a password every time.
+#
+# Deliberately narrow:
+#   - Every entry is an absolute binary path. sudo matches on the resolved
+#     path, not basename, so a malicious binary named `mount_nfs` in PATH
+#     can't piggyback on these rules.
+#   - Where possible, we constrain args with sudoers wildcards (mdutil -X *
+#     rather than mdutil *) to stop a compromised shell invoking
+#     destructive subcommands (mdutil -d, mdutil -a) passwordlessly.
+#   - Does NOT include `ALL` or blanket user rules. Anything Ansible needs
+#     beyond this list still prompts via --ask-become-pass.
+#
+# Non-goals:
+#   - TouchID for sudo (separate concern; lives in /etc/pam.d/sudo_local and
+#     requires pam_tid.so config — not managed here).
+#   - Full passwordless sudo (casibbald ALL=(ALL) NOPASSWD: ALL) — too wide.
+#
+# Security posture: the blast radius of this drop-in is exactly the set of
+# binaries listed below, invoked by the named operator user. If any listed
+# binary grows a dangerous subcommand we'd want passworded (e.g. mdutil adds
+# a remote-mount disable), update the wildcard constraint in the template.
+
+# ── Operator user ─────────────────────────────────────────────────────────
+# The Mac user who owns the dev workflow. Each listed command runs as root
+# via sudo without password when invoked by this user.
+mac_sudoers_operator: "{{ mac_workstation_user | default(ansible_facts['user_id']) }}"
+
+# ── Sudoers drop-in filename ──────────────────────────────────────────────
+# Under /etc/sudoers.d/. Kept distinct from any Homebrew/system drop-ins
+# (e.g. the awsconnect file that's already there from the VPN client) so
+# deleting it cleanly reverts just this role's changes.
+mac_sudoers_dropin_name: cylon-local-infra-ops
+
+# ── Command rules ─────────────────────────────────────────────────────────
+# Structured so individual rules are easy to review, disable, or grow.
+# Each rule is:
+#   - comment: human-readable reason (appears as a comment above the rule)
+#   - command: full sudoers Cmnd_Spec (path + optional args/wildcards)
+#
+# Keep the list small; each entry is a security boundary. If a recipe needs
+# a binary not listed here, either add it here with a narrow wildcard, or
+# keep using the password-prompted path.
+mac_sudoers_rules:
+  - comment: "NFSv4 client mount — used by `just nfs-up`"
+    command: "/sbin/mount_nfs"
+
+  - comment: "NFS + generic FS unmount — used by `just nfs-down`, `just nfs-reconnect`"
+    command: "/sbin/umount"
+
+  - comment: "Disk arbitration fallback unmount — `just nfs-down` uses this when umount is busy"
+    command: "/usr/sbin/diskutil unmount *"
+
+  - comment: "Spotlight: disable indexing on a path (`just spotlight-exclude-remote`, mac_workstation role)"
+    command: "/usr/bin/mdutil -X *"
+
+  - comment: "Spotlight: (re-)enable indexing — used by `just spotlight-include-remote`"
+    command: "/usr/bin/mdutil -i *"
+
+  - comment: "Time Machine: add path exclusion — used by `just spotlight-exclude-remote`"
+    command: "/usr/bin/tmutil addexclusion -p *"
+
+  - comment: "Time Machine: remove path exclusion — used by `just spotlight-include-remote`"
+    command: "/usr/bin/tmutil removeexclusion -p *"
+
+  - comment: "Spotlight: nudge mds to reload its Exclusions list (narrow: mds only, not the whole system)"
+    command: "/usr/bin/killall mds"

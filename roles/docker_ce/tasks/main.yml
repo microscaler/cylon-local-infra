@@ -5,7 +5,7 @@
   ansible.builtin.set_fact:
     docker_deb_arch: >-
       {{
-        {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(ansible_architecture, ansible_architecture)
+        {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(ansible_facts['architecture'], ansible_facts['architecture'])
       }}
 
 - name: Gather installed packages (for conflict check)

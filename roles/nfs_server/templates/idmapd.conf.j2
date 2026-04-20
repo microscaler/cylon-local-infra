@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# Managed by cylon-local-infra :: roles/nfs_server.
+# NFSv4 idmap config — Domain must match on every NFSv4 client (Mac, future
+# Linux clients). Mismatch → every file appears owned by nobody:nogroup.
+
+[General]
+Verbosity = 0
+Pipefs-Directory = /run/rpc_pipefs
+Domain = {{ nfs_server_idmap_domain }}
+
+[Mapping]
+Nobody-User = nobody
+Nobody-Group = nogroup
+
+[Translation]
+Method = nsswitch

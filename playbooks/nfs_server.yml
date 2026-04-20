@@ -1,0 +1,28 @@
+---
+# Configure the NFSv4 server on dev hosts (primarily ms02).
+#
+# Background: SSHFS → ms02 is ~28× slower per metadata op than local disk
+# (measured 2026-04-20: 5.12 ms/entry vs 0.18 ms). NFSv4 fixes this via
+# READDIRPLUS (bundled dirent+attr RPC) + kernel-native client on macOS.
+#
+# See llmwiki/concepts/workspace-mount-protocols.md for the full analysis.
+#
+# This playbook deliberately does NOT manage the ufw rules — add 2049/tcp
+# to `firewall_trusted_lan_tcp_ports` in inventory/host_vars/ms02.yml and
+# re-run `playbooks/dev_hosts.yml --tags firewall`. Keeps port policy in
+# one place (the existing firewall role).
+#
+# Run (AFTER reviewing host_vars/ms02.yml for the export list):
+#   ansible-playbook playbooks/nfs_server.yml
+#   ansible-playbook playbooks/nfs_server.yml -l ms02
+#   ansible-playbook playbooks/nfs_server.yml -l ms02 --check --diff
+#
+# Mac-side mount lands at ~/Workspace/remote (see roles/mac_workstation and
+# the top-level justfile's `nfs-up` recipe). SSHFS at the same path was
+# retired 2026-04-20.
+
+- name: Provision NFSv4 server on dev hosts
+  hosts: dev_hosts
+  roles:
+    - role: nfs_server
+      tags: [nfs, nfs_server]

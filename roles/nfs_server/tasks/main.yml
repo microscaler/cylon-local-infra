@@ -1,0 +1,88 @@
+---
+# NFSv4 server on dev hosts (ms02). See defaults/main.yml for variable docs.
+#
+# Idempotency contract:
+#   - Packages: apt `state: present` — no-op when already installed.
+#   - /etc/idmapd.conf: templated from j2, only restarts daemon on change.
+#   - /etc/exports: templated from j2; on change, handler runs `exportfs -ra`
+#     (re-reads exports, broadcasts to clients) — NOT a service restart,
+#     which is deliberately expensive and breaks active mounts.
+#   - Service: enabled + started; subsequent runs are a no-op.
+#
+# Runs: ansible-playbook playbooks/nfs_server.yml
+#   or: ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags nfs_server
+
+- name: NFSv4 server configuration
+  tags: [nfs, nfs_server]
+  block:
+    - name: Install NFS server packages
+      ansible.builtin.apt:
+        name: "{{ nfs_server_apt_packages }}"
+        state: present
+        update_cache: true
+
+    # idmapd maps NFSv4 ownership strings ↔ local UIDs. Domain must match
+    # client side or every file appears owned by `nobody:nogroup`.
+    - name: Configure NFSv4 idmap domain
+      ansible.builtin.template:
+        src: idmapd.conf.j2
+        dest: /etc/idmapd.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart nfs-idmapd
+
+    # Per-client export lines generated from the structured exports list so
+    # host_vars stays the source of truth; operators never hand-edit
+    # /etc/exports.
+    #
+    # No template validator: `exportfs -s -f FILE` looks like it should work
+    # but in modern nfs-utils (2.6+) `-f` means "flush the name cache", not
+    # "file to read". There's no built-in syntax-only exports(5) linter.
+    # If the template produces a broken file, the `Reexport NFS shares`
+    # handler (`exportfs -ra`) will fail loudly on next run and the operator
+    # sees the syntax error immediately — good enough signal, no sneaky
+    # partial-write window because the template is written atomically.
+    - name: Template /etc/exports
+      ansible.builtin.template:
+        src: exports.j2
+        dest: /etc/exports
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reexport NFS shares
+
+    # Number of nfsd threads — persisted across reboots. Ubuntu ships this
+    # in /etc/default/nfs-kernel-server (shell-style RPCNFSDCOUNT=8).
+    - name: Set nfsd thread count
+      ansible.builtin.lineinfile:
+        path: /etc/default/nfs-kernel-server
+        regexp: '^RPCNFSDCOUNT='
+        line: "RPCNFSDCOUNT={{ nfs_server_threads }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart nfs-server
+
+    - name: Ensure nfs-server is enabled and running
+      ansible.builtin.service:
+        name: nfs-server
+        state: "{{ 'started' if nfs_server_enabled else 'stopped' }}"
+        enabled: "{{ nfs_server_enabled }}"
+
+    # Diagnostic surface — shows the operator what's actually exported after
+    # this run. `exportfs -v` reads kernel state, not /etc/exports, so this
+    # confirms the reexport handler fired and succeeded.
+    - name: Show active exports (diagnostic)
+      ansible.builtin.command: exportfs -v
+      register: nfs_exportfs_active
+      changed_when: false
+      when: nfs_server_enabled
+
+    - name: Print active exports
+      ansible.builtin.debug:
+        var: nfs_exportfs_active.stdout_lines
+      when:
+        - nfs_server_enabled
+        - nfs_exportfs_active is defined
+        - nfs_exportfs_active.stdout_lines | default([]) | length > 0

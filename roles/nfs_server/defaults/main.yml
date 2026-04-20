@@ -1,0 +1,55 @@
+---
+# Defaults for the nfs_server role.
+#
+# Purpose: serve Mac-side workspace mounts from ms02 using NFSv4 over the LAN
+# (or, until the USB 2.5GbE wired adapter retires the Starlink port filter,
+# tunneled over SSH LocalForward:2049). See:
+#   - llmwiki/concepts/workspace-mount-protocols.md
+#   - llmwiki/concepts/starlink-wifi-lan-port-filter.md
+#
+# This role deliberately does NOT manage ufw rules itself — the existing
+# `firewall` role owns the ufw surface. Add 2049/tcp to the ms02 host_vars
+# `firewall_trusted_lan_tcp_ports` list (see inventory/host_vars/ms02.yml)
+# and re-run the firewall role; keeps one source of truth for port policy.
+
+# ── NFSv4 idmap domain ────────────────────────────────────────────────────
+# Both client (Mac) and server (ms02) must agree on this string for username-
+# based NFSv4 ownership to map correctly. Both hosts have a local `casibbald`
+# user, so as long as this matches on both ends we get clean ownership —
+# Mac UID 501 ↔ ms02 UID 1000 resolves to `casibbald@<domain>` on the wire.
+nfs_server_idmap_domain: microscaler.lan
+
+# ── Exports ───────────────────────────────────────────────────────────────
+# Per-export list of clients. Each client gets its own /etc/exports line so
+# different CIDRs can have different option sets (e.g. the localhost loopback
+# export needs `insecure` because ssh-forwarded connections arrive with a
+# non-privileged source port; the LAN export uses `secure` defaults).
+#
+# Override per-host in inventory/host_vars/<host>.yml.
+#
+# Example:
+#   nfs_server_exports:
+#     - path: /home/casibbald/Workspace
+#       clients:
+#         - cidr: 192.168.1.0/24
+#           options: "rw,sync,no_subtree_check,sec=sys"
+#         - cidr: 127.0.0.1/32
+#           options: "rw,sync,no_subtree_check,sec=sys,insecure"
+nfs_server_exports: []
+
+# ── Service tunables ──────────────────────────────────────────────────────
+# Number of kernel nfsd threads — default is 8 which is plenty for single-
+# user dev workloads, but the Ubuntu default of 8 is fine. Bump if multiple
+# Macs ever mount concurrently.
+nfs_server_threads: 8
+
+# Whether to enable and start the nfs-server systemd unit. Leave on; the
+# role is a no-op on hosts where nfs_server_exports is empty (empty exports
+# file is valid — nfsd starts with no exports).
+nfs_server_enabled: true
+
+# APT packages. `nfs-kernel-server` pulls in `nfs-common` automatically on
+# Ubuntu but list it explicitly for clarity.
+nfs_server_apt_packages:
+  - nfs-kernel-server
+  - nfs-common
