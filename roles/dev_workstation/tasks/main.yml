@@ -2,17 +2,36 @@
 # Remote-IDE friendliness (Cursor / VS Code / JetBrains Gateway over SSH).
 #
 # Why a separate role:
-#   These sysctls are dev-only noise on the Sparks (inference nodes — no
+#   These settings are dev-only noise on the Sparks (inference nodes — no
 #   editor ever attaches), but must survive a host rebuild on ms02 so the
-#   next agent that opens a Remote-SSH session doesn't get silent ENOSPC.
+#   next agent that opens a Remote-SSH session doesn't get silent ENOSPC
+#   or find its workspace root missing.
+#
+# Scope / primary use case:
+#   "Mac-as-thin-client, ms02-as-workstation" — the operator runs local
+#   Cursor on their Mac, connects to ms02 via Cursor's bundled
+#   anysphere.open-remote-ssh extension. Everything except the editor UI
+#   (files, terminal, git, rust-analyzer, tilt, cargo, docker) runs on
+#   ms02. Nothing touches the Mac's disk.
+#
+# What this role does:
+#   1. Raise inotify limits (file-watcher ceiling).
+#   2. Ensure the workspace root + expected subdirs exist with operator
+#      ownership so `File → Open Folder` in Remote-SSH has a target.
+#   3. Install CLI packages that make a Cursor terminal on ms02 feel like
+#      a real workstation (git, tmux, build-essential, …).
+#   4. Optionally seed git user.name / user.email so commits made from
+#      the Cursor terminal are attributed correctly.
 #
 # What this role does NOT do:
-#   - Install the Cursor/VSCode remote server — those are written by the IDE
-#     itself on first connection into ~/.cursor-server / ~/.vscode-server.
+#   - Install the Cursor/VSCode remote server — those are written by the
+#     IDE itself on first connection into ~/.cursor-server / ~/.vscode-server.
 #   - Manage ~/.ssh/config — that's operator-side (on the Mac), not ms02.
+#   - Clone repos. Operator drives that (via the sync_workspace playbook,
+#     `git clone` from the first Remote-SSH terminal, or an agent).
 
 - name: Remote-IDE friendliness on dev workstation
-  tags: [dev_workstation, dev-workstation, ide]
+  tags: [dev_workstation, dev-workstation, ide, remote_ssh]
   block:
     - name: Set inotify limits (persistent) for remote IDE file watchers
       ansible.builtin.copy:
@@ -39,3 +58,67 @@
       loop:
         - { name: fs.inotify.max_user_watches,   value: "{{ dev_workstation_inotify_max_user_watches }}" }
         - { name: fs.inotify.max_user_instances, value: "{{ dev_workstation_inotify_max_user_instances }}" }
+
+    - name: Install CLI packages a Cursor-on-ms02 terminal expects
+      ansible.builtin.apt:
+        name: "{{ dev_workstation_apt_packages }}"
+        state: present
+        update_cache: false
+
+    - name: Ensure workspace root exists for Remote-SSH "Open Folder"
+      ansible.builtin.file:
+        path: "{{ dev_workstation_workspace_root }}"
+        state: directory
+        owner: "{{ dev_workstation_user }}"
+        group: "{{ dev_workstation_user }}"
+        mode: "0755"
+
+    - name: Ensure expected workspace subdirs (landing spots for clones / rsync)
+      ansible.builtin.file:
+        path: "{{ dev_workstation_workspace_root }}/{{ item }}"
+        state: directory
+        owner: "{{ dev_workstation_user }}"
+        group: "{{ dev_workstation_user }}"
+        mode: "0755"
+      loop: "{{ dev_workstation_workspace_subdirs }}"
+
+    # Use plain `git config --global` via ansible.builtin.command to avoid
+    # pulling in community.general just for two one-liners. Idempotent via
+    # the check-then-set pattern (stdout comparison).
+    - name: Probe existing git user.name for {{ dev_workstation_user }}
+      become: true
+      become_user: "{{ dev_workstation_user }}"
+      ansible.builtin.command: git config --global --get user.name
+      register: dev_workstation_git_name_current
+      changed_when: false
+      failed_when: false
+      when: dev_workstation_git_user_name | length > 0
+
+    - name: Seed git user.name (commits from Cursor-on-ms02 terminal)
+      become: true
+      become_user: "{{ dev_workstation_user }}"
+      ansible.builtin.command:
+        cmd: "git config --global user.name {{ dev_workstation_git_user_name | quote }}"
+      when:
+        - dev_workstation_git_user_name | length > 0
+        - (dev_workstation_git_name_current.stdout | default('')) != dev_workstation_git_user_name
+      changed_when: true
+
+    - name: Probe existing git user.email for {{ dev_workstation_user }}
+      become: true
+      become_user: "{{ dev_workstation_user }}"
+      ansible.builtin.command: git config --global --get user.email
+      register: dev_workstation_git_email_current
+      changed_when: false
+      failed_when: false
+      when: dev_workstation_git_user_email | length > 0
+
+    - name: Seed git user.email
+      become: true
+      become_user: "{{ dev_workstation_user }}"
+      ansible.builtin.command:
+        cmd: "git config --global user.email {{ dev_workstation_git_user_email | quote }}"
+      when:
+        - dev_workstation_git_user_email | length > 0
+        - (dev_workstation_git_email_current.stdout | default('')) != dev_workstation_git_user_email
+      changed_when: true

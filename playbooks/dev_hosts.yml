@@ -5,11 +5,14 @@
 # 3) Firewall: ufw with dev-port allows
 # 4) Kind binary in /usr/local/bin
 # 5) dev_workstation: inotify limits for Cursor/VS Code Remote-SSH
+# 6) cursor_agent_worker: self-hosted Cloud Agents worker so cloud-driven
+#    agents execute builds/clones on ms02 (keeps the Mac thin).
 #
 # Run (after Docker CE is installed on ms02):
 #   ansible-playbook playbooks/dev_hosts.yml
 #   ansible-playbook playbooks/dev_hosts.yml -l ms02
 #   ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags dev_workstation  # sysctls only
+#   ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags cursor_agent_worker
 
 - name: Users, sudoers, Docker, firewall, Kind, remote-IDE tweaks on dev hosts
   hosts: dev_hosts
@@ -19,3 +22,6 @@
     - firewall
     - kind
     - dev_workstation
+    - role: cursor_agent_worker
+      tags: [cursor_agent_worker, cursor, agent, worker]
+      when: cursor_agent_worker_provision | default(true) | bool

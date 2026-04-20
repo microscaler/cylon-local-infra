@@ -1,0 +1,26 @@
+---
+# One-shot playbook that (re)installs and restarts the Cursor self-hosted
+# Cloud Agents worker on dev_hosts. Handy for:
+#   - bumping cursor_agent_worker_version to pick up a new CLI drop
+#   - rolling a new --api-key without touching the rest of dev_hosts
+#   - toggling cursor_agent_worker_service_enabled during initial bringup
+#
+# Usage:
+#   ansible-playbook playbooks/refresh_cursor_agent_worker.yml -l ms02
+#
+#   # with an API key (don't commit this):
+#   ansible-playbook playbooks/refresh_cursor_agent_worker.yml -l ms02 \
+#       -e cursor_agent_worker_api_key="cak_..."
+#
+#   # install CLI only, don't start the service yet (so you can `agent login`):
+#   ansible-playbook playbooks/refresh_cursor_agent_worker.yml -l ms02 \
+#       -e cursor_agent_worker_service_enabled=false
+#
+# After the service is up, the worker appears in the environment dropdown
+# at https://cursor.com/agents within ~10 seconds.
+
+- name: Install + (re)start Cursor self-hosted Cloud Agents worker
+  hosts: dev_hosts
+  become: true
+  roles:
+    - cursor_agent_worker

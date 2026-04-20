@@ -32,3 +32,36 @@ kind_version: "v0.31.0"
 kind_install_path: "/usr/local/bin/kind"
 kind_node_image: "kindest/node:v1.34.3"
 kind_create_cluster: true
+
+# --- Cursor self-hosted Cloud Agents worker (roles/cursor_agent_worker) ---
+# DISABLED by default — the operator's primary "Mac editor / ms02 compute"
+# pattern is Remote-SSH (local Cursor connects to ms02, cursor-server runs
+# on ms02, builds happen there naturally). Cloud Agents are an orthogonal
+# Cursor-cloud-driven product; we keep the role code in the repo for the
+# day we want CI-style background agents to run on ms02, but don't need
+# them for the day-to-day "keep Mac thin" loop.
+#
+# To enable: flip to true and either set cursor_agent_worker_api_key in
+# ansible-vault, or apply once with service_enabled: false and `agent
+# login` interactively on ms02 first. See roles/cursor_agent_worker/README.md.
+cursor_agent_worker_provision: false
+
+# API key: leave empty to install the CLI but rely on `agent login`
+# credentials stored in ~casibbald/.config/cursor-agent/. For true
+# unattended operation, put a service-account API key in ansible-vault
+# and reference it here, OR pass via -e at runtime:
+#
+#   ansible-playbook playbooks/refresh_cursor_agent_worker.yml \
+#       -e cursor_agent_worker_api_key="cak_..."
+#
+# Never commit a real key here.
+cursor_agent_worker_api_key: ""
+
+# Start the systemd service on apply. Flip to false if you need to
+# `agent login` interactively first on a fresh host without a key, then
+# set true and re-apply.
+cursor_agent_worker_service_enabled: true
+
+# Default working dir the worker hands to Cloud Agents when they don't
+# specify one. Agent-driven `git clone` lands here as siblings.
+cursor_agent_worker_dir: "/home/casibbald/Workspace/microscaler"

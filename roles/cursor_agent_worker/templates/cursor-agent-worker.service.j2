@@ -1,0 +1,52 @@
+[Unit]
+# Managed by cylon-local-infra :: roles/cursor_agent_worker.
+# Cursor self-hosted Cloud Agents worker (My Machines).
+#
+# Docs: https://cursor.com/docs/cloud-agent/my-machines
+#
+# The worker opens an outbound HTTPS connection to api2.cursor.sh and
+# api2direct.cursor.sh; no inbound ports are required. When a Cloud Agent
+# is targeted at this worker, the agent loop runs on Cursor's cloud but
+# every shell / file / docker / git tool-call executes on this host — which
+# is precisely why the operator wants their Mac to stay thin: clones and
+# builds land here, not on the laptop.
+Description=Cursor self-hosted Cloud Agents worker ({{ cursor_agent_worker_name }})
+Documentation=https://cursor.com/docs/cloud-agent/my-machines
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ cursor_agent_worker_user }}
+Group={{ cursor_agent_worker_group }}
+WorkingDirectory={{ cursor_agent_worker_dir }}
+
+# HOME must be set for the agent CLI to find ~/.config/cursor-agent/ (where
+# `agent login` stores its token) and ~/.local/bin (primary install path).
+Environment=HOME={{ cursor_agent_worker_home }}
+Environment=PATH={{ cursor_agent_worker_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{% for k, v in cursor_agent_worker_extra_env.items() %}
+Environment={{ k }}={{ v }}
+{% endfor %}
+
+# ExecStart: explicit arg splitting because systemd doesn't parse shell
+# quoting. --api-key is only added when one is provided; otherwise the
+# worker falls back to ~/.config/cursor-agent/ credentials (operator must
+# have run `agent login` once as {{ cursor_agent_worker_user }}).
+ExecStart={{ cursor_agent_worker_bin }} worker start \
+    --name {{ cursor_agent_worker_name }} \
+    --worker-dir {{ cursor_agent_worker_dir }}{% if cursor_agent_worker_api_key | length > 0 %} \
+    --api-key {{ cursor_agent_worker_api_key }}{% endif %}
+
+Restart=on-failure
+RestartSec=5s
+# Give the worker time to finish a tool-call in flight on clean stop.
+TimeoutStopSec=30s
+
+# Hardening: conservative defaults — the worker legitimately needs to read
+# the whole workspace, shell out, talk to docker.sock, etc., so we don't
+# ProtectHome/PrivateTmp/NoNewPrivileges here. Revisit if/when we run a
+# locked-down pool variant.
+
+[Install]
+WantedBy=multi-user.target

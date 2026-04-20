@@ -16,3 +16,38 @@ dev_workstation_inotify_max_user_watches: 524288
 # extension (rust-analyzer, gopls, pylance, tsserver) spawns a watcher; large
 # workspaces easily exhaust the default 128.
 dev_workstation_inotify_max_user_instances: 512
+
+# --- Workspace scaffolding for Remote-SSH -------------------------------
+# Cursor Remote-SSH needs a target folder to open. Rather than rely on the
+# operator having cloned repos by hand, this role ensures ~/Workspace/
+# exists with sensible perms so `cursor --remote ssh-remote+ms02 …` has a
+# stable landing spot. Repos themselves are operator / agent responsibility.
+dev_workstation_user: casibbald
+dev_workstation_user_home: "/home/{{ dev_workstation_user }}"
+dev_workstation_workspace_root: "{{ dev_workstation_user_home }}/Workspace"
+# Subdirs created under the workspace root. Aligns with the
+# `sync-to-ms02` justfile recipe destination on the Mac side.
+dev_workstation_workspace_subdirs:
+  - microscaler
+
+# Optional: git user identity for commits made from a Cursor terminal on
+# ms02. Leave any of these empty to skip (operator already has git
+# configured, or wants to keep it unmanaged).
+dev_workstation_git_user_name: ""
+dev_workstation_git_user_email: ""
+
+# APT packages that make a Remote-SSH session feel like a real workstation.
+# Safe superset — already-installed packages are a no-op. Everything here
+# is CLI-only; no GUI bloat on what is fundamentally a headless box.
+dev_workstation_apt_packages:
+  - git
+  - curl
+  - jq
+  - rsync
+  - tmux
+  - htop
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  - unzip
+  - ca-certificates

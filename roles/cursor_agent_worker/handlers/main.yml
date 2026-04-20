@@ -1,0 +1,10 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart cursor-agent-worker
+  ansible.builtin.systemd:
+    name: "{{ cursor_agent_worker_service_name }}"
+    state: restarted
+  when: cursor_agent_worker_service_enabled | bool

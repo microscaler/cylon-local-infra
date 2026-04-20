@@ -1,0 +1,133 @@
+---
+# Install + run Cursor's self-hosted Cloud Agents worker.
+# Strategy:
+#   1. Download the pinned agent-cli-package.tar.gz directly from Cursor's
+#      CDN and extract under ~/.local/share/cursor-agent/versions/<ver>/.
+#      (The official installer is a curl|bash shell script; we skip it and
+#      do the equivalent atomic extract in pure ansible, both for
+#      idempotency and to honor the "no shell scripts" rule in this repo.)
+#   2. Symlink ~/.local/bin/agent (+ cursor-agent) to the versioned binary.
+#   3. Render a systemd unit running `agent worker start` as the runtime
+#      user so it inherits docker group + ~/.ssh/config.
+#   4. Reload + enable/start the unit (or leave it stopped if the operator
+#      hasn't provided an API key yet and wants to `agent login` first).
+
+- name: Ensure runtime user exists
+  ansible.builtin.user:
+    name: "{{ cursor_agent_worker_user }}"
+    state: present
+  check_mode: false
+  register: cursor_agent_worker_user_out
+
+- name: Ensure per-user install directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ cursor_agent_worker_user }}"
+    group: "{{ cursor_agent_worker_group }}"
+    mode: "0755"
+  loop:
+    - "{{ cursor_agent_worker_bin_dir }}"
+    - "{{ cursor_agent_worker_install_base }}"
+    - "{{ cursor_agent_worker_versions_dir }}"
+
+- name: Check if the pinned agent version is already installed
+  ansible.builtin.stat:
+    path: "{{ cursor_agent_worker_version_dir }}/cursor-agent"
+  register: cursor_agent_worker_binary_stat
+
+- name: Download + extract the pinned agent CLI tarball
+  ansible.builtin.unarchive:
+    src: "{{ cursor_agent_worker_download_url_template }}"
+    dest: "{{ cursor_agent_worker_version_dir }}"
+    remote_src: true
+    extra_opts: ["--strip-components=1"]
+    owner: "{{ cursor_agent_worker_user }}"
+    group: "{{ cursor_agent_worker_group }}"
+    creates: "{{ cursor_agent_worker_version_dir }}/cursor-agent"
+  when: not cursor_agent_worker_binary_stat.stat.exists
+  # The target dir must exist before unarchive (--strip-components=1 doesn't
+  # create parents); we already made it above.
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+
+- name: Ensure the versioned binary is executable
+  ansible.builtin.file:
+    path: "{{ cursor_agent_worker_version_dir }}/cursor-agent"
+    mode: "0755"
+    owner: "{{ cursor_agent_worker_user }}"
+    group: "{{ cursor_agent_worker_group }}"
+
+- name: Symlink `agent` in ~/.local/bin to the pinned version
+  ansible.builtin.file:
+    src: "{{ cursor_agent_worker_version_dir }}/cursor-agent"
+    dest: "{{ item }}"
+    state: link
+    owner: "{{ cursor_agent_worker_user }}"
+    group: "{{ cursor_agent_worker_group }}"
+    force: true
+  loop:
+    - "{{ cursor_agent_worker_bin_dir }}/agent"
+    - "{{ cursor_agent_worker_bin_dir }}/cursor-agent"
+
+- name: Verify agent version
+  ansible.builtin.command: "{{ cursor_agent_worker_bin }} --version"
+  become: true
+  become_user: "{{ cursor_agent_worker_user }}"
+  register: cursor_agent_worker_version_out
+  changed_when: false
+  check_mode: false
+
+- name: Ensure worker working directory exists
+  ansible.builtin.file:
+    path: "{{ cursor_agent_worker_dir }}"
+    state: directory
+    owner: "{{ cursor_agent_worker_user }}"
+    group: "{{ cursor_agent_worker_group }}"
+    mode: "0755"
+
+# --- systemd unit ---------------------------------------------------------
+# Runs as the runtime user (not root) so the worker inherits docker group
+# membership, ~/.ssh/config, ~/.config/cursor-agent/ credentials from
+# `agent login`, and $HOME. Restart on failure keeps a long-lived worker
+# reliable through cursor.com backend redeploys, transient TLS hiccups, etc.
+
+- name: Render cursor-agent-worker systemd unit
+  ansible.builtin.template:
+    src: cursor-agent-worker.service.j2
+    dest: "{{ cursor_agent_worker_service_unit }}"
+    mode: "0644"
+    owner: root
+    group: root
+  notify:
+    - Reload systemd
+    - Restart cursor-agent-worker
+
+- name: Flush handlers so systemd reload/restart land before enable
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable + start cursor-agent-worker
+  ansible.builtin.systemd:
+    name: "{{ cursor_agent_worker_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: cursor_agent_worker_service_enabled | bool
+
+- name: Stop + disable cursor-agent-worker (service_enabled=false)
+  ansible.builtin.systemd:
+    name: "{{ cursor_agent_worker_service_name }}"
+    enabled: false
+    state: stopped
+  when: not (cursor_agent_worker_service_enabled | bool)
+  failed_when: false
+
+- name: Show cursor-agent-worker status (post-apply sanity check)
+  ansible.builtin.command: "systemctl status {{ cursor_agent_worker_service_name }} --no-pager --lines 10"
+  register: cursor_agent_worker_status_out
+  changed_when: false
+  failed_when: false
+
+- name: Display cursor-agent-worker status
+  ansible.builtin.debug:
+    var: cursor_agent_worker_status_out.stdout_lines

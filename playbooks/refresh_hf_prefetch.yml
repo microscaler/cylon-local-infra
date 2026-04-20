@@ -1,0 +1,25 @@
+---
+# One-shot playbook that refreshes the hf-prefetch daemon config on the leader
+# Spark (and the shared HF cache dir on every Spark) so the background daemon
+# picks up any changes to inventory/group_vars/sparks.yml → hf_prefetch_models
+# on its next poll cycle.
+#
+# Why this exists: `ansible-playbook playbooks/provision_sparks.yml --tags hf_prefetch`
+# only matches the outer include_role task and skips the role's inner tasks
+# because they don't carry the same tag — same pattern as cutover_roce.yml
+# documents for the vllm_ngc_stack tag. Invoking the role directly avoids that.
+#
+# Usage (from the controller):
+#   # Edit hf_prefetch_models in inventory/group_vars/sparks.yml first.
+#   ansible-playbook playbooks/refresh_hf_prefetch.yml
+#
+# Monitor the download progress:
+#   ssh casibbald@nvidia1 'sudo jq .models /var/lib/hf-prefetch/state.json'
+#   ssh casibbald@nvidia1 'sudo journalctl -u hf-prefetch -f'
+
+- name: Spark cluster — refresh hf-prefetch daemon config
+  hosts: sparks
+  gather_facts: true
+  become: true
+  roles:
+    - hf_prefetch_service

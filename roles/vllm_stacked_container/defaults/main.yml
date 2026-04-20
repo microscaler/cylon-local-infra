@@ -51,3 +51,15 @@ vllm_stacked_container_ray_join_delay_sec: 15
 # and NCCL_NET_GDR_LEVEL=0 in inventory/group_vars/sparks.yml to match).
 vllm_stacked_container_rdma_enabled: true
 vllm_stacked_container_rdma_device_path: /dev/infiniband
+
+# --- Qwen3 MoE patches for GB10 (vendored from spark-vllm-docker) ---
+# When true, the role copies roles/vllm_stacked_container/files/qwen_moe_patches
+# to /opt/vllm-stack/patches on each Spark, bind-mounts it read-only into each
+# Ray container at /vllm-patches, and applies the patches inside the container
+# before `vllm serve` starts. See that directory's README.md for what each
+# patch does and the upstream tracking issues. Idempotent — reruns are no-ops.
+# Set to false to skip, e.g. when upstream vLLM in the NGC image no longer
+# needs them.
+vllm_stacked_container_qwen_moe_patches_enabled: true
+vllm_stacked_container_qwen_moe_patches_host_dir: /opt/vllm-stack/patches
+vllm_stacked_container_qwen_moe_patches_container_dir: /vllm-patches

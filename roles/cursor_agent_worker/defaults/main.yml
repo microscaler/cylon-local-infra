@@ -1,0 +1,94 @@
+---
+# Defaults for the cursor_agent_worker role.
+#
+# Installs Cursor's `agent` CLI and runs it as a self-hosted Cloud Agents
+# worker (aka "My Machines") via systemd, so Cloud Agents triggered from
+# cursor.com/agents, Slack, GitHub, Linear, etc. execute shell / file /
+# docker / tilt / kind tool-calls on THIS host instead of Cursor's AWS.
+#
+# This is the primary mechanism keeping code clones, docker builds, and
+# `cargo build` / `tilt up` artifacts off the operator's laptop: the agent
+# loop runs in Cursor's cloud, but its hands are on ms02 (or wherever this
+# role is applied).
+#
+# Docs: https://cursor.com/docs/cloud-agent/my-machines
+# Docs: https://cursor.com/docs/cloud-agent/self-hosted-pool  (org-wide fleets)
+
+# --- CLI install ---
+# Version tag from the Cursor downloads CDN. Bump to upgrade; the download
+# URL template below substitutes this in. Pinning makes ansible runs
+# reproducible — "latest" would drift under us.
+#
+# Bump procedure:
+#   1. curl -fsSL https://cursor.com/install | head -120 | grep 'DOWNLOAD_URL='
+#   2. copy the version segment, update here, commit.
+cursor_agent_worker_version: "2026.04.17-787b533"
+
+# Direct tarball URL (avoids curl | bash in ansible). {os}/{arch} are filled
+# at runtime from ansible_system / ansible_architecture. The install script
+# maps x86_64 → x64, aarch64 → arm64 (we do the same in tasks/main.yml).
+cursor_agent_worker_download_url_template: "https://downloads.cursor.com/lab/{{ cursor_agent_worker_version }}/{{ cursor_agent_worker_os }}/{{ cursor_agent_worker_arch }}/agent-cli-package.tar.gz"
+
+# OS/arch mapping (resolved in tasks). Populated from facts — overrides
+# only needed for exotic cross-install scenarios.
+cursor_agent_worker_os: "{{ {'Linux': 'linux', 'Darwin': 'darwin'}[ansible_system] | default('linux') }}"
+cursor_agent_worker_arch: "{{ {'x86_64': 'x64', 'aarch64': 'arm64', 'arm64': 'arm64'}[ansible_architecture] | default('x64') }}"
+
+# --- Runtime user ---
+# The worker inherits the user's groups (docker, kvm, etc.), home, and
+# HOME/.ssh/config — which is exactly what we want: a Cloud Agent on this
+# worker should be indistinguishable from the operator running commands
+# by hand. Defaults to casibbald to match the rest of the dev_hosts role set.
+cursor_agent_worker_user: casibbald
+cursor_agent_worker_group: "{{ cursor_agent_worker_user }}"
+cursor_agent_worker_home: "/home/{{ cursor_agent_worker_user }}"
+
+# Where the CLI binary lives after install (matches upstream installer output):
+#   ~/.local/share/cursor-agent/versions/<ver>/cursor-agent  (actual binary)
+#   ~/.local/bin/agent            (symlink, primary)
+#   ~/.local/bin/cursor-agent     (symlink, legacy name)
+cursor_agent_worker_install_base: "{{ cursor_agent_worker_home }}/.local/share/cursor-agent"
+cursor_agent_worker_versions_dir: "{{ cursor_agent_worker_install_base }}/versions"
+cursor_agent_worker_version_dir: "{{ cursor_agent_worker_versions_dir }}/{{ cursor_agent_worker_version }}"
+cursor_agent_worker_bin_dir: "{{ cursor_agent_worker_home }}/.local/bin"
+cursor_agent_worker_bin: "{{ cursor_agent_worker_bin_dir }}/agent"
+
+# --- Worker config ---
+# Friendly name shown in the environment dropdown at cursor.com/agents.
+cursor_agent_worker_name: "{{ inventory_hostname }}"
+
+# Default working directory the worker uses when an agent doesn't pass one.
+# Pointing at the workspace root means `git clone` calls from agents land
+# as siblings to your existing repos instead of in $HOME.
+cursor_agent_worker_dir: "{{ cursor_agent_worker_home }}/Workspace/microscaler"
+
+# --- Authentication ---
+# Two paths, pick one:
+#
+# (A) Service-account API key (RECOMMENDED for systemd): the worker runs
+#     headless without needing `agent login` to have succeeded in an
+#     interactive session. Create at Cursor → Settings → API Keys, then
+#     either set via -e / --extra-vars or put in ansible-vault:
+#
+#       ansible-playbook playbooks/refresh_cursor_agent_worker.yml \
+#         -e cursor_agent_worker_api_key="cak_..."
+#
+# (B) Interactive `agent login` (runtime_user's shell, browser-opened URL):
+#     leave the API key blank and set cursor_agent_worker_service_enabled: false
+#     until you've SSH'd into the box, run `agent login`, then flip the flag.
+#     The worker will pick up credentials from ~/.config/cursor-agent/.
+#
+# Never commit a real API key into inventory. Use ansible-vault or pass via -e.
+cursor_agent_worker_api_key: ""
+
+# --- systemd service ---
+# Start the worker daemon after install. Leave false on first run of an
+# API-key-less bringup so you can `agent login` first, then flip to true
+# and rerun. With a key set, safe to leave true.
+cursor_agent_worker_service_enabled: true
+cursor_agent_worker_service_name: "cursor-agent-worker"
+cursor_agent_worker_service_unit: "/etc/systemd/system/{{ cursor_agent_worker_service_name }}.service"
+
+# Extra environment for the service unit. Use for HTTPS_PROXY on networks
+# that require it, or extra worker labels when we adopt Self-Hosted Pool.
+cursor_agent_worker_extra_env: {}

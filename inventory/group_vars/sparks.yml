@@ -49,8 +49,95 @@ cuda_keyring_url: "https://developer.download.nvidia.com/compute/cuda/repos/ubun
 cuda_toolkit_package: "cuda-toolkit-13-0"
 cuda_extra_packages: []
 
-# Interconnect interface (QSFP link-local). Used by NCCL socket networking and Ray.
+# --- Spark interconnect (QSFP Direct-Attach-Copper to peer Spark) ---
+# The Spark has ONE ConnectX-7 SuperNIC chip (shared Base GUID 30c59903003fe1cf
+# per `mstflint -d 0000:01:00.0 q` and `mstflint -d 0002:01:00.0 q`) with TWO
+# external QSFP cages (Cage A = front, Cage B = rear, per NVIDIA's build.nvidia.com
+# "connect two sparks" playbook). Each cage is dual-attached to the Grace CPU via
+# two independent PCIe Gen5 x4 paths — one per CPU socket — so each cage shows
+# up in the kernel as two logical netdevs with different BDFs and MACs but the
+# same underlying wire:
+#
+#   Cage A:  enp1s0f0np0  (BDF 0000:01:00.0, IB rocep1s0f0)
+#         +  enP2p1s0f0np0 (BDF 0002:01:00.0, IB roceP2p1s0f0)
+#   Cage B:  enp1s0f1np1  (BDF 0000:01:00.1, IB rocep1s0f1)
+#         +  enP2p1s0f1np1 (BDF 0002:01:00.1, IB roceP2p1s0f1)
+#
+# Current topology: single DAC cable on Cage A between nvidia1 and nvidia2.
+# Cage B is intentionally unused — dual-cage SuperNICs are designed for HA
+# (active/standby uplinks to two different switches), not link aggregation to a
+# single peer. We instead exploit the dual PCIe paths into Cage A to double the
+# effective PCIe bandwidth feeding the 200 Gb/s wire. Measured: 13.9 GB/s
+# (single PCIe path) → 23.75 GB/s (dual PCIe path, +70%) on 2 GiB NCCL
+# all-reduce — the new ceiling is ~95 % of a single-link line rate.
+# See llmwiki/runs/2026-04-19-dual-pcie-path-cutover.md for the full run.
+#
+# Fabric 1 = Cage A via PCIe path 1 (primary; also carries NCCL OOB/bootstrap
+#            IP traffic over the QSFP socket transport).
+#   netdev : enp1s0f0np0
+#   IP     : 169.254.x.y/16 auto via IPv4 link-local (netplan 40-cx7.yaml)
+#   MTU    : 9000 (jumbo) → RoCE active_mtu 4096 (was 1024 at MTU 1500)
+#
+# Fabric 2 = Cage A via PCIe path 2 (pure RDMA data plane, no socket traffic).
+#            Ubuntu's NetworkManager left this netdev unmanaged by default, so
+#            Ansible writes a persistent NM connection (ipv6 disabled to keep
+#            the RoCE GID cache clean — a kernel-generated IPv6 privacy address
+#            at GID index 0/1 was displacing the IPv4 GID we pin in NCCL).
+#   netdev : enP2p1s0f0np0
+#   IP     : 10.200.0.1/30 (nvidia1) / 10.200.0.2/30 (nvidia2) — set in host_vars
+#   MTU    : 9000 → RoCE active_mtu 4096
+#
+# nccl_interface below = fabric 1 netdev; only used for NCCL_SOCKET_IFNAME
+# (OOB bootstrap). Data path rides both PCIe paths via NCCL_IB_HCA.
 nccl_interface: enp1s0f0np0
+spark_interconnect_mtu: 9000
+
+# Fabric 2 per-host IP is set in inventory/host_vars/nvidia{1,2}.yml.
+spark_fabric2_netdev: enP2p1s0f0np0
+spark_fabric2_ib_device: roceP2p1s0f0
+spark_fabric2_cidr_prefix: 30
+spark_fabric2_peer_network: "10.200.0.0/30"
+
+# --- Dual-HCA feature flag ---
+# Controls whether NCCL multi-rails across BOTH PCIe paths into Cage A
+# (rocep1s0f0 + roceP2p1s0f0) or uses only the primary path (rocep1s0f0).
+#
+# Default = true  (dual-HCA) as of 2026-04-19 FP8 + patches cutover.
+#
+# History of this flag (full arc in llmwiki/runs/2026-04-19-dual-pcie-path-cutover.md
+# and .../2026-04-19-qwen35-fp8-adoption.md):
+#
+#   2026-04-19 initial dual-rail cutover (BF16 Qwen3.6-35B-A3B):
+#     raw NCCL all-reduce:  13.93 → 23.75 GB/s  (+70 %)
+#     workload prefill   :  6897 → 5800 tok/s   (-16 %)
+#     workload decode    :  ~45 tok/s (LPDDR5X wall either way)
+#     decision: flip back to single-HCA — small per-layer AllReduce msgs saw
+#     more latency from 2-rail coordination than bandwidth win.
+#
+#   2026-04-19 FP8 + MoE patches cutover (current):
+#     Theory: the prefill regression above was NOT the multi-rail. The
+#     spark-vllm-docker reference repo runs the same 2-Spark topology with
+#     dual-HCA (rocep1s0f1,roceP2p1s0f1 in their case) at full speed — what
+#     was actually slow in our BF16 run was the un-patched Triton fused_moe
+#     kernel (PR #34279 regression) and the absent FlashInfer backend.
+#     With all three missing optimizations in place (fix_slowness.diff,
+#     FP8 weights/KV, FlashInfer), dual-HCA should be a pure win again.
+#
+# WHEN TO FLIP TO false:
+#   * If post-cutover workload prefill regresses vs single-HCA, flip back.
+#     All the fabric-2 plumbing (netplan MTU 9000, NM cx7-fabric2 connection,
+#     static /30 IP, pinned GID index 3) stays provisioned either way.
+#   * Decode is bandwidth-bound on LPDDR5X regardless; the flag doesn't move it.
+#
+# WHEN TO KEEP true:
+#   * Full utilization of the 200 Gb/s QSFP wire for AllReduce-heavy prefill.
+#   * A decode-side device joins the cluster (Mac Studio M5 Ultra @ 819 GB/s
+#     memory bandwidth) and we switch to EXO-style disaggregated prefill/decode:
+#     the Sparks handle compute-bound prefill, stream KV layer-by-layer to the
+#     M5, which handles memory-bound decode at ~3× Spark throughput. Under
+#     that regime, prefill becomes strictly bandwidth-bound on large
+#     AllReduces — the +70 % NCCL headroom translates directly to TTFT.
+spark_dual_hca_enabled: true
 
 # --- NGC stacked container stack (roles/vllm_stacked_container) ---
 # Image tag: pinned to match what is currently on the Sparks (nvidia1, nvidia2).
@@ -66,61 +153,138 @@ vllm_stacked_container_api_port: 8000
 vllm_stacked_container_recreate: false
 # Model + TP configuration.
 #
-# CURRENT: TinyLlama for validated smoke service on 26.03-py3. Swap to one of
-# the Qwen targets below once the hf-prefetch daemon reports them `ready` on
-# both hosts (see hf_prefetch_models at bottom of this file).
+# CURRENT: Qwen/Qwen3.5-35B-A3B-FP8 — the exact model + quantization the
+# spark-vllm-docker reference recipe runs (see that repo's
+# recipes/qwen3.5-35b-a3b-fp8.yaml). FP8 cuts per-token memory bandwidth ~2×
+# vs BF16, which is the lever that matters on GB10's 273 GB/s LPDDR5X decode
+# wall (see blog.exolabs.net/nvidia-dgx-spark for the architectural story).
 #
-# Future targets (now unlocked by 26.03-py3's bundled vLLM 0.17.1):
-#   Qwen/Qwen3.6-35B-A3B                     — best-in-class coder, hybrid DeltaNet+attn MoE,
-#                                                35B total / 3B active. Arch: `Qwen3_5MoeForConditionalGeneration` ✓
-#   Qwen/Qwen3-Coder-30B-A3B-Instruct        — July-2025 coder specialist,
-#                                                30B total / 3B active. Arch: `Qwen3MoeForCausalLM` ✓
-#   Qwen/Qwen2.5-Coder-32B-Instruct          — rock-solid dense fallback. Arch: `Qwen2ForCausalLM` ✓
+# Why not Qwen3.6-35B-A3B (the newer hybrid DeltaNet model we were running):
+# it only ships in BF16 on HF at the moment, so decode is bandwidth-bound at
+# ~6 GB/token/node → ~45 tok/s hard ceiling. FP8 halves that to ~3 GB/token
+# → ~90 tok/s. When an FP8 variant of 3.6 lands we'll swap.
 #
 # Earlier blockers (preserved for institutional memory):
 #   Gemma-4 — requires `vllm/vllm-openai:gemma4-cu130` (different image from NGC).
 #   Gemma-3-27b-it — HF-gated, account not yet approved.
-vllm_default_model: "Qwen/Qwen3.6-35B-A3B"
+vllm_default_model: "Qwen/Qwen3.5-35B-A3B-FP8"
 vllm_tensor_parallel_size: 2
-# Leave empty unless you know the NGC image ships `fastsafetensors` (26.01-py3 does NOT).
-# Empty = omit --load-format flag → vLLM uses `auto`, which is safe.
-vllm_load_format: ""
+# NGC 26.03-py3 ships vllm without the fastsafetensors extra (tested 2026-04-19:
+# `ImportError: Please install vllm[fastsafetensors]`). The qwen-patch step in
+# vllm_stacked_container does a `pip install fastsafetensors` inside both Ray
+# containers on every cutover so this config stays aspirational and takes the
+# cold-load win (~18 GB of FP8 weights per rank) without baking a custom image.
+vllm_load_format: "fastsafetensors"
 # Extra `vllm serve` args — tuned for full-cluster throughput.
 #
-# Context: 262144 = Qwen3.6-35B-A3B native max_position_embeddings (no rope
-# extension). With 10 attention layers × 2 KV heads × 256 head_dim (BF16) the
-# per-token KV is ~20 KB total / ~10 KB per rank on TP=2, so one full-length
-# sequence costs ~5 GB — trivially fits the 70.66 GiB KV cache vLLM reported
-# at init on 26.03-py3. Paged KV only allocates what's used; ceiling is safe.
+# Context: 262144 = Qwen3.5-35B-A3B native max_position_embeddings (no rope
+# extension). With FP8 weights + fp8 KV cache the per-token KV halves vs
+# BF16, so max_model_len 262144 fits KV comfortably within the 70+ GiB cache
+# vLLM provisions at init.
 #
-# Throughput: --gpu-memory-utilization 0.95 (up from 0.90) reclaims ~6.5 GB
-# KV headroom. --max-num-batched-tokens 16384 (8× the 2048 default) is the
-# chunked-prefill batch — bigger chunks = higher GB10 utilization at the
-# cost of bigger peak prefill memory, which we have headroom for.
-# --max-num-seqs 128 keeps the concurrent-sequence cap at something the KV
-# budget comfortably supports at mixed context lengths.
+# The flag block below is the adopted full set from
+# spark-vllm-docker/recipes/qwen3.5-35b-a3b-fp8.yaml — same image family
+# (NGC vllm 26.03-py3), same GB10 architecture, same model. What each flag
+# buys us (measurements in runs/2026-04-19-qwen35-fp8-adoption.md once we land):
+#
+#   --kv-cache-dtype fp8          : KV cache quantized to fp8_e4m3 — 2× more
+#                                   KV capacity → 2× longer concurrent
+#                                   sequences or 2× more in-flight requests.
+#                                   GB10 has native fp8 arith, no accuracy hit.
+#   --attention-backend flashinfer: FA3 kernels via FlashInfer, ~10-15 %
+#                                   prefill speedup over vLLM's default on GB10.
+#                                   Ships in NGC 26.03-py3.
+#   --enable-prefix-caching       : dedup shared system-prompt / RAG-context
+#                                   KV across requests. Huge TTFT win for
+#                                   agent workloads that reuse prompts.
+#   --chat-template /vllm-patches/unsloth.jinja
+#                                 : Unsloth-fixed Qwen3.5 template (tool calls +
+#                                   thinking tags) from spark-vllm-docker's
+#                                   fix-qwen3.5-chat-template mod. Ships via
+#                                   the qwen_moe_patches bind-mount.
+#   --enable-auto-tool-choice     : make OpenAI-compat tools/function-calling
+#                                   work automatically (paired with parser).
+#   --tool-call-parser qwen3_coder: parses Qwen3-Coder's tool-call grammar.
+#
+# Throughput knobs:
+#   --max-num-batched-tokens 16384 (8× the 2048 default) is the chunked-prefill
+#     batch — bigger chunks = higher GB10 utilization at the cost of bigger
+#     peak prefill memory, which FP8 gives us plenty of.
+#   --max-num-seqs 128 — concurrent-sequence cap.
 #
 # Reasoning parser: qwen3 splits <think> into the OpenAI-compat
 # `reasoning_content` field so coder / agent consumers can suppress the
 # chain-of-thought monologue while keeping it available for debuggers.
-# See llmwiki/runs/2026-04-19-qwen3-throughput-and-256k.md for the
-# before/after measurements.
 #
 # Revert to smoke defaults: clear this list and set
 # vllm_default_model: "TinyLlama/TinyLlama-1.1B-Chat-v1.0".
 vllm_api_server_extra_args:
+  # Cursor IDE compatibility: advertise several aliases at /v1/models because
+  # Cursor's custom-model validator lives on Cursor's cloud and checks against
+  # a fixed server-side registry of known model ids — not a prefix pattern.
+  # Empirically (cursor-guide research 2026-04-20) the following names are
+  # rejected by the send-time validator even though Cursor's Add-Model field
+  # accepts them at type time:
+  #   - "Qwen/Qwen3.5-35B-A3B-FP8"  (slash is stripped)
+  #   - "Qwen"                       (short bare name)
+  #   - "qwen3"                       (no `qwen-*` escape hatch exists)
+  # There is NO `custom-*` / `local-*` / `byok-*` prefix. Every self-hosted
+  # vLLM / Ollama user today masquerades as a frontier-model name. We pick
+  # `gpt-4o-mini` as the primary cover:
+  #   - 128k advertised context (our --max-model-len 262144 ≥ that, so no
+  #     truncation surprises from Cursor's side)
+  #   - no vision injection (unlike gpt-4o)
+  #   - no reasoning-mode request shape (unlike o3-mini / o4-mini)
+  #   - widest compatibility across Cursor release channels
+  # Caveat: Cursor's Agent/Composer mode refuses BYOK regardless of cover
+  # name — Ask + Plan + Inline Edit only. That is a Cursor policy, not a
+  # vLLM limitation.
+  # vllm accepts `model: "gpt-4o-mini"` in the request body because it is
+  # listed here; it still loads the real weights from vllm_default_model.
+  # `qwen3` and the full HF repo id are kept so CLI / curl smoke tests
+  # against /v1/models keep resolving.
+  - "--served-model-name"
+  - "gpt-4o-mini"
+  - "qwen3"
+  - "Qwen/Qwen3.5-35B-A3B-FP8"
   - "--max-model-len"
   - "262144"
   - "--gpu-memory-utilization"
-  # GB10 reports 119.61 GiB visible to CUDA on boot, ~111.5 GiB free after
-  # host OS / dockerd / ray runtime overhead — 0.95 (→ 113.6 GiB) crashed
-  # init_device with "Free memory … less than desired GPU memory
-  # utilization". 0.92 (→ 110.0 GiB) leaves ~1.5 GiB safety margin.
-  - "0.92"
+  # 0.80 robust default with FP8 weights + dual-HCA + Ray + FlashInfer stack.
+  # GB10 reports 119.61 GiB to CUDA (UMA: LPDDR5X shared CPU + GPU pool).
+  # Measured free memory at vllm-serve startup:
+  #   • 2026-04-19 fresh reboot, single-HCA           → ~111.5 GiB  → 0.92 fits
+  #   • 2026-04-19 fresh reboot, dual-HCA             → ~109.0 GiB  → 0.92 OOMs
+  #   • 2026-04-19 after a few cutover cycles         → ~109.5 GiB  → 0.92 OOMs
+  #   • 2026-04-19 NGC 26.03 + FP8 + dual-HCA (post   → ~103.4 GiB  → 0.90 OOMs
+  #     3h-long-stale container + cache drop, probe                    on both
+  #     time is before CUDA/torch init settle)                          Sparks
+  # Per-cutover CUDA/ibverbs state doesn't fully release, the 2nd HCA
+  # statically pins ~2.5 GiB of MR caches / QP buffers, and NGC 26.03
+  # carries slightly more baseline than 26.01. 0.80 (95.69 GiB) leaves
+  # ~7.7 GiB margin even at the 103.4 GiB worst case — headroom for future
+  # regressions in kernel/driver/NGC baseline without churning this config.
+  # With FP8 weights we have ~35 GiB back vs BF16, and the reference recipe
+  # runs 0.70 (~83 GiB); our 0.80 KV cache is still ~12 GiB larger than that.
+  - "0.80"
   - "--max-num-batched-tokens"
   - "16384"
   - "--max-num-seqs"
   - "128"
+  # --- FP8 model + KV cache + fast attention (from spark-vllm-docker recipe) ---
+  - "--kv-cache-dtype"
+  - "fp8"
+  - "--attention-backend"
+  - "flashinfer"
+  - "--enable-prefix-caching"
+  # --- Tool calling + Unsloth chat template ---
+  # The jinja lives inside the Ray containers at /vllm-patches/unsloth.jinja
+  # courtesy of the qwen_moe_patches bind-mount (roles/vllm_stacked_container).
+  - "--chat-template"
+  - "/vllm-patches/unsloth.jinja"
+  - "--enable-auto-tool-choice"
+  - "--tool-call-parser"
+  - "qwen3_coder"
   - "--reasoning-parser"
   - "qwen3"
 # Skip torch.compile / inductor kernels only if compilation fails on this GPU stack.
@@ -163,10 +327,14 @@ vllm_hf_home: "{{ spark_runtime_home }}/.cache/huggingface"
 # RAY_CGRAPH_get_timeout: v1 compiled DAG default (300s) can kill TP workers on
 # long steps, hence 900s.
 
-# RoCE v2 HCA name (same on nvidia1 and nvidia2 — `rdma link show` on each).
-# This is the ConnectX-7 port that terminates the QSFP link to the peer Spark;
-# its sibling rocep1s0f1 and the second-ASIC roceP2p1s0f* devices are not cabled.
-nccl_ib_hca: rocep1s0f0
+# RoCE v2 HCA names (same on nvidia1 and nvidia2 — `rdma link show` on each).
+# Derived from spark_dual_hca_enabled:
+#   false → "rocep1s0f0"                  (single-HCA, workload-optimal today)
+#   true  → "rocep1s0f0,roceP2p1s0f0"     (dual-HCA, for EXO-style disaggregated
+#                                          prefill/decode when an M5 Ultra joins)
+# Cage B (rocep1s0f1, roceP2p1s0f1) is intentionally not cabled — the dual-cage
+# SuperNIC layout is for HA (two ToR switches), not bonding to a single peer.
+nccl_ib_hca: "{{ 'rocep1s0f0,roceP2p1s0f0' if spark_dual_hca_enabled else 'rocep1s0f0' }}"
 
 vllm_distributed_extra_env:
   # Bootstrap / out-of-band transports still ride the QSFP IP socket — NCCL
@@ -178,7 +346,13 @@ vllm_distributed_extra_env:
   TP_SOCKET_IFNAME: "{{ nccl_interface }}"
   # --- RoCE v2 fast path (data plane) ---
   NCCL_IB_DISABLE: "0"                    # enable NCCL's built-in verbs transport
-  NCCL_IB_HCA: "{{ nccl_ib_hca }}"        # pin to the cabled port (others are DOWN)
+  NCCL_IB_HCA: "{{ nccl_ib_hca }}"        # single- or multi-rail, see spark_dual_hca_enabled
+  # Pin the RoCE GID index to 3 = RoCE v2 + IPv4. Fabric 2 has no IPv4 GID at
+  # index 0/1 (those are IPv6 link-local from MAC), so auto-selection picks
+  # mismatched GIDs across nodes and QP creation fails with EINVAL. Index 3 is
+  # the RoCE v2 IPv4 slot on BOTH HCAs on both Sparks — verified via
+  # `show_gids` after provisioning. See llmwiki/runs/2026-04-19-dual-rail-cutover.md.
+  NCCL_IB_GID_INDEX: "3"
   NCCL_NET_GDR_LEVEL: "PHB"               # GPUDirect RDMA: GPU↔NIC across PCIe host bridge.
                                           #   Per `nvidia-smi topo -m` the GB10 GPU
                                           #   sits at NODE distance from every NIC,
@@ -194,8 +368,25 @@ vllm_distributed_extra_env:
   NCCL_NVLS_ENABLE: "0"
   # WARN after the stack is stable; bump to INFO when diagnosing.
   NCCL_DEBUG: "WARN"
+  # --- Tuning adopted from spark-vllm-docker/launch-cluster.sh ---
+  # NCCL_IGNORE_CPU_AFFINITY=1 — don't let NCCL renumber our CPU masks; Ray
+  # already pins actors to GB10 NUMA nodes and NCCL's affinity rewrites
+  # conflict with Ray's placement, producing spurious socket re-pins.
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  # VLLM_MARLIN_USE_ATOMIC_ADD=1 — enable atomic-add reduction inside Marlin
+  # FP8/INT4 GEMMs (big win on GB10 when many experts hit the same output).
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
   RAY_memory_monitor_refresh_ms: "0"
   RAY_CGRAPH_get_timeout: "900"
+  # Ray prestarts 4 python workers per node at bring-up; each is ~200 MiB of
+  # unified memory that never gets used by our 2-node TP cluster (vLLM talks
+  # to named actors, not the worker pool). Disable.
+  RAY_num_prestart_python_workers: "0"
+  # Object store is the Ray shared-memory plasma pool. vLLM's NCCL AllReduce
+  # path bypasses it entirely, and Ray's auto-sizing claims a big chunk of
+  # /dev/shm. 1 GiB is plenty for the small control-plane objects Ray uses
+  # internally.
+  RAY_object_store_memory: "1073741824"
 
 # --- NGC / OCI image sync daemon (roles/ngc_image_service) ---
 # Leader-only systemd service that polls each tracked repo's Docker Registry v2
@@ -262,8 +453,7 @@ spark_provision_hf: true
 # model. Background; poll `jq .models /var/lib/hf-prefetch/state.json`.
 hf_prefetch_models:
   - TinyLlama/TinyLlama-1.1B-Chat-v1.0            # keep, smoke model
-  - Qwen/Qwen3.6-35B-A3B                          # primary target (35B / 3B MoE, hybrid DeltaNet)
-  - Qwen/Qwen3-Coder-30B-A3B-Instruct             # fallback / A-B comparison
+  - Qwen/Qwen3.5-35B-A3B-FP8                      # primary target, matches spark-vllm-docker recipe
 # Flip this to true in CI / blocking workflows to have Ansible wait for
 # every model to land (default: false, returns immediately).
 hf_prefetch_wait_for_ready: false

@@ -22,6 +22,27 @@
     - "{{ vllm_stacked_container_install_dir }}"
     - "{{ vllm_stacked_container_config_dir }}"
 
+# --- Qwen3 MoE patches: stage on host before docker run so the bind-mount
+# has something to serve. Idempotent sync; new image → new patches → rerun
+# just re-copies. See files/qwen_moe_patches/README.md.
+- name: Ensure patches host directory exists
+  ansible.builtin.file:
+    path: "{{ vllm_stacked_container_qwen_moe_patches_host_dir }}"
+    state: directory
+    mode: "0755"
+  when: vllm_stacked_container_qwen_moe_patches_enabled | bool
+
+- name: Stage Qwen3 MoE patches + chat template onto Spark host
+  ansible.builtin.copy:
+    src: "qwen_moe_patches/{{ item }}"
+    dest: "{{ vllm_stacked_container_qwen_moe_patches_host_dir }}/{{ item }}"
+    mode: "0644"
+  loop:
+    - _triton_alloc_setup.py
+    - _triton_alloc_setup.pth
+    - unsloth.jinja
+  when: vllm_stacked_container_qwen_moe_patches_enabled | bool
+
 - name: Download upstream run_cluster.sh (optional operator reference)
   ansible.builtin.get_url:
     url: "{{ vllm_stacked_container_run_cluster_url }}"
@@ -84,6 +105,7 @@
       {{ ('--device ' + vllm_stacked_container_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_stacked_container_rdma_enabled | bool) else '' }} \
       --env-file "{{ vllm_stacked_container_config_dir }}/head.env" \
       -v "{{ vllm_stacked_container_hf_home }}:/root/.cache/huggingface" \
+      {{ ('-v ' + vllm_stacked_container_qwen_moe_patches_host_dir + ':' + vllm_stacked_container_qwen_moe_patches_container_dir + ':ro') if (vllm_stacked_container_qwen_moe_patches_enabled | bool) else '' }} \
       "{{ vllm_stacked_container_image }}" \
       -c 'ray start --block --head --node-ip-address="{{ spark_interconnect_ip }}" --port="{{ vllm_ray_port }}"'
   args:
@@ -132,6 +154,7 @@
       {{ ('--device ' + vllm_stacked_container_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_stacked_container_rdma_enabled | bool) else '' }} \
       --env-file "{{ vllm_stacked_container_config_dir }}/worker-{{ inventory_hostname }}.env" \
       -v "{{ vllm_stacked_container_hf_home }}:/root/.cache/huggingface" \
+      {{ ('-v ' + vllm_stacked_container_qwen_moe_patches_host_dir + ':' + vllm_stacked_container_qwen_moe_patches_container_dir + ':ro') if (vllm_stacked_container_qwen_moe_patches_enabled | bool) else '' }} \
       "{{ vllm_stacked_container_image }}" \
       -c 'ray start --block --address="{{ spark_ray_head_ip }}:{{ vllm_ray_port }}" --node-ip-address="{{ spark_interconnect_ip }}"'
   args:
@@ -148,6 +171,62 @@
     seconds: "{{ vllm_stacked_container_ray_join_delay_sec | int }}"
   run_once: true
   when: vllm_stacked_container_start_api | bool
+
+# --- Qwen3 MoE patch application (head + worker containers) ---
+# Must happen AFTER Ray is started (so the containers exist) and BEFORE
+# `vllm serve` spawns Ray actors that import the patched vLLM modules.
+# Ray actors are fresh python subprocesses, so as long as the .py files
+# on disk are patched at actor-spawn time, the first import sees the new
+# code. `patch`/`cp` are idempotent (on repeat runs the diff no-applies
+# cleanly; cp overwrites byte-identical files). We run this on ALL sparks
+# so both the head and worker containers get the treatment in parallel.
+- name: Apply NGC 26.03 image bolt-ons inside Ray containers (Triton shim + fastsafetensors)
+  ansible.builtin.shell: |
+    set +e
+    cname="{{ (inventory_hostname == (groups['sparks'] | sort | first))
+              | ternary(vllm_stacked_container_ray_head_name,
+                        vllm_stacked_container_ray_worker_name) }}"
+    docker exec "$cname" bash -lc '
+      set +e
+      PATCH_DIR="{{ vllm_stacked_container_qwen_moe_patches_container_dir }}"
+      SP="$(python3 -c "import sysconfig;print(sysconfig.get_paths()[\"purelib\"])")"
+      echo "[qwen-patch] site-packages: $SP"
+      cd "$PATCH_DIR" || exit 0
+      # Triton runtime allocator: replaces the NullAllocator with
+      # torch.cuda.caching_allocator_alloc so fused-MoE kernels do not stall
+      # on GB10s unified-memory allocator. The .pth auto-loads the .py on
+      # interpreter start (site.py machinery). cp -f is idempotent.
+      echo "[qwen-patch] installing triton allocator shim ..."
+      cp -f _triton_alloc_setup.py _triton_alloc_setup.pth "$SP/"
+      # NGC 26.03-py3 ships vllm without the fastsafetensors extra. Our
+      # sparks.yml sets `--load-format fastsafetensors` (cold-load win for
+      # 35B FP8, ~18 GB per rank), so bolt the package in here rather than
+      # baking a custom image. Pure-Python wheel, deps already satisfied.
+      if python3 -c "import fastsafetensors" 2>/dev/null; then
+        echo "[qwen-patch] fastsafetensors: already present"
+      else
+        echo "[qwen-patch] installing fastsafetensors ..."
+        pip install --no-cache-dir --quiet --disable-pip-version-check fastsafetensors \
+          && echo "[qwen-patch] fastsafetensors: installed" \
+          || echo "[qwen-patch] fastsafetensors: install FAILED"
+      fi
+      echo "[qwen-patch] done"
+    '
+  args:
+    executable: /bin/bash
+  register: qwen_patch_out
+  changed_when: "'fastsafetensors: installed' in (qwen_patch_out.stdout | default(''))"
+  when:
+    - vllm_stacked_container_qwen_moe_patches_enabled | bool
+    - vllm_stacked_container_start_api | bool
+
+- name: Show image bolt-on application log
+  ansible.builtin.debug:
+    var: qwen_patch_out.stdout_lines
+  when:
+    - vllm_stacked_container_qwen_moe_patches_enabled | bool
+    - qwen_patch_out is defined
+    - qwen_patch_out.stdout_lines is defined
 
 - name: Check for vLLM serve in head container
   ansible.builtin.command:
