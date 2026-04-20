@@ -17,43 +17,58 @@ If you need to "run a command on ms02", you **SSH to ms02**. Editing a file in `
 ## Host topology
 
 ```
-                                       ┌──────────────────────────┐
-                                       │  DGX Spark cluster       │
-                                       │                          │
-                                       │  nvidia1  (leader)       │
-                                       │    gx10-e1ce             │
-                                       │    169.254.102.149  QSFP │
-                                       │    192.168.1.104    LAN  │◄──── vLLM :8000
-                                       │                          │      Ray head :8265/:6379
-                                       │  nvidia2  (follower)     │
-                                       │    gx10-47b5             │
-                                       │    169.254.37.109   QSFP │
-                                       │                          │
-                                       │  runtime user: nvidia    │
-                                       │  ops user:     casibbald │
-                                       └──────────────────────────┘
-                                                     ▲
-                                                     │ NCCL / RoCE v2 over ConnectX-7
-                                                     │ (QSFP interconnect, MTU 9000)
-                                                     │
-┌───────────────────────┐      SSH :22          ┌────────────────────────────┐
-│  picolino  (macOS)    │◄────────────────────► │  ms02  (Linux dev host)    │
-│  user: casibbald      │   + NFS :2049 over    │  user: casibbald (UID 1000)│
-│        (UID 502)      │   SSH LocalForward    │  root available via        │
-│  Ansible controller   │◄────────────────────► │  `ansible_user: root`      │
-│  Editor host          │                       │                            │
-│                       │   SOCKS5 :1080 over   │  • Source code (canonical) │
-│                       │   SSH (opt-in)        │    /home/casibbald/…       │
-│                       │                       │  • Kind cluster (shared)   │
-│                       │                       │  • Docker / ctr            │
-│                       │                       │  • Tilt targets (build +   │
-│                       │                       │    push from Mac → ms02)   │
-└───────────────────────┘                       └────────────────────────────┘
+                            ┌──────────────────────────────────────────────────┐
+                            │  DGX Spark cluster                               │
+                            │                                                  │
+                            │  ┌──────────────────┐      ┌──────────────────┐  │
+                            │  │  nvidia1 (lead)  │      │  nvidia2 (follow)│  │
+                            │  │  gx10-e1ce       │◄────►│  gx10-47b5       │  │
+                            │  │  169.254.102.149 │      │  169.254.37.109  │  │
+                            │  │  192.168.1.104   │ QSFP │                  │  │
+                            │  └──────────────────┘      └──────────────────┘  │
+                            │         ▲                                        │
+                            │         │ LAN 1GbE (service port)                │
+                            │         │ vLLM :8000, Ray :8265/:6379            │
+                            │         │                                        │
+                            │  Interconnect between nvidia1 ↔ nvidia2:         │
+                            │    NCCL / RoCE v2 over ConnectX-7 QSFP, MTU 9000 │
+                            │    (GPU-direct RDMA — used ONLY for inter-node   │
+                            │     tensor-parallel NCCL collectives; not        │
+                            │     reachable from ms02 or the Mac)              │
+                            │                                                  │
+                            │  runtime user: nvidia                            │
+                            │  ops user:     casibbald                         │
+                            └──────────────────────────────────────────────────┘
+                                      ▲
+                                      │ LAN 100 Mbit switch port
+                                      │ (HTTP/API only; NOT NCCL / NOT RoCE)
+                                      │
+┌───────────────────────┐   SSH :22   │                 ┌────────────────────────────┐
+│  picolino  (macOS)    │◄────────────┼───────────────► │  ms02  (Linux dev host)    │
+│  user: casibbald      │  +NFS :2049 │                 │  user: casibbald (UID 1000)│
+│        (UID 502)      │  over SSH   │                 │  root via ansible_user=root│
+│  Ansible controller   │  Forward    │                 │                            │
+│  Editor host          │◄────────────┘                 │  • Source code (canonical) │
+│                       │  SOCKS5 :1080                 │    /home/casibbald/…       │
+│                       │  over SSH (opt-in)            │  • Kind cluster (shared)   │
+│                       │◄────────────────────────────► │  • Docker / ctr            │
+│                       │                               │  • Tilt targets (build +   │
+│                       │                               │    push from ms02 → Kind)  │
+└───────────────────────┘                               └────────────────────────────┘
          ▲
-         │ wired LAN (pending): collapses tunnel tax once Starlink is
-         │ replaced with router that does NOT filter Wi-Fi↔LAN traffic
-         │ on all ports except 22. See llmwiki/concepts/starlink-wifi-lan-port-filter.md
+         │ wired LAN (pending): collapses SSH-tunnel tax on Mac↔ms02
+         │ once Starlink is replaced with a router that does NOT
+         │ filter Wi-Fi↔LAN TCP traffic on all ports except 22.
+         │ See llmwiki/concepts/starlink-wifi-lan-port-filter.md
 ```
+
+**Three distinct network paths, don't conflate them:**
+
+| Edge | Link | Carries |
+|---|---|---|
+| `nvidia1 ↔ nvidia2` | ConnectX-7 QSFP, RoCE v2, MTU 9000, link-local `169.254.0.0/16` | NCCL tensor-parallel collectives, GPUDirect RDMA. **Not routable** — you cannot reach it from ms02 or the Mac. |
+| `{ms02, picolino} ↔ {nvidia1, nvidia2}` | 100 Mbit switch port on LAN (`192.168.1.0/24`) | HTTP / OpenAI API to vLLM, Ray dashboard, SSH. Shared, modest bandwidth, **no RDMA**. |
+| `picolino ↔ ms02` | Wi-Fi → Starlink → ms02 wired, multiplexed over SSH `:22` | NFS, Tilt UI, Postgres, kubeconfig, Ray dashboard forward (all via SSH LocalForward until direct LAN lands). |
 
 **Why this shape.** ms02 owns the canonical filesystem for two reasons: (a) disk space — the Mac's SSD is too small for the full Microscaler tree + build caches + container images; (b) Tilt needs the code where the Kind cluster runs, to skip rsync round-trips on every file save.
 
@@ -189,7 +204,7 @@ From the Mac, browse the Tilt UI at `http://localhost:10350` (via SSH LocalForwa
 
 ## The DGX Spark cluster (nvidia1, nvidia2)
 
-Two NVIDIA DGX Spark nodes on the LAN, bridged by a QSFP ConnectX-7 interconnect running RoCE v2 with GPUDirect RDMA.
+Two NVIDIA DGX Spark nodes on the LAN. The two nodes are additionally bridged directly to each other by a dedicated QSFP ConnectX-7 link running RoCE v2 with GPUDirect RDMA. **That RoCE link is internal to the pair** — used only for NCCL tensor-parallel collectives between `nvidia1` and `nvidia2`. Everything external (ms02, the Mac, agent HTTP traffic) reaches the nodes over the ordinary 100 Mbit LAN switch port, not via RoCE.
 
 | Role | Host | User | Notes |
 |---|---|---|---|
