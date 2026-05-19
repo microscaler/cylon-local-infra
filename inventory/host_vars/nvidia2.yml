@@ -1,2 +1,20 @@
-# Follower (gx10-47b5): same LAN iface as leader; persist IPv6-off on LAN for consistent ops (manual sysctl applied 2026-04).
-spark_lan_disable_ipv6_on_interface: "enP7s7"
+# Follower (gx10-47b5). LAN IPv6-off default lives in inventory/group_vars/sparks.yml.
+
+# RoCE v2 + IPv4 GID index for NCCL — this unit's `show_gids` places IPv4 RoCE v2 at index 4
+# (not 3) on rocep1s0f0 and roceP2p1s0f0; pinning 3 breaks ncclCommInitRank (PyNCCL unhandled system error).
+spark_nccl_ib_gid_index: "4"
+
+# QSFP link-local + stable names for Ray/GCS, NCCL OOB, and operator SSH (roles/spark_hosts).
+spark_hosts_local_ip: "169.254.37.109"
+spark_hosts_local_aliases:
+  - gx10-47b5
+  - nvidia2
+spark_hosts_peer_ip: "169.254.102.149"
+spark_hosts_peer_aliases:
+  - gx10-e1ce
+  - nvidia1
+
+# --- Kernel pin (roles/spark_kernel) ---
+# 2026-05-01: cluster-wide step-back to 6.17.0-1008-nvidia is configured at
+# the group level (inventory/group_vars/sparks.yml). No per-host override
+# needed.

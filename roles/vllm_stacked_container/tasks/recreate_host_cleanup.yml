@@ -1,0 +1,34 @@
+---
+# Runs on each Spark after `docker rm -f` on the recreate path only.
+#
+# GPU-resident KV blocks do NOT persist across crashes — they vanish with the
+# process/GPU context. Prefix-cache metadata is also in-process (see README).
+# What *does* linger on the host is Linux page cache (weight mmap / I/O) and
+# sometimes stale Ray session dirs under /tmp/ray — those can skew “free RAM”
+# probes right before a cold `vllm serve` (see llmwiki runs on Ray head recovery).
+
+- name: Sync disks and drop host page caches after stacked-container teardown (recreate)
+  # Ansible shell defaults to /bin/sh (dash on Ubuntu); bash-only `set -o pipefail` breaks there.
+  ansible.builtin.shell:
+    cmd: sync && echo 3 > /proc/sys/vm/drop_caches
+  when:
+    - vllm_stacked_container_recreate | bool
+    - vllm_stacked_container_drop_caches_before_recreate | bool
+  changed_when: true
+
+- name: Remove stale Ray temp dir before recreate (optional)
+  ansible.builtin.file:
+    path: "{{ vllm_stacked_container_ray_tmp_dir }}"
+    state: absent
+  when:
+    - vllm_stacked_container_recreate | bool
+    - vllm_stacked_container_clear_ray_tmp_before_recreate | bool
+
+- name: Ensure Ray temp dir exists after optional purge
+  ansible.builtin.file:
+    path: "{{ vllm_stacked_container_ray_tmp_dir }}"
+    state: directory
+    mode: "01777"
+  when:
+    - vllm_stacked_container_recreate | bool
+    - vllm_stacked_container_clear_ray_tmp_before_recreate | bool

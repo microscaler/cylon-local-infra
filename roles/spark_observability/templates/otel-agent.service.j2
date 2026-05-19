@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenTelemetry Collector agent (Spark) — scrape locally, OTLP push to ms02
+Documentation=https://opentelemetry.io/docs/collector/
+After=network-online.target node_exporter.service dcgm-exporter.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ spark_observability_otel_agent_user }}
+Group={{ spark_observability_otel_agent_user }}
+ExecStart={{ spark_observability_bin_dir }}/otelcol-contrib --config={{ spark_observability_config_dir }}/otel-agent.config.yaml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,3 +1,24 @@
-# Leader-only (gx10-e1ce): LAN had broken IPv6 default (black hole); httpx/HF stalled. Disabling v6 on LAN keeps QSFP fe80 on other interfaces.
-# Validated manually: sysctl net.ipv6.conf.enP7s7.disable_ipv6=1
-spark_lan_disable_ipv6_on_interface: "enP7s7"
+# Leader-only (gx10-e1ce). LAN IPv6-off default lives in inventory/group_vars/sparks.yml.
+
+# RoCE v2 + IPv4 GID index for NCCL on this host (`show_gids` → rocep1s0f0 / roceP2p1s0f0).
+spark_nccl_ib_gid_index: "3"
+
+# QSFP link-local + stable names for Ray/GCS, NCCL OOB, and operator SSH (roles/spark_hosts).
+spark_hosts_local_ip: "169.254.102.149"
+spark_hosts_local_aliases:
+  - gx10-e1ce
+  - nvidia1
+spark_hosts_peer_ip: "169.254.37.109"
+spark_hosts_peer_aliases:
+  - gx10-47b5
+  - nvidia2
+
+# --- Kernel pin (roles/spark_kernel) ---
+# 2026-05-01: cluster-wide step-back to 6.17.0-1008-nvidia is configured at
+# the group level (inventory/group_vars/sparks.yml). No per-host override
+# needed — both Sparks pin to the same kernel for a clean before/after vs
+# the crash history we have on 6.17.0-1014-nvidia.
+#
+# To override here (e.g. step nvidia1 further to 6.11 while nvidia2 stays
+# on 1008 for an asymmetric A/B):
+#   spark_kernel_pin: "6.11.0-1014-nvidia"

@@ -6,8 +6,9 @@ Sibling of [workspace-sync](./workspace-sync.md) (the additive rsync Mac → ms0
 
 ## TL;DR
 
-- **Today (Starlink router in path)**: stay on SSHFS. NFS/SMB are blocked at the network layer; tunneling them over SSH-on-22 gives most of SSHFS's downsides back. Tune the existing mount (add `kernel_cache,entry_timeout,attr_timeout`) instead.
-- **When the USB 2.5GbE wired adapter lands**: cut over to **NFSv4** with a `no_root_squash`-free export. Mac NFS client is kernel-native (no macFUSE), single-port 2049 is a clean firewall story, and close-to-open caching matches the editor workflow. Mac and ms02 both run `casibbald` — idmap works.
+- **Today (home LAN, Mac ↔ ms02)**: **NFSv4** at **`~/Workspace/remote`** is the live secondary path (read/browse from the Mac; heavy builds stay on ms02 via Remote-SSH). Single port **2049/tcp**, `just nfs-up` / `just nfs-down`. SSHFS was retired 2026-04-20; git history has the old recipes.
+- **Network**: If the Starlink Wi-Fi↔LAN filter blocks 2049, fix the path (wired to the same LAN as ms02, or router rule) — tunneling NFS over SSH is possible but rarely worth it vs using Remote-SSH for compute.
+- **`noresvport` vs `resvport` on macOS**: `just nfs-up` tries **`noresvport` first**, then **automatically retries with `resvport`** if the first `mount_nfs` fails (some macOS builds return **Operation not permitted** for `noresvport` even with a correct server export). Use **`just nfs-up-resvport`** to force privileged client ports only. ms02 exports use **`insecure`** so non-privileged source ports work for `noresvport` clients.
 - **Don't pick SMB** unless a future non-dev Mac user needs Finder tag support. On a pure development workflow SMB's wins are irrelevant and its macOS-client quirks (Spotlight spam, stale OpLocks, Sonoma+ perf regressions) are load-bearing.
 
 Measured baseline (2026-04-20, Mac Wi-Fi → Starlink → ms02 wired):
@@ -55,15 +56,16 @@ sudo exportfs -ra
 sudo systemctl enable --now nfs-server
 ```
 
-**Mac side** — no third-party software, no kernel extensions, no macFUSE:
+**Mac side** — no third-party software, no kernel extensions, no macFUSE. **Canonical:** `just nfs-up` (tries **noresvport**, then **resvport**). Manual `mount_nfs` must match the stub layout in **`mac_workstation`** (`~/Workspace/remote` as **root:wheel**). Avoid copy-pasting old examples that use Linux-only or conflicting flags (`intr`, `rdirplus`, `nolocks`+`locallocks` — see `justfile`).
 
 ```bash
-sudo mount -t nfs -o \
-  vers=4,rsize=1048576,wsize=1048576,hard,intr,nfc,locallocks,noacl,nolocks,nocto,rdirplus \
-  ms02:/home/casibbald/Workspace  ~/Workspace/remote
+# Manual noresvport (if you must not use just) — replace IP if needed:
+sudo mount_nfs -o vers=4,rsize=1048576,wsize=1048576,hard,noresvport,nfc \
+  192.168.1.189:/home/casibbald/Workspace "$HOME/Workspace/remote"
+# If that returns Operation not permitted, same line with resvport instead of noresvport, or:  just nfs-up-resvport
 ```
 
-Or add to `/etc/auto_master` + `/etc/auto_nfs` for autofs / Finder sidebar integration.
+Or add to `/etc/auto_master` + `/etc/auto_nfs` for autofs / Finder sidebar integration (keep the same option set as `just nfs-up`).
 
 ### Why NFSv4 wins
 
@@ -76,17 +78,19 @@ Or add to `/etc/auto_master` + `/etc/auto_nfs` for autofs / Finder sidebar integ
 
 ### Known macOS NFS gotchas
 
-- **`resvport` default** — macOS binds from a privileged port; ms02's `nfs-server` must accept it (default is yes, but explicitly set `insecure` in `/etc/exports` if flipping to a non-resvport mode).
-- **`nolocks`** — macOS's NFS lock manager negotiation with Linux `rpc.statd` is fragile; if the editor uses `flock()` it'll sometimes hang. `nolocks` (client-side only locks) is the pragmatic choice for a single-user dev mount.
+- **`noresvport` then `resvport` (default in `just nfs-up`)** — The **Linux export** uses **`insecure`** so clients using **non-privileged** source ports (`noresvport`, macOS default) are accepted. **`just nfs-up`** tries **`noresvport`** first; if **`mount_nfs` fails**, it **retries with `resvport`** (privileged client port). That matches setups where **only** `resvport` succeeds (e.g. **Operation not permitted** on the first attempt on some macOS versions). For a **forced** resvport mount without the first attempt, use **`just nfs-up-resvport`**.
+- **Legacy `resvport` wording** — Older Apple docs implied the client always used reserved ports; on current macOS, **`noresvport`** is common. The pairing that matters is **client options ↔ `exports`**: `insecure` on the server for `noresvport`; **`resvport`** does not require relaxing the port check the same way.
+- **`nolocks`** — macOS's NFS lock manager negotiation with Linux `rpc.statd` is fragile; if the editor uses `flock()` it'll sometimes hang. `nolocks` (client-side only locks) is the pragmatic choice for a single-user dev mount. The **live** `just nfs-up` stack does **not** pass `nolocks`/`locallocks` (they conflict if both appear; NFSv4 locking is usually enough for this workflow).
 - **`nfc` (NFD → NFC normalization)** — macOS filesystems store Unicode as NFD (decomposed); Linux ext4 stores bytes as-is. Without `nfc`, a file named `café.txt` created on Mac becomes unreadable from ms02 side. Always include this flag.
-- **Spotlight** — we already `sudo mdutil -X ~/Workspace/remote`'d this on the sshfs mount; repeat after NFS cutover. `/etc/fstab`-style option `nobrowse` also hides the mount from Finder sidebar if desired.
+- **Spotlight** — **`mac_workstation`** disables indexing on **`~/Workspace/remote`** via **`mdutil`**. Repeat manually if you add paths. `/etc/fstab`-style option `nobrowse` also hides the mount from Finder sidebar if desired.
+- **Mount stub** — **`~/Workspace/remote`** is a **`root:wheel`** directory created by **`mac_workstation`**; **`just nfs-up`** mounts ms02’s export there. Open **`~/Workspace`** in Cursor so `local/` + `remote/` stay side by side. See `just nfs-doctor`.
+- **No README on the stub** — Do not keep **`README.md`** under **`~/Workspace/remote`**. Documentation lives in **`cylon-local-infra`** (`docs/`, this wiki, `justfile`). Ansible **does not** seed a stub README; it **deletes** a stray **`README.md` only while unmounted** (when mounted, that path is ms02). Point Cursor at **`local/`** for repo docs, not `remote/`.
+- **EPERM / “Operation not permitted”** — Often **(1)** **`just nfs-up`** automatic **resvport** retry fixes it, **(2)** **Full Disk Access** for the app running the shell (Terminal, iTerm, **Cursor** — restart the app after toggling), **(3)** **`just nfs-troubleshoot`** probes **`/private/tmp`** with **noresvport** vs **resvport** vs **`mount -t nfs`**. **`just nfs-up`** runs **`xattr -cr`** on the stub before mount (some macOS builds are picky about **provenance** xattrs). On ms02: **`sudo exportfs -v`**, **`ss -lntp | grep 2049`**.
 - **FSEvents** — NFS mounts don't fire Mac FSEvents for server-side changes. Same limitation as SSHFS. See "File watching" section below.
 
 ### Network prerequisite
 
-NFS needs port **2049/tcp** from Mac → ms02. Starlink Gen3 filters Wi-Fi↔LAN on all ports except 22. Options:
-- **Wait for the USB 2.5GbE wired adapter** (tracked as pending in [starlink-router](../entities/starlink-router.md)) — eliminates the filter entirely.
-- **Tunnel it**: add `LocalForward 2049 127.0.0.1:2049` to `~/.ssh/config.d/ms02-dev-tunnel`, export NFS to `127.0.0.1` on ms02, mount `127.0.0.1:/home/...` on Mac. Works, but degrades gracefully to "SSHFS with extra steps" — you keep the single-cipher single-stream bottleneck. Only marginal latency win.
+NFS needs port **2049/tcp** from Mac → ms02 on the **LAN**. `inventory/host_vars/ms02.yml` allows **`2049`** (and the dev port range) from **`192.168.1.0/24`**. If a **router** still filters Wi-Fi↔LAN, fix the network path (wired to the same switch as ms02, or router rules) — **cylon-local-infra** no longer ships an SSH-tunneled NFS fallback (`ms02-dev-tunnel` retired).
 
 ## Option B: SMB3 (Samba)
 
@@ -189,15 +193,15 @@ This is already the repo's documented posture: `docs/remote-dev.md` says the mou
 2. **Phase 2 — NFSv4 at `~/Workspace/remote` (live 2026-04-20, supersedes SSHFS):**
    - `roles/nfs_server/` — ms02-side: `nfs-kernel-server` + idmapd + templated `/etc/exports` (handler-driven `exportfs -ra`; no service restart on export changes — preserves live mounts).
    - `roles/mac_workstation/` — Mac-side, local-connection: ensures `~/Workspace/remote` exists, excludes from Spotlight idempotently via `mdutil -s` probe, writes `/etc/nfs.conf` with the NFSv4 idmap domain matching ms02.
-   - `inventory/host_vars/ms02.yml` — exports to both `192.168.1.0/24` (direct mount, post-wired-LAN) and `127.0.0.1/32` with `insecure` (SSH-tunneled — `insecure` is required because ssh-forwarded connections arrive at nfsd from a non-privileged source port). Both client entries use `all_squash,anonuid=1000,anongid=1000` — single-operator dev mount, Mac UID 502 / macOS `staff` gets remapped to ms02's UID 1000 / `casibbald` on every RPC. Real cross-UID identity would require `sec=krb5`; we don't need it for a single-user workspace. Adds `2049/tcp` to `firewall_trusted_lan_tcp_ports` for the existing `firewall` role to consume.
-   - `inventory/hosts.yml` — new `macs` group, `picolino` as a `local`-connection host.
+   - `inventory/host_vars/ms02.yml` — export to **`192.168.1.0/24`** with **`insecure`** (macOS `noresvport` clients) and **`all_squash,anonuid=1000,anongid=1000`** — single-operator dev mount; Mac UID / `staff` vs ms02 UID 1000 is handled server-side. Adds **`2049/tcp`** to **`firewall_trusted_lan_tcp_ports`**. (Historical **`127.0.0.1/32`** SSH-tunnel export **removed** — LAN + firewall only.)
+   - `inventory/hosts.yml` — `macs` group, `picolino` as a `local`-connection host.
    - `playbooks/nfs_server.yml` + `playbooks/mac_workstation.yml` — dedicated playbooks; both check-mode safe.
-   - `~/.ssh/config.d/ms02-dev-tunnel` — added `LocalForward 2049 localhost:2049` so NFS rides the existing ControlMaster tunnel until the Starlink port-filter path retires.
-   - `justfile` — `nfs-up` / `nfs-down` / `nfs-status` / `nfs-bench` / `nfs-reconnect` recipes plus `mac-provision` / `nfs-server-provision` with `-check` dry-run variants. SSHFS recipes removed (git history preserves them).
+   - `mac_workstation` — ensures **`Include ~/.ssh/config.d/*`** and **removes** retired **`~/.ssh/config.d/ms02-dev-tunnel`**; no managed port-forwards.
+   - `justfile` — `nfs-up` (noresvport→resvport retry) / `nfs-down` / `nfs-status` / `nfs-bench` / `nfs-reconnect` / `ms02-lan-check`; `mac-provision` / `nfs-server-provision` with `-check` variants. SSHFS + **`dev-tunnel-*`** recipes removed (git history preserves them).
 
-   **Working macOS mount options:** `vers=4,rsize=1048576,wsize=1048576,hard,noresvport,nfc`. Do NOT add `nolocks`, `locallocks`, `rdirplus`, `intr`, or `bg` — they're either Linux-only, mutually contradictory, or cause zombie retry daemons to stack mounts on EINVAL. The `just nfs-up` comment has the full rationale per-flag.
+   **Working macOS mount options:** `vers=4,rsize=1048576,wsize=1048576,hard,noresvport,nfc` (first try), then the same with **`resvport`** instead of **`noresvport`** if the first `mount_nfs` fails — see **`just nfs-up`**. Do NOT add `nolocks`, `locallocks`, `rdirplus`, `intr`, or `bg` — they're either Linux-only, mutually contradictory, or cause zombie retry daemons to stack mounts on EINVAL. The `justfile` `nfs-up` recipe documents the per-flag rationale.
 
-   **Activation order** (historical — how the 2026-04-20 cutover actually went): bootstrap ms02 NFS server by direct SSH (the SSHFS mount the Ansible controller was on had silently gone stale, writes weren't landing) → fix exports with `all_squash,anonuid=1000` (UID mismatch blocked writes) → `dev-tunnel-up` with fresh ControlMaster (picks up `LocalForward 2049`) → `mount_nfs` at `~/Workspace/remote` → reconcile manual bootstrap via `just nfs-server-provision` idempotently → run `mac-provision`.
+   **Activation order** (historical — 2026-04-20 cutover): bootstrap ms02 NFS server by direct SSH → fix exports with `all_squash,anonuid=1000` → LAN `mount_nfs` at `~/Workspace/remote` → reconcile via `just nfs-server-provision` → `mac-provision`. (Early iterations used an SSH tunnel for NFS; that path is **retired**.)
 
 **Do NOT pick SMB.** On a pure development workflow where all participants are Unix, every advantage SMB offers (Finder tag interop, per-user ACLs, Windows clients) is irrelevant, and the two places it loses (Mac SMB client stability, Samba config surface) cost more than they save.
 
@@ -235,4 +239,4 @@ Target numbers (on 2.5GbE wired with NFSv4):
 - [starlink-wifi-lan-port-filter](./starlink-wifi-lan-port-filter.md) — the network-layer reason NFS/SMB are blocked today.
 - [starlink-router](../entities/starlink-router.md) — retires when the USB 2.5GbE adapter arrives.
 - `docs/remote-dev.md` — the dual-track "Mac editor, ms02 compute" pattern; all three protocols are the *secondary* path.
-- `justfile` → `nfs-up` / `nfs-down` / `nfs-status` / `nfs-bench` / `nfs-reconnect` — the live mount recipes (SSHFS equivalents removed 2026-04-20).
+- `justfile` → `nfs-up` (noresvport then resvport retry) / `nfs-up-resvport` / `nfs-down` / `nfs-status` / `nfs-bench` / `nfs-reconnect` / `nfs-doctor` / `nfs-troubleshoot` / `ms02-lan-check` — live recipes (SSHFS + SSH tunnel recipes removed; use LAN URLs — see `docs/dev_hosts.md`).

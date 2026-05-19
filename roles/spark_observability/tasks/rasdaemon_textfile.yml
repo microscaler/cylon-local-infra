@@ -1,0 +1,68 @@
+---
+# rasdaemon already collects RAS errors (PCIe AER, MCE, EDAC) into a SQLite
+# DB at /var/lib/rasdaemon/ras-mc_event.db. We don't need a separate
+# exporter — a small shell script periodically writes counts to a .prom
+# file in node_exporter's textfile directory. node_exporter then exposes
+# those values as standard Prometheus metrics.
+#
+# Cost: one `ras-mc-ctl --summary` invocation per minute (default).
+
+- name: rasdaemon — ensure rasdaemon is installed
+  ansible.builtin.apt:
+    name: rasdaemon
+    state: present
+    update_cache: false
+  failed_when: false
+  register: spark_obs_rasdaemon_install
+
+- name: rasdaemon — ensure rasdaemon service is running (best-effort)
+  ansible.builtin.systemd:
+    name: rasdaemon.service
+    state: started
+    enabled: true
+  failed_when: false
+
+- name: rasdaemon — install textfile shipper script
+  ansible.builtin.template:
+    src: rasdaemon-textfile.sh.j2
+    dest: /usr/local/sbin/rasdaemon-textfile.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: rasdaemon — systemd timer (run every 60s)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/rasdaemon-textfile.timer
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Write rasdaemon RAS counters to node_exporter textfile dir (every 60s)
+
+      [Timer]
+      OnBootSec=30s
+      OnUnitActiveSec=60s
+      Unit=rasdaemon-textfile.service
+      AccuracySec=5s
+
+      [Install]
+      WantedBy=timers.target
+
+- name: rasdaemon — systemd service (oneshot)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/rasdaemon-textfile.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Write rasdaemon RAS counters to node_exporter textfile dir
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/rasdaemon-textfile.sh
+
+- name: rasdaemon — enable + start the timer
+  ansible.builtin.systemd:
+    name: rasdaemon-textfile.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode

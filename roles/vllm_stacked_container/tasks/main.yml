@@ -43,13 +43,21 @@
     - unsloth.jinja
   when: vllm_stacked_container_qwen_moe_patches_enabled | bool
 
+# Operator reference only; upstream URL path has moved (404) on some branches.
+# Avoid repeated GETs when the file is already present (rate limits / blocks).
+- name: Stat run_cluster.sh on host (skip download if present)
+  ansible.builtin.stat:
+    path: "{{ vllm_stacked_container_install_dir }}/run_cluster.sh"
+  register: vllm_stacked_container_run_cluster_stat
+
 - name: Download upstream run_cluster.sh (optional operator reference)
   ansible.builtin.get_url:
     url: "{{ vllm_stacked_container_run_cluster_url }}"
     dest: "{{ vllm_stacked_container_install_dir }}/run_cluster.sh"
     mode: "0755"
-    force: true
-  when: vllm_stacked_container_install_run_cluster_script | bool
+  when:
+    - vllm_stacked_container_install_run_cluster_script | bool
+    - not vllm_stacked_container_run_cluster_stat.stat.exists
 
 - name: Pull NGC vLLM image
   ansible.builtin.command:
@@ -76,11 +84,24 @@
     mode: "0644"
   when: inventory_hostname != (groups['sparks'] | sort | first)
 
+- name: Deploy vLLM Ray env carry-over exclusion list (per-host NCCL_IB_GID_INDEX)
+  ansible.builtin.copy:
+    src: ray_non_carry_over_env_vars.json
+    dest: "{{ vllm_stacked_container_config_dir }}/ray_non_carry_over_env_vars.json"
+    mode: "0644"
+  when: vllm_stacked_container_ray_nccl_gid_carryover_exclude | bool
+
 # --- Ray head (leader only) ---
 - name: Remove Ray head container when recreating
   ansible.builtin.command:
     cmd: docker rm -f "{{ vllm_stacked_container_ray_head_name }}"
   failed_when: false
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_stacked_container_recreate | bool
+
+- name: Recreate cleanup — host page cache / optional Ray tmp (leader)
+  ansible.builtin.import_tasks: recreate_host_cleanup.yml
   when:
     - inventory_hostname == (groups['sparks'] | sort | first)
     - vllm_stacked_container_recreate | bool
@@ -92,6 +113,23 @@
   failed_when: false
   changed_when: false
   when: inventory_hostname == (groups['sparks'] | sort | first)
+
+# Mirrors the worker's "reuse existing name" path. Without this, an Exited
+# head container (e.g. after `just spark-vllm-stop` + reboot — `--restart
+# unless-stopped` does not re-launch a manually-stopped container) blocks
+# the next `docker run` below with "name already in use" and the head stays
+# stopped. `docker start` is a no-op when the container is already running.
+- name: Start stopped Ray head container (reuse existing name)
+  ansible.builtin.command:
+    cmd: docker start "{{ vllm_stacked_container_ray_head_name }}"
+  register: vllm_stacked_container_head_docker_start
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - not (vllm_stacked_container_recreate | bool)
+    - vllm_stacked_container_head_running.rc == 0
+    - (vllm_stacked_container_head_running.stdout | default("") | trim) == "false"
+  failed_when: false
+  changed_when: vllm_stacked_container_head_docker_start.rc == 0
 
 - name: Start Ray head container (NGC image, host network)
   ansible.builtin.shell: |
@@ -105,16 +143,23 @@
       {{ ('--device ' + vllm_stacked_container_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_stacked_container_rdma_enabled | bool) else '' }} \
       --env-file "{{ vllm_stacked_container_config_dir }}/head.env" \
       -v "{{ vllm_stacked_container_hf_home }}:/root/.cache/huggingface" \
+      {{ ('-v ' + vllm_stacked_container_config_dir + '/ray_non_carry_over_env_vars.json:/root/.config/vllm/ray_non_carry_over_env_vars.json:ro') if (vllm_stacked_container_ray_nccl_gid_carryover_exclude | bool) else '' }} \
       {{ ('-v ' + vllm_stacked_container_qwen_moe_patches_host_dir + ':' + vllm_stacked_container_qwen_moe_patches_container_dir + ':ro') if (vllm_stacked_container_qwen_moe_patches_enabled | bool) else '' }} \
       "{{ vllm_stacked_container_image }}" \
-      -c 'ray start --block --head --node-ip-address="{{ spark_interconnect_ip }}" --port="{{ vllm_ray_port }}"'
+      -lc 'ray start --block --head --node-ip-address="{{ spark_interconnect_ip }}" --port="{{ vllm_ray_port }}" --dashboard-host="{{ vllm_stacked_container_dashboard_host }}" --dashboard-port="{{ vllm_stacked_container_dashboard_port | int }}"'
   args:
     executable: /bin/bash
   when:
     - inventory_hostname == (groups['sparks'] | sort | first)
     - vllm_stacked_container_recreate | bool
       or vllm_stacked_container_head_running.rc != 0
-      or (vllm_stacked_container_head_running.stdout | default("") | trim) == "false"
+      or (
+        (vllm_stacked_container_head_running.stdout | default("") | trim) == "false"
+        and (
+          vllm_stacked_container_head_docker_start is not defined
+          or vllm_stacked_container_head_docker_start.rc != 0
+        )
+      )
   register: vllm_stacked_container_head_start
 
 - name: Wait for Ray GCS on head node
@@ -134,6 +179,12 @@
     - inventory_hostname != (groups['sparks'] | sort | first)
     - vllm_stacked_container_recreate | bool
 
+- name: Recreate cleanup — host page cache / optional Ray tmp (followers)
+  ansible.builtin.import_tasks: recreate_host_cleanup.yml
+  when:
+    - inventory_hostname != (groups['sparks'] | sort | first)
+    - vllm_stacked_container_recreate | bool
+
 - name: Inspect Ray worker container state
   ansible.builtin.command:
     cmd: docker container inspect -f "{{ '{{' }}json .State.Running{{ '}}' }}" "{{ vllm_stacked_container_ray_worker_name }}"
@@ -141,6 +192,20 @@
   failed_when: false
   changed_when: false
   when: inventory_hostname != (groups['sparks'] | sort | first)
+
+# If a previous power-loss left a *stopped* worker container, `docker run` fails
+# with "name already in use". Prefer `docker start` for that case.
+- name: Start stopped Ray worker container (reuse existing name)
+  ansible.builtin.command:
+    cmd: docker start "{{ vllm_stacked_container_ray_worker_name }}"
+  register: vllm_stacked_container_worker_docker_start
+  when:
+    - inventory_hostname != (groups['sparks'] | sort | first)
+    - not (vllm_stacked_container_recreate | bool)
+    - vllm_stacked_container_worker_running.rc == 0
+    - (vllm_stacked_container_worker_running.stdout | default("") | trim) == "false"
+  failed_when: false
+  changed_when: vllm_stacked_container_worker_docker_start.rc == 0
 
 - name: Start Ray worker container
   ansible.builtin.shell: |
@@ -154,16 +219,23 @@
       {{ ('--device ' + vllm_stacked_container_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_stacked_container_rdma_enabled | bool) else '' }} \
       --env-file "{{ vllm_stacked_container_config_dir }}/worker-{{ inventory_hostname }}.env" \
       -v "{{ vllm_stacked_container_hf_home }}:/root/.cache/huggingface" \
+      {{ ('-v ' + vllm_stacked_container_config_dir + '/ray_non_carry_over_env_vars.json:/root/.config/vllm/ray_non_carry_over_env_vars.json:ro') if (vllm_stacked_container_ray_nccl_gid_carryover_exclude | bool) else '' }} \
       {{ ('-v ' + vllm_stacked_container_qwen_moe_patches_host_dir + ':' + vllm_stacked_container_qwen_moe_patches_container_dir + ':ro') if (vllm_stacked_container_qwen_moe_patches_enabled | bool) else '' }} \
       "{{ vllm_stacked_container_image }}" \
-      -c 'ray start --block --address="{{ spark_ray_head_ip }}:{{ vllm_ray_port }}" --node-ip-address="{{ spark_interconnect_ip }}"'
+      -lc 'ray start --block --address="{{ spark_ray_head_ip }}:{{ vllm_ray_port }}" --node-ip-address="{{ spark_interconnect_ip }}"'
   args:
     executable: /bin/bash
   when:
     - inventory_hostname != (groups['sparks'] | sort | first)
     - vllm_stacked_container_recreate | bool
       or vllm_stacked_container_worker_running.rc != 0
-      or (vllm_stacked_container_worker_running.stdout | default("") | trim) == "false"
+      or (
+        (vllm_stacked_container_worker_running.stdout | default("") | trim) == "false"
+        and (
+          vllm_stacked_container_worker_docker_start is not defined
+          or vllm_stacked_container_worker_docker_start.rc != 0
+        )
+      )
   register: vllm_stacked_container_worker_start
 
 - name: Pause for Ray worker registration before vLLM serve

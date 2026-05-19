@@ -3,8 +3,13 @@ title: nvidia1 (leader Spark)
 kind: entity
 status: active
 tags: [spark, host, leader]
-updated: 2026-04-18
-related: [entities/nvidia2.md, entities/ray-head-service.md, entities/vllm-stacked-service.md]
+updated: 2026-04-27
+related:
+  - entities/nvidia2.md
+  - entities/ngc-vllm-image.md
+  - concepts/ngc-stacked-container-stack.md
+  - concepts/restart-unless-stopped-after-manual-stop.md
+  - runs/2026-04-27-ray-head-exited-postmortem.md
 ---
 
 # nvidia1
@@ -27,33 +32,67 @@ Leader DGX Spark in the stacked pair.
 
 ## Known host-specific quirks
 
-- **LAN IPv6 black hole** — broken IPv6 default on `enP7s7` causes `httpx` to stall
-  during vLLM ASGI init (generation-config fetch). Mitigation:
-  `sysctl net.ipv6.conf.enP7s7.disable_ipv6=1`, persisted via
+- **LAN IPv6 black hole (historical)** — broken IPv6 default on `enP7s7`
+  used to stall `httpx` during vLLM ASGI init. Mitigation persisted via
   `roles/spark_provision/tasks/lan_ipv6_sysctl.yml` and `host_vars/nvidia1.yml`.
-  See [concepts/ipv6-asgi-hang.md](../concepts/ipv6-asgi-hang.md).
-- **Ray head has been up 6+ days** as of 2026-04-18 (PID 2205, session dir
-  `/tmp/ray/session_2026-04-12_00-49-55_016368_2205`). Its GCS is `169.254.102.149:6379`.
+  See [concepts/ipv6-asgi-hang.md](../concepts/ipv6-asgi-hang.md). As of
+  2026-04-27 both `curl -4` and `curl -6` to `huggingface.co` succeed, and
+  `HF_HUB_OFFLINE` is no longer set in `vllm_distributed_extra_env`.
+- **`--restart unless-stopped` + manual `docker stop` = stays Exited**
+  across host reboots. Bit us 2026-04-27. Operator surface and role both
+  hardened — see
+  [concepts/restart-unless-stopped-after-manual-stop.md](../concepts/restart-unless-stopped-after-manual-stop.md)
+  and
+  [runs/2026-04-27-ray-head-exited-postmortem.md](../runs/2026-04-27-ray-head-exited-postmortem.md).
 
 ## Cached images
 
-- `nvcr.io/nvidia/vllm:26.01-py3` (≈14 GB on-disk).
-- `nginx:latest` (leftover / unrelated).
+- `nvcr.io/nvidia/vllm:26.03-py3` (≈14 GB on-disk; current serving image
+  per [entities/ngc-vllm-image.md](./ngc-vllm-image.md)).
+- `nvcr.io/nvidia/vllm:26.02-py3` (kept by `ngc-image-sync.service`,
+  fallback).
 
 ## Cached models (`/home/nvidia/.cache/huggingface/hub`)
 
-- `models--google--gemma-4-31B-it`
-- `models--TinyLlama--TinyLlama-1.1B-Chat-v1.0`
+- `models--Qwen--Qwen3.6-35B-A3B`
+- `models--Qwen--Qwen3.5-35B-A3B-FP8` — current serving target as of
+  2026-04-27 (see
+  [runs/2026-04-19-fp8-stack-cutover.md](../runs/2026-04-19-fp8-stack-cutover.md)).
+- `models--Qwen--Qwen3-Coder-30B-A3B-Instruct`
+- `models--TinyLlama--TinyLlama-1.1B-Chat-v1.0` — smoke model.
+- `models--google--gemma-4-31B-it` — historical, not currently served.
 
-## systemd units
+## Containers (NGC stacked-container stack)
 
-- `ray-head.service` — active (running).
-- `vllm-stacked.service` — **failing** restart loop (see
-  [entities/vllm-stacked-service.md](./vllm-stacked-service.md) and
-  [runs/2026-04-18-state-of-cluster.md](../runs/2026-04-18-state-of-cluster.md)).
+- `vllm-ngc-ray-head` — Ray head + `vllm serve` exec'd in.
+  `--restart unless-stopped`; lifecycle managed via `just spark-vllm-*`
+  recipes. See
+  [concepts/ngc-stacked-container-stack.md](../concepts/ngc-stacked-container-stack.md).
+
+The legacy systemd units (`ray-head.service`, `vllm-stacked.service`,
+`vllm.service`) are stopped + disabled by the role on every run; their
+entity pages are kept as institutional memory only.
+
+## systemd units (host-level, leader-only daemons)
+
+- `hf-prefetch.service` — see
+  [entities/hf-prefetch-service.md](./hf-prefetch-service.md).
+- `ngc-image-sync.service` — see
+  [entities/ngc-image-sync-service.md](./ngc-image-sync-service.md).
+- `vllm-stack-autoupgrade.service` — see
+  [entities/vllm-stack-autoupgrade-service.md](./vllm-stack-autoupgrade-service.md).
 
 ## Endpoints
 
-- `http://nvidia1:8080/v1` — bare-metal vLLM OpenAI API (currently down).
-- `http://nvidia1:8000/v1` — NGC container vLLM (planned; not yet up).
-- Ray dashboard: `127.0.0.1:8265` (local to the host).
+- `http://nvidia1:8000/v1/*` — vLLM OpenAI API (LAN, allow-listed in
+  `firewall_trusted_lan_tcp_ports`). Per the 2026-04-19 throughput run:
+  `--max-model-len 262144 --gpu-memory-utilization 0.80
+  --max-num-batched-tokens 16384 --max-num-seqs 128 --kv-cache-dtype fp8
+  --attention-backend flashinfer --enable-prefix-caching --reasoning-parser
+  qwen3 --tool-call-parser qwen3_coder` (see
+  [runs/2026-04-19-fp8-stack-cutover.md](../runs/2026-04-19-fp8-stack-cutover.md)).
+- `http://192.168.1.104:8265/` — **Ray dashboard, LAN-reachable** as of
+  2026-04-27. Bound on `0.0.0.0:8265` inside the head container, gated to
+  the trusted LAN by ufw. Operator: `just spark-vllm-dashboard`.
+- `vllm/metrics` — Prometheus scrape target on `:8000/metrics`; consumed
+  by `vllm-stack-autoupgrade.service`'s quiet-window gate.

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Emit Prometheus-format RAS counters from rasdaemon into node_exporter's
+# textfile directory. Read by node_exporter's --collector.textfile.
+#
+# Counters covered (from `ras-mc-ctl --summary`):
+#   - Memory CE / UE                   (EDAC channel events)
+#   - PCIe Bus AER errors              (correctable + uncorrectable + fatal)
+#   - MCE records                      (machine check events)
+#   - Extlog records                   (Linux extended log)
+#   - DEVLINK health reports
+#
+# Single sample per pass (gauges over the lifetime since boot — they only
+# go up; restarting rasdaemon resets them). Wrapped in `flock` so a slow
+# pass can't overlap with the next timer fire.
+
+set -euo pipefail
+
+OUT="{{ spark_observability_textfile_dir }}/rasdaemon.prom"
+TMP="$(mktemp --tmpdir="{{ spark_observability_textfile_dir }}" rasdaemon-XXXXXX.prom.tmp)"
+LOCK="/run/rasdaemon-textfile.lock"
+
+trap 'rm -f "$TMP"' EXIT
+
+exec 9>"$LOCK"
+flock -n 9 || { echo "previous run still holding lock; skipping" >&2; exit 0; }
+
+# Defaults to 0 if rasdaemon hasn't been run yet (clean install).
+declare -A counts=(
+  [memory_ce]=0
+  [memory_ue]=0
+  [pcie_aer_correctable]=0
+  [pcie_aer_uncorrectable]=0
+  [pcie_aer_fatal]=0
+  [mce_records]=0
+  [extlog_records]=0
+  [devlink_records]=0
+)
+
+if command -v ras-mc-ctl >/dev/null 2>&1; then
+  # `ras-mc-ctl --summary` output is loosely structured; parse the obvious lines.
+  summary="$(ras-mc-ctl --summary 2>/dev/null || true)"
+
+  counts[memory_ce]=$(echo "$summary" | awk '/Memory[[:space:]]+CE/  {gsub(/[^0-9]/,"",$NF); print $NF; exit}' | grep -E '^[0-9]+$' || echo 0)
+  counts[memory_ue]=$(echo "$summary" | awk '/Memory[[:space:]]+UE/  {gsub(/[^0-9]/,"",$NF); print $NF; exit}' | grep -E '^[0-9]+$' || echo 0)
+  counts[pcie_aer_correctable]=$(echo "$summary" | awk '/PCIe[[:space:]]+AER[[:space:]]+events:[[:space:]]+Corrected/ {gsub(/[^0-9]/,"",$NF); print $NF; exit}' | grep -E '^[0-9]+$' || echo 0)
+  counts[pcie_aer_uncorrectable]=$(echo "$summary" | awk '/PCIe[[:space:]]+AER[[:space:]]+events:[[:space:]]+Uncorrected/ {gsub(/[^0-9]/,"",$NF); print $NF; exit}' | grep -E '^[0-9]+$' || echo 0)
+  counts[pcie_aer_fatal]=$(echo "$summary" | awk '/PCIe[[:space:]]+AER[[:space:]]+events:[[:space:]]+Fatal/ {gsub(/[^0-9]/,"",$NF); print $NF; exit}' | grep -E '^[0-9]+$' || echo 0)
+  counts[mce_records]=$(echo "$summary" | awk '/^[[:space:]]*MCE[[:space:]]+records:/ {gsub(/[^0-9]/,"",$NF); print $NF; exit}' | grep -E '^[0-9]+$' || echo 0)
+  counts[extlog_records]=$(echo "$summary" | awk '/Extlog[[:space:]]+records:/ {gsub(/[^0-9]/,"",$NF); print $NF; exit}' | grep -E '^[0-9]+$' || echo 0)
+  counts[devlink_records]=$(echo "$summary" | awk '/Devlink[[:space:]]+records:/ {gsub(/[^0-9]/,"",$NF); print $NF; exit}' | grep -E '^[0-9]+$' || echo 0)
+fi
+
+{
+  echo "# HELP rasdaemon_events_total RAS event counts since rasdaemon started, by category."
+  echo "# TYPE rasdaemon_events_total counter"
+  for key in "${!counts[@]}"; do
+    val="${counts[$key]:-0}"
+    [[ "$val" =~ ^[0-9]+$ ]] || val=0
+    printf 'rasdaemon_events_total{category="%s"} %s\n' "$key" "$val"
+  done
+} > "$TMP"
+
+# Atomic install — node_exporter never sees a half-written file.
+mv -f "$TMP" "$OUT"
+chmod 0644 "$OUT"

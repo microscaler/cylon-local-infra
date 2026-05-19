@@ -1,0 +1,37 @@
+---
+# dcgm-exporter — NVIDIA's official DCGM-based Prometheus exporter.
+# Runs as a Docker container, host network, bound to 127.0.0.1:9400. Provides
+# GPU power, temperature, utilization, memory, NVLink, throttle reasons, ECC
+# error counts. Single most important metrics source for the GX10
+# abrupt-power-off correlation work.
+#
+# Container is the supported aarch64 distribution path; building from
+# source is the alternative if you need a binary install (not recommended).
+
+- name: dcgm-exporter — pull NVIDIA NGC image
+  community.docker.docker_image:
+    name: "{{ spark_observability_dcgm_exporter_image }}"
+    source: pull
+  register: spark_obs_dcgm_pull
+  retries: 2
+  delay: 5
+  failed_when:
+    - spark_obs_dcgm_pull is failed
+    - "'Error response from daemon' in (spark_obs_dcgm_pull.msg | default(''))"
+
+- name: dcgm-exporter — systemd unit (manages the docker container)
+  ansible.builtin.template:
+    src: dcgm-exporter.service.j2
+    dest: /etc/systemd/system/dcgm-exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart dcgm-exporter
+
+- name: dcgm-exporter — enable + start
+  ansible.builtin.systemd:
+    name: dcgm-exporter.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode

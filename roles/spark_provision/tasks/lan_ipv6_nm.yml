@@ -1,0 +1,74 @@
+---
+# Persist IPv6-off on the LAN/Uplink NIC via NetworkManager.
+#
+# Sysctl-only disable is insufficient on Ubuntu Desktop stacks: dhcpcd/NM reapplies
+# IPv6 after lease renewals and resets net.ipv6.conf.<iface>.disable_ipv6 to 0 even
+# when /etc/sysctl.d still says 1 — pair this task file with lan_ipv6_sysctl.yml.
+#
+# Requires `spark_lan_disable_ipv6_on_interface` set (inventory/group_vars/sparks.yml).
+
+- name: Resolve NetworkManager profile bound to LAN IPv6-off interface
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - GENERAL.CONNECTION
+      - device
+      - show
+      - "{{ spark_lan_disable_ipv6_on_interface }}"
+  register: spark_lan_nm_conn_raw
+  changed_when: false
+  failed_when: false
+  when: spark_lan_disable_ipv6_on_interface | default('') | length > 0
+
+- name: LAN IPv6-off — skip NM layer (interface unmanaged / no NM profile)
+  ansible.builtin.debug:
+    msg: >-
+      Could not resolve NetworkManager GENERAL.CONNECTION for
+      {{ spark_lan_disable_ipv6_on_interface }}
+      (rc={{ spark_lan_nm_conn_raw.rc | default('n/a') }},
+      stdout={{ spark_lan_nm_conn_raw.stdout | default('') | trim | repr }}).
+      Sysctl-only IPv6-off remains best-effort.
+  when:
+    - spark_lan_disable_ipv6_on_interface | default('') | length > 0
+    - spark_lan_nm_conn_raw.rc != 0 or spark_lan_nm_conn_raw.stdout | default('') | trim in ['', '--']
+
+- name: Read current NM ipv6.method on LAN profile
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -g
+      - ipv6.method
+      - connection
+      - show
+      - "{{ spark_lan_nm_conn_raw.stdout | trim }}"
+  register: spark_lan_nm_ipv6_method
+  changed_when: false
+  when:
+    - spark_lan_disable_ipv6_on_interface | default('') | length > 0
+    - spark_lan_nm_conn_raw.rc == 0
+    - spark_lan_nm_conn_raw.stdout | default('') | trim | length > 0
+    - spark_lan_nm_conn_raw.stdout | trim != '--'
+
+- name: Disable IPv6 on LAN NetworkManager connection (persistent)
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ spark_lan_nm_conn_raw.stdout | trim }}"
+      - ipv6.method
+      - disabled
+  register: spark_lan_nm_ipv6_modify
+  when:
+    - spark_lan_nm_ipv6_method is defined
+    - spark_lan_nm_ipv6_method.stdout | default('') | trim != 'disabled'
+
+- name: Re-activate LAN connection so NM IPv6-off applies immediately
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - up
+      - "{{ spark_lan_nm_conn_raw.stdout | trim }}"
+  when: spark_lan_nm_ipv6_modify is defined and spark_lan_nm_ipv6_modify is changed

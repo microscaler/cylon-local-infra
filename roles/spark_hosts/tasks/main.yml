@@ -1,0 +1,30 @@
+---
+- name: Validate Spark /etc/hosts variables when management is enabled
+  ansible.builtin.assert:
+    that:
+      - spark_hosts_local_ip is defined
+      - spark_hosts_local_ip | length > 0
+      - spark_hosts_peer_ip is defined
+      - spark_hosts_peer_ip | length > 0
+      - spark_hosts_local_aliases is defined
+      - spark_hosts_local_aliases | length > 0
+      - spark_hosts_peer_aliases is defined
+      - spark_hosts_peer_aliases | length > 0
+    fail_msg: >-
+      spark_hosts role: set spark_hosts_local_ip, spark_hosts_peer_ip,
+      spark_hosts_local_aliases, spark_hosts_peer_aliases in
+      inventory/host_vars/{{ inventory_hostname }}.yml (see roles/spark_hosts/defaults/main.yml).
+    quiet: true
+  when: spark_hosts_manage | default(true) | bool
+
+- name: Ensure Spark interconnect aliases in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED — cylon-local-infra spark interconnect"
+    block: |
+      127.0.0.1 {{ spark_hosts_local_ip }} {{ spark_hosts_local_aliases | join(' ') }}
+      {{ spark_hosts_peer_ip }} {{ spark_hosts_peer_aliases | join(' ') }}
+    owner: root
+    group: root
+    mode: "0644"
+  when: spark_hosts_manage | default(true) | bool

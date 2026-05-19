@@ -18,14 +18,14 @@ docker_daemon_config: {}
 # Firewall (ufw):
 #   - Inbound from anywhere: SSH + HTTPs + a handful of long-standing dev ports.
 #     Tilt's UI (port 10348) is left OFF the any-source list on purpose — use LAN.
-#   - Inbound from local LAN only: big microservices range 8000-11000 (covers
-#     Tilt 10348, PW API :8000, BRRTRouter :8080, MinIO :9000/9001, Prom
-#     :9090/9091, etc.) + SSH. ufw accepts the `8000:11000` range verbatim.
+#   - Inbound from local LAN only: dev stack range 7000-12000 (covers Tilt
+#     10348, Hermes 9119, Wrangler 8787, PW API :8000, nodeports, observability,
+#     etc.) + SSH. ufw accepts the `7000:12000` range verbatim.
 firewall_allow_tcp_ports: [22, 80, 5000, 5001, 10350]
 firewall_trusted_lan_cidr: "192.168.1.0/24"
 firewall_trusted_lan_tcp_ports:
   - 22
-  - "8000:11000"
+  - "7000:12000"
 
 # Kind: binary, node image (Kubernetes 1.34.3), and create cluster on playbook run
 kind_version: "v0.31.0"
@@ -65,3 +65,14 @@ cursor_agent_worker_service_enabled: true
 # Default working dir the worker hands to Cloud Agents when they don't
 # specify one. Agent-driven `git clone` lands here as siblings.
 cursor_agent_worker_dir: "/home/casibbald/Workspace/microscaler"
+
+# --- Hermes agent (ms02) — OpenAI-compat client defaults for playbooks/sync_hermes_ms02.yml
+# Keep `hermes_agent_openai_model_id` aligned with a primary `--served-model-name` in
+# inventory/group_vars/sparks.yml (`vllm_api_server_extra_args`) so Hermes requests
+# resolve to the same advertised id as Cursor / other clients.
+hermes_agent_openai_base_url: "http://nvidia1:8000/v1"
+hermes_agent_openai_model_id: "gpt-4o-mini"
+
+# roles/firewall: stop/disable firewalld when both are installed (UFW + firewalld
+# causes confusing drops). Default true in role defaults; set
+# firewall_disable_firewalld: false only if you intentionally run firewalld.

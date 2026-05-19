@@ -405,3 +405,653 @@ max), second-ASIC QSFP bond (roceP2p1s0f0 is ACTIVE but uncabled),
 re-qualify external OFI plugin on 26.03-py3, fix include_role tag
 propagation in `spark_provision`. Writeup:
 [runs/2026-04-19-roce-cutover.md](./runs/2026-04-19-roce-cutover.md).
+
+## [2026-04-21] config | hf-prefetch | Qwen3.6 FP8 queued
+Added `Qwen/Qwen3.6-35B-A3B-FP8` to `inventory/group_vars/sparks.yml`
+`hf_prefetch_models` (after TinyLlama, before 3.5 FP8). Fixed `include_role
+hf_prefetch_service` to use `apply.tags` so `--tags hf_prefetch` runs the
+full role. Ran `ansible-playbook playbooks/provision_sparks.yml -l sparks
+--tags hf_prefetch` to render `/etc/hf-prefetch/config.yaml` on the leader;
+daemon picks up on next poll. Serving default remains 3.5 FP8 until cutover.
+
+## [2026-05-01] run | nvidia2-abrupt-power-off-vllm-long-context | shipped
+Second nvidia2 abrupt-power-off in 4 days — this one a **double-crash**:
+host crashed at end of 34 h uptime (`00:13:45 EEST`), auto-recovered,
+then **crashed again 3 minutes into the next boot** (`00:22:03`), then
+recovered for a third time (`~00:34`). Same kernel-undetectable signature
+(rasdaemon clean across MCE/AER/memory; two journal files moved to
+`.journal~` recovery state; one boot has no journal at all). Cross-
+referenced against [NVIDIA Developer Forums thread
+#359785](https://forums.developer.nvidia.com/t/title-asus-ascent-gx10-gb10-hard-power-off-unclean-reboot-under-vllm-gpt-oss-120b-long-context/359785)
+("ASUS Ascent GX10 GB10 hard power-off / unclean reboot under vLLM
+gpt-oss-120b long context", opened 2026-02-05, 31 posts) — **confirmed
+known platform issue affecting many GX10 owners across multiple FW
+revisions**, not unique to our cluster. **Three hypotheses probed**:
+(1) **PCIe downgrade to 2.5 GT/s** (forum post #5) — RULED OUT,
+`lspci -vv` shows `Speed 32GT/s, Width x4` on GPU + all 4 ConnectX-7
+NICs on both Sparks. (2) **Recent firmware update introduced the crash**
+(operator instinct) — RULED OUT, we crashed on FW `.0100` AND `.0103`
+with the same signature; the FW update is not the cause but also not the
+fix. (3) **Long context triggers it** (forum post #2 — degradation past
+30k tokens; we run `--max-model-len 262144` = 262k) — STRONGLY
+CORRELATED, only operationally-testable lever. Cluster recovery: Ray
+auto-restarted via `--restart unless-stopped`; `vllm serve` died with
+the head container (it's a `docker exec -d` payload, same downstream
+as 2026-04-29 11:17); `just spark-vllm-api-restart` brings the API
+back. **Did not change inventory or firmware** — preserved today's
+stable config (`262144` + `0.80` + `26.03-py3` pin) so the production
+reference is unchanged. Open follow-ups: decide whether to lower
+`--max-model-len` to `65536` or `32768` as a deliberate config change in
+a maintenance window (not a panic edit at 00:45 EEST); track forum
+thread for new NVIDIA-side updates past post #5; consider posting our
+own observations to the thread (clean rasdaemon, two-crash sequence,
+FW-revision invariance, ruled-out PCIe downgrade) for community
+visibility. Doesn't change the [8-spark-fabric concept page](./concepts/8-spark-fabric-and-orchestrator.md)
+status (still pinned on hardware) — confirms the platform fragility
+that already motivates several of its design choices. Full timeline +
+hypothesis table + recovery sequence:
+[runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md](./runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md).
+
+## [2026-05-02] run | nvidia1-abrupt-power-off-on-pinned-1008-kernel | shipped (kernel hypothesis FALSIFIED)
+**12 minutes after locking the kernel pin** at 09:39 EEST, `nvidia1`
+had an abrupt power-off at 09:51:05 EEST — ~22h 15min after boot, on
+the **pinned `6.17.0-1008-nvidia` kernel**. The forensic record from
+the GX10-hunt dashboard is decisive: the host crashed **at idle**.
+**At-crash metrics** (30 min window preceding 09:51:05 EEST,
+captured by spark_observability):
+- `up{host="nvidia1"}` = 1 for all 125 samples (15 s × 31 m); cluster
+  healthy until the moment of the cut
+- GPU power: peak **66.95 W** (~28% of GB10's ~240 W TGP — idle)
+- GPU temp: peak **78°C** (below 85°C concern threshold)
+- `vllm_num_requests_running` peak = **1**, waiting = 0, KV cache
+  = **0.87 %**
+- `rasdaemon_events_total` ALL zero across 8 categories (memory CE/UE,
+  PCIe AER correctable/uncorrectable/fatal, MCE, extlog, devlink)
+- Loki grep `(?i)(mlx5|MCE|panic|aer|oom|hardlockup|softlockup|nvidia.*xid|vbios|gpu fallen|uncorrected|reset)` over the entire 22h boot: **zero matches**
+- Last journal entry: dcgm-exporter container restart at 09:51:05
+  (small unit-script race on port 9400, **not causal**); journal
+  cuts mid-line on the next dockerd shim cleanup message; no
+  shutdown sequence
+
+**Kernel jump `1008 → 1014` as sole cause is FALSIFIED**. The crash
+reproduced on the older HWE kernel that was supposed to be the
+safer one. The signature exactly matches NVIDIA forum thread #359785
+(spontaneous GB10 SoC abrupt power-off with no software-visible
+precursor). **GX10 platform-level hardware bug is now the leading
+hypothesis** — primary remediation path is **vendor-side**, not in
+our stack. nvidia2 did NOT crash (uptime 22h 31min and still up on
+the same pinned kernel) — same MTBF improvement signal, but with
+N=2 cluster and small sample, NOT statistically significant.
+
+**Did the pin help?** Maybe marginally. Pre-pin: ~5 boots in 1h 50min
++ ~10h between crash chains. Post-pin: 22h 15min before crash on
+nvidia1, nvidia2 still up. ~22× MTBF improvement, but could be (1)
+real effect, (2) coincidence with end of 2026-05-01 firmware-update
+turbulence, or (3) small-sample variance. Honest position: **keep
+the pin (no downside, marginal upside) but stop treating "no
+crashes" as evidence the issue is fixed**.
+
+**Operator's `dpkg -l 'linux-image-*' | grep '^ii'` confusion**:
+`apt-mark hold` doesn't change the "installed" actual state, it
+changes the "desired" state from `install` to `hold`. So held
+packages show as `hi` (hold/installed) not `ii` (install/installed).
+The operator's `^ii` filter hid the held `linux-image-6.17.0-1008-nvidia`
+package, making it look like the pin had been undone. Documented
+as a "reasoning trace" section in the run page so this cognitive
+trap doesn't recur.
+
+**Next-step changes**:
+- ~~3-day / 7-day / 14-day "kernel-fix-confirmed" check-ins~~ —
+  CANCELLED. We won't get there because the hypothesis is
+  falsified.
+- ARM kdump on both Sparks (long overdue; even a half-useful kernel
+  dump on the next crash would be more than we have).
+- File a NVIDIA Developer Forum reply on thread #359785 with the
+  forensic record (GPU 67 W, 78°C, vLLM idle, all RAS clean,
+  reproduces across kernel revisions and ASUS BIOS revisions).
+  This is unique, valuable evidence the community doesn't have.
+- Don't unpin the kernel (no benefit, harmless to keep).
+- Don't lower `--max-model-len` or `gpu_memory_utilization` yet —
+  this crash had nothing to do with workload. Keep these in reserve
+  for IF we see a future crash that DOES correlate with load (the
+  "vLLM concurrent in-flight" panel preceding the crash would
+  show it).
+- Bring nvidia1's vLLM API back online via `just spark-vllm-api-restart`.
+
+**The dashboard validated itself**: the absence of any signal in
+the GPU/SoC/RAS/vLLM panels IS the critical signal — confirms the
+crash is platform-level and the OS is blind to it. This is the
+forensic capability we built spark_observability for.
+
+**Two recovery surprises** (both fixed, both unrelated to the crash
+itself but would have bitten any future Spark recovery):
+1. **dockerd refused to start**: `live-restore: true` (added 2026-05-01
+   for nvidia runtime + journald work) is incompatible with active
+   Docker Swarm mode. Both Sparks had **stale swarm state from
+   2026-02-21** (node_id `ud52cjv9wztc3ih0ojunhh0cp`, manager
+   `192.168.1.104:2377`) — leftover from earlier provisioning, never
+   used by us (kind on ms02 = k8s; Sparks = plain Docker via NGC
+   containers). nvidia2's running dockerd had picked up `live-restore`
+   via SIGHUP without conflict; **next clean restart would have
+   failed too**. Fix: `docker swarm leave --force` on nvidia2 (clean,
+   no container disruption); `mv /var/lib/docker/swarm{,.preswarm-leave-2026-05-02}`
+   on nvidia1 (preserves state for forensics, removes from dockerd
+   path), then `systemctl reset-failed docker && systemctl start
+   docker`. Both Sparks now have NO swarm state; `live-restore` works.
+   Open follow-up: pre-flight check in `roles/docker` that fails-loud
+   if swarm state present + `live-restore: true` requested.
+2. **`roles/spark_kernel` discovery awk had the same `install ok
+   installed` filter bug** that bit `just spark-kernel-status` earlier
+   today. After `apt-mark hold` had moved 1008 to dpkg state `hi`,
+   the role's discovery couldn't see it as "installed" and the
+   assertion `spark_kernel_pin in spark_kernel_installed.stdout_lines`
+   failed: "spark_kernel_pin='6.17.0-1008-nvidia' is NOT an installed
+   kernel". Fix: changed awk pattern from `$1=="install ok installed"`
+   to `$1 ~ /ok installed$/` so both `install ok installed` (ii) AND
+   `hold ok installed` (hi) match. After the fix, `just
+   spark-kernel-check` returns `ok=18, changed=0` on both Sparks —
+   confirming the pin is fully idempotent and the role can no longer
+   be tricked by its own hold.
+
+**Recovery sequence** documented end-to-end in the run page (one-time
+swarm cleanup + standard dockerd-recover dance + `spark-vllm-api-restart`
++ probes). ~3 minutes from "host just came back" to "cluster fully
+serving" on the next recovery, because future recoveries skip the
+swarm step.
+
+Full timeline + at-crash data + hypothesis status + revised next-steps + recovery surprises:
+[runs/2026-05-02-nvidia1-abrupt-power-off-on-pinned-1008-kernel.md](./runs/2026-05-02-nvidia1-abrupt-power-off-on-pinned-1008-kernel.md).
+The earlier same-day [bisection-evidence run page](./runs/2026-05-02-kernel-pin-locked-bisection-evidence.md)
+is now superseded (front matter updated with a clear callout).
+
+## [2026-05-02] run | kernel-pin-locked-bisection-evidence | shipped (22h uptime, pin durably applied)
+After **22h 4min continuous uptime on both Sparks** with **zero abrupt
+power-offs** under operator's normal Hermes workload (vs. multiple
+crashes/day on `6.17.0-1014-nvidia`), operator declared the bisection
+signal strong enough to lock the pin. Important context: the 22h
+stability was **coincidental** — `inventory/group_vars/sparks.yml`
+had the pin set since 2026-05-01 but `just spark-kernel-apply` was
+never actually run (we got distracted by the observability rollout).
+`just spark-kernel-status` showed both hosts running 1008 (lucky:
+they'd been manually `grub-reboot`-ed during the 2026-05-01
+recovery), but `GRUB_DEFAULT=0`, no apt holds, OTA service
+unmasked. Any of: a routine `apt upgrade`, a NVIDIA dpkg trigger
+re-arming `nvidia-spark-run-apt-upgrade-once.service`, or the next
+unscheduled reboot, would have rolled the cluster forward to 1014
+again and undone the bisection sample.
+
+**Locked down 2026-05-02 09:39 EEST**: ran `just spark-kernel-apply`
+end-to-end; per-host PLAY RECAP `ok=20 changed=4` (GRUB_DEFAULT
+lineinfile + apt-mark hold + OTA mask + update-grub handler).
+**Verified state on both Sparks**:
+- `GRUB_DEFAULT="gnulinux-advanced-<UUID>>gnulinux-6.17.0-1008-nvidia-advanced-<UUID>"`
+- 9 packages held cluster-wide (kernel + HWE meta + nvidia-580-open + nvidia-fs)
+- `nvidia-spark-run-apt-upgrade-once.service` `enabled=masked, active=inactive`
+
+Hypothesis status updated: **HWE kernel jump `1008 → 1014` is now the
+leading suspect** for the GX10 abrupt-power-off pattern (strongly
+correlated, not yet confirmed). Honest about alternative explanations
+in the new run page (workload may have been lighter; platform
+"warm-up"; apt upgrades silently fixing something) — these are
+checkable against the 22h dashboard timeseries we now have.
+
+**Monitoring criteria** filed in the run page: 3-day check-in (moderate
+confidence), 7-day (strong, update postmortem hypotheses table),
+14-day (high — promote pin from "diagnostic" to "production stable",
+consider posting bisection evidence to NVIDIA forum #359785).
+**Falsification criterion**: if a crash returns on 1008, kernel was not
+the only cause and we move to load-axis bisection (lower
+`--max-model-len`, lower `gpu_memory_utilization`, Hermes config
+tightening, auxiliary-model-isolation). **No other variables changed**
+during the monitoring window — kernel, `--max-model-len 262144`,
+`gpu_memory_utilization 0.80`, firmware, ASUS BIOS, NCCL/RoCE config,
+Hermes settings all held constant. Only thing varying day-to-day is
+workload intensity.
+
+**Small bug fix in `just spark-kernel-status`**: the awk filter
+`/install ok installed/` only matched packages in the `install`
+desired-state, hiding held packages (which dpkg shows as `hold ok
+installed`). Changed to `/ok installed/` so held kernels stay visible
+in the "installed:" section. The pin lockdown made the earlier symptom
+(running kernel `6.17.0-1008-nvidia` not appearing in the installed
+list) immediately visible.
+
+Full evidence + monitoring plan + open follow-ups:
+[runs/2026-05-02-kernel-pin-locked-bisection-evidence.md](./runs/2026-05-02-kernel-pin-locked-bisection-evidence.md).
+
+## [2026-05-01] cleanup | resolve two operator gotchas (nvidia runtime + NodePort gap)
+Promoted both 2026-05-01 gotchas from "documented learnings" to "fixed
+in code so they can't happen again".
+
+**Gotcha 1 — `--runtime nvidia` doesn't exist on DGX OS** (RESOLVED).
+Was a workaround in the dcgm-exporter unit (`--gpus all` alone, no
+`--runtime nvidia`). Now registered `/usr/bin/nvidia-container-runtime`
+as a Docker runtime via `inventory/group_vars/sparks.yml`
+`docker_daemon_config.runtimes.nvidia.path`. Applied with
+`systemctl reload docker` (SIGHUP, no container disruption — vllm-ngc-ray-*
+containers stayed Up across the change). `docker info` on both Sparks
+now shows `Runtimes: io.containerd.runc.v2 nvidia runc`. Default
+runtime stays `runc`; `nvidia` is registered as an option. Bumped
+`roles/spark_observability/templates/dcgm-exporter.service.j2` to use the
+canonical `--runtime nvidia --gpus all` pattern matching NVIDIA's
+official NGC documentation; re-applied via `--tags spark_obs`,
+verified `127.0.0.1:9400/metrics` HTTP 200 on both Sparks after
+restart.
+
+**Gotcha 2 — kind extraPortMappings → non-existent NodePorts** (RESOLVED
++ AUTOMATED). Was: `grafana`, `loki`, `otel-collector`, `prometheus`,
+`jaeger` were all `type: ClusterIP`. Result: `ms02:<port>` from the LAN
+got `connection refused` (docker-proxy → kind:NodePort → kube-proxy
+refused). Tilt's `port_forward` aliases were 127.0.0.1-only and were
+silently working "from inside Tilt" — invisible to the LAN. Today, all
+five Services have `type: NodePort` + explicit `nodePort:` matching
+the kind portmap (last gap closed by adding NodePort 31166 to
+`shared-kind-cluster/k8s/observability/jaeger.yaml`); LAN-side
+`ms02:16686` Jaeger UI is now HTTP 200. **Systematic detection** added
+as `just ms02-cluster-portmap-check` — pulls kind-config.yaml +
+`kubectl get svc -A -o json` from ms02, diffs locally, prints a table
+showing which extraPortMappings have backing NodePorts and which
+don't. Catches this regression class before it bites. All 6
+observability portmaps green; followed up by **fixing 3 deployed
+data-namespace services** that were ClusterIP despite being listed in
+the kind extraPortMappings: `data/postgres` got `nodePort: 30432`
+(host:5433), `data/redis` got `nodePort: 30379` (host:6379),
+`data/pact-broker` got `nodePort: 30929` (host:9292), in
+`shared-kind-cluster/k8s/platform-data/data/{postgres/postgres-primary-service,
+cache/redis-service,postgres/pact-broker}.yaml`. Final probe state:
+**11 OK, 8 MISSING**, where the 8 split cleanly between (a) **5
+app-team-reserved ports** for services not yet deployed in the cluster
+(PriceWhisperer API:8000, BRRTRouter:8080, Pyroscope:4040,
+PriceWhisperer mocks:7497/9999) — MISSING is the correct signal until
+those teams deploy, and (b) **3 alt-port duplicates**
+(`3002`/`9091`/`8889` second mappings for grafana / prometheus /
+otel-collector exposition) which would need a `kind delete && create`
+to remove from `kind-config.yaml` — too disruptive for now since they
+cause no harm. Categorised in the
+[concept page](./concepts/sparks-observability-pipeline.md#critical-service-type-gotcha-resolved-automated-detection).
+
+Wiki cross-refs: both gotchas now appear as "RESOLVED" sections in
+[`concepts/sparks-observability-pipeline.md`](./concepts/sparks-observability-pipeline.md)
+with the reproducible fix steps.
+
+## [2026-05-01] dashboards | sparks-cluster + vllm-performance + gx10-power-off-hunt | shipped
+Three Grafana dashboards live in `shared-kind-cluster/k8s/observability/embedded/`,
+mounted into Grafana's `Sparks` folder via three new ConfigMap/volumeMount/
+provider entries (Tilt `local_resource` + `apply-sparks-dashboards` follows
+the same `kubectl create configmap --from-file` pattern as
+`apply-postgres-dashboards` to avoid kustomize re-render loops on JSON
+edits). All filter on `cluster="cylon-sparks"` and provide a `host`
+template variable.
+
+**Dashboards**:
+1. **DGX Spark Cluster — Overview** (`uid: spark-cluster-overview`) —
+   fleet status, GPU power/temp/util/clock, host CPU+UMA mem (Grace
+   shared with GPU)+load+hwmon, network+filesystem, tracked-systemd-units
+   status table.
+2. **vLLM — Performance** (`uid: vllm-performance`) — concurrency
+   (running, waiting, KV occupancy, success rate), token throughput
+   (prompt + generation tok/s), TTFT/ITL/e2e p50/p95/p99 from histograms,
+   queue + prefill p95, prefix cache hit rate, preemptions/sec.
+3. **DGX Spark — GX10 abrupt-power-off hunt** (`uid: gx10-power-off-hunt`) —
+   the **forensic** dashboard. Status row (up, uptime, kernel, RAS
+   counters, XID errors, PCIe replay) → GPU power with 150/200/240W
+   thresholds (forum #359785's "sustained high power" trigger window) +
+   temps → rasdaemon stacked counters → vLLM concurrent in-flight (the
+   multi-Hermes-session amplifier) + KV cache → **two Loki log panels**
+   (kernel/dockerd events matching `(?i)(mlx5|MCE|panic|aer|oom|hardlockup|
+   softlockup|nvidia.*xid|vbios|gpu fallen|uncorrected|hard.*power.*off|
+   abrupt|reset)`, plus all `vllm-ngc-ray-*` container logs) → NVLink +
+   QSFP/RoCE throughput. Default 3h lookback. Page links to the
+   2026-05-01 postmortem and NVIDIA forum #359785.
+
+**Two cluster-side gotchas fixed at apply time** (both documented in
+[`concepts/sparks-observability-pipeline.md`](./concepts/sparks-observability-pipeline.md)):
+
+1. **OTel resource attributes weren't reaching metric labels.** The
+   central otel-collector's `prometheus` exporter, by default, drops
+   OTLP resource attributes (`cluster`, `host`, `os_kernel`,
+   `os_distribution` set by Spark otel-agents) into a separate
+   `target_info` series. Result: any `host=~"$host"` panel filter
+   returned zero series. **Fixed** by adding
+   `resource_to_telemetry_conversion: enabled: true` to
+   `embedded/otel-collector-config.yml` `prometheus` exporter; restart
+   makes every metric carry the resource labels directly.
+2. **Service `type: ClusterIP` made the cluster invisible to the LAN.**
+   The kind extraPortMappings (`containerPort: 31300/31310/31417/31418/
+   31090 → hostPort: 3000/3100/4317/4318/9090`) forwarded to NodePorts
+   that didn't exist — `grafana`, `loki`, `otel-collector`, `prometheus`
+   were all ClusterIP. Result: `ms02:<port>` from any LAN client got
+   `connection refused` (docker-proxy → kind:NodePort → kube-proxy
+   refused). **Fixed** by adding `type: NodePort` + explicit `nodePort:`
+   matching the kind portmap to all four Services. Tilt's existing
+   `port_forward` aliases (`9230:3000`, `4319:4317`, etc.) bind to
+   127.0.0.1 only and were the only LAN access path before this — they
+   were silently working "from inside Tilt" and invisible to anything
+   outside (including the Sparks).
+
+**Verified end-to-end** 2026-05-01: all three dashboards visible at
+`http://192.168.1.189:3000/dashboards/f/Sparks` (NodePort, admin/admin
+or anonymous Viewer). Sample queries from the Mac:
+`DCGM_FI_DEV_POWER_USAGE{cluster="cylon-sparks"}` → 2 series,
+`vllm_num_requests_running` → 1 series (only nvidia1 head),
+`rasdaemon_events_total` → 16 series (8 categories × 2 hosts),
+`node_cpu_seconds_total{mode="idle"}` → 40 series (20 cores × 2 hosts),
+Loki's crash-signature query processed 86,595 lines in 1h with 2
+matching entries. **The forensic capability promised in the
+[2026-05-01 postmortem follow-up](./runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md#open-follow-ups)
+is now live**: next abrupt power-off leaves a complete record across
+GPU/SoC/RAS/vLLM/journald axes on a single time scale.
+
+## [2026-05-01] role | spark_observability | shipped (push-based metrics + logs to ms02)
+Sparks → ms02 observability pipeline live and verified end-to-end. New
+[`roles/spark_observability/`](../roles/spark_observability/) installs
+five components per Spark (all scoped to localhost / outbound-only):
+**`node_exporter` 1.8.2** (host metrics + systemd unit collector +
+hwmon/thermal/textfile), **`dcgm-exporter` 3.3.5-3.4.1** (NVIDIA NGC
+container, host-network, `--gpus all` — `--runtime nvidia` is NOT
+registered on DGX OS, gotcha), **`otel-collector-contrib` 0.96.0 in agent
+mode** (scrapes node_exporter + dcgm + vLLM `/metrics` every 15s, attaches
+`cluster=cylon-sparks` + `host` + `os_kernel` resource attributes, OTLP
+gRPC pushes to ms02:4317), **`promtail` 2.9.4** (journald → Loki push to
+ms02:3100), and a **`rasdaemon-textfile.timer`** (60s, parses
+`ras-mc-ctl --summary` into Prometheus counters via node_exporter textfile
+collector — gives us live `rasdaemon_events_total{category=memory_ce,
+memory_ue, pcie_aer_*, mce_records, ...}` for the GX10 crash investigation).
+
+Single log path: `group_vars/sparks.yml` `docker_daemon_config` switches
+`dockerd` to `--log-driver=journald` + `tag: "{{.Name}}"`, so kernel +
+systemd + dockerd + every container's stdout/stderr flow through one
+Promtail scrape; `CONTAINER_NAME` becomes a Loki label.
+
+**ms02 changes** (gap discovered at apply time): the kind extraPortMappings
+in `kind-config.yaml` (`containerPort: 31310/31417/31418/31090 → hostPort:
+3100/4317/4318/9090`) were forwarding to NodePorts that didn't exist —
+the cluster's `loki`, `otel-collector`, `prometheus` Services were
+`type: ClusterIP`. Result: `ms02:4317` reached docker-proxy → kind:31417
+→ kube-proxy refused → `connection refused`. **Fixed** by adding
+`type: NodePort` + explicit `nodePort:` to those Services in
+`shared-kind-cluster/k8s/observability/{loki,otel-collector,prometheus}.yaml`.
+Tilt picked up + applied automatically. Also extended
+`inventory/host_vars/ms02.yml` `firewall_trusted_lan_tcp_ports` with
+`3100`, `4317`, `4318` (the existing `7000-12000` range didn't cover them);
+applied via `ansible-playbook playbooks/dev_hosts.yml --tags firewall -l ms02`.
+
+**Wired**: new `kernel`-style phase in `roles/spark_provision/tasks/main.yml`
+(toggle `spark_provision_observability: true`). Deployed on both `nvidia1`
+and `nvidia2`. **Verified** end-to-end — `count by (host)({cluster="cylon-sparks"})`
+in Prometheus returns rows for both Sparks; `streams=1` in Loki for
+`{cluster="cylon-sparks"}`. Five new justfile recipes:
+`spark-observability-{status,apply,check,pin,show-menu}`...
+`spark-observability-{status,apply,check,probe}`. Two operator gotchas
+fixed during apply: (1) `--runtime nvidia` doesn't exist on DGX OS; only
+`--gpus all` is needed (nvidia-container-toolkit handles it); (2) Promtail
+zip extract via Ansible `unarchive` `extra_opts` puts the file pattern
+BEFORE the source — wrong arg order for `unzip`; dropped the filter since
+the zip only contains one file. Full design + ops surface:
+[`concepts/sparks-observability-pipeline.md`](./concepts/sparks-observability-pipeline.md).
+**This is the highest-value tool added for the
+[2026-05-01 GX10 abrupt-power-off](./runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md)
+bisection** — converts after-the-fact log forensics into live timeseries
+with GPU power/temp/util, EDAC/PCIe AER/MCE counters, vLLM concurrent
+in-flight, and searchable kernel/dockerd logs. Open: Grafana dashboards
+(3 target — Spark Cluster, vLLM Performance, GX10 Power-Off Hunt),
+Prometheus alert rules.
+
+## [2026-05-01] role | spark_kernel | shipped (kernel-bisection scaffolding)
+Added [`roles/spark_kernel/`](../roles/spark_kernel/) — idempotent, reversible
+Ansible role that manages the GRUB default kernel, apt-mark holds on the
+kernel + HWE meta packages, and the
+`nvidia-spark-run-apt-upgrade-once.service` mask. Filed in response to operator
+performing a manual `grub-reboot` from `6.17.0-1014-nvidia` →
+`6.17.0-1008-nvidia` on `nvidia1` to bisect the GX10 abrupt-power-off
+issue ([2026-05-01 postmortem](./runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md)).
+**Design**: 4 inventory flags (`spark_kernel_pin`, `spark_kernel_apt_hold`,
+`spark_kernel_disable_auto_apt_upgrade`, `spark_kernel_show_grub_menu`),
+all default to safe values. Empty `spark_kernel_pin` means "leave
+GRUB_DEFAULT alone, manage holds + OTA mask only" — converges to a sane
+baseline on a fresh host without making boot decisions for the operator.
+**GRUB ID discovery**: deterministic construction from the root-fs UUID
+(`findmnt -nrvo UUID /`) + kernel version → `gnulinux-<KVER>-advanced-<UUID>`,
+verified by grep against `/boot/grub/grub.cfg` before writing. Avoids
+fragile multi-line regex parsing. Recovery entries are excluded by
+construction (`-advanced-` not `-recovery-`). **Reversibility**: setting
+`spark_kernel_pin: ""` leaves GRUB_DEFAULT untouched; setting
+`spark_kernel_apt_hold: false` releases ALL kernel-related apt holds
+(`linux-image|linux-headers|linux-modules`); setting
+`spark_kernel_disable_auto_apt_upgrade: false` unmasks the OTA service
+(does not start it). **Wired**: `roles/spark_provision/{tasks,defaults}/main.yml`
+with new `kernel` phase tag and `spark_provision_kernel` toggle.
+Five new justfile recipes: `spark-kernel-status` (current kernel +
+holds + OTA state on both hosts), `spark-kernel-apply` (full role
+run; accepts `host=` arg), `spark-kernel-check` (`--check --diff`
+dry-run), `spark-kernel-pin host=… ver=…` (ad-hoc one-off override),
+`spark-kernel-show-menu on|off` (toggle GRUB visibility). **Inventory** (operator chose **cluster-wide step-back**, not A/B):
+`group_vars/sparks.yml` declares `spark_kernel_pin: "6.17.0-1008-nvidia"`
++ enables `spark_kernel_apt_hold` and `spark_kernel_disable_auto_apt_upgrade`
+cluster-wide. No per-host overrides — `host_vars/nvidia{1,2}.yml` carry
+documentation comments only. **Rationale**: today's `uname -r` already
+shows both Sparks running 1008 (operator's manual `grub-reboot` ended up
+applied to both during this morning's recovery), so a cluster-wide pin
+captures intent and gives a clean before/after MTBF comparison against
+today's crash history (which was all on 1014). Easier to interpret than
+an A/B that splits load asymmetrically. Operator applies via
+`just spark-kernel-apply`. **Verified** with `--check --diff` on both
+Sparks: GRUB_DEFAULT diff is the expected
+`gnulinux-advanced-<UUID>>gnulinux-<KVER>-advanced-<UUID>` form,
+discovery passes, all assertions green; `apt-mark hold` will hold 9
+installed packages per host (HWE meta + 1008 kernel set);
+`nvidia-spark-run-apt-upgrade-once.service` (currently `enabled, inactive`,
+done-file present) will be masked. **Does NOT trigger
+a reboot** — operator chooses via `just spark-reboot`. **Does NOT arm
+kdump** — separate concern; current `crashkernel=1G-:0M` still leaves
+no dump on next abrupt power-off. Full role docs:
+[roles/spark_kernel/README.md](../roles/spark_kernel/README.md).
+
+## [2026-05-01] concept | auxiliary-model-isolation | proposed (filed from postmortem)
+Filed [concepts/auxiliary-model-isolation.md](./concepts/auxiliary-model-isolation.md)
+articulating the architectural pattern of running Hermes's nine
+auxiliary task classes (`vision`, `web_extract`, `compression`,
+`session_search`, `skills_hub`, `approval`, `mcp`, `flush_memories`,
+`title_generation`) on a **separate small model endpoint** rather than
+funneling them onto the same `:8000` primary endpoint serving the
+user's reasoning call. Derived from the [2026-05-01 nvidia2
+postmortem](./runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md)
+finding that Hermes default `provider: auto` resolves all auxiliaries
+to the main `qwen-spark` provider, generating concurrent KV-cache /
+batching pressure on the main 35B-FP8 stack — one of the precursors
+the [GX10 forum thread #359785](https://forums.developer.nvidia.com/t/title-asus-ascent-gx10-gb10-hard-power-off-unclean-reboot-under-vllm-gpt-oss-120b-long-context/359785)
+correlates with the abrupt power-off bug. **Three deployment patterns**
+laid out in the page: (A) **today, no new hardware** — Ollama on `ms02`
+(Threadripper 3970X, no GPU, CPU-served Q4 model — `qwen2.5:3b-instruct`
+or `phi-4-mini-instruct` recommended), reversible per-key rollout in
+`~/.hermes/config.yaml`, ms02-uptime caveat documented; (B) **bridge** —
+Ollama as a k8s Deployment on the [ComputeBlade Pi cluster](./concepts/8-spark-fabric-and-orchestrator.md)
+once it's online, frees ms02 for dev work; (C) **final** — vLLM-CPU or
+Ollama on `orchestrator1` (Phase 6 of the [8-spark plan](./concepts/8-spark-fabric-and-orchestrator.md#migration-phases)),
+sub-options C.1 (vLLM-CPU on `:8001`, single-tech operator surface) and
+C.2 (Ollama, simpler ops). **Hermes-key → tier mapping table** in the
+page: `vision` **stays on `qwen-spark`** (needs Qwen3-VL when we cut
+over); `compression` and `flush_memories` are highest-impact cutovers
+(most frequent); `mcp` arg synth has a measure-before-cut caveat (rich
+schemas may benefit from the big model). **Non-goals captured**: not a
+quality-equivalent replacement for the auxiliaries — small models are
+worse but for these specific tasks "good enough" — the win is
+isolation, not parity. Pattern A is also articulated as a good idea
+**irrespective of the GX10 platform bug** (capacity-planning + quality-
+isolation are independent motives). **Status `proposed`** — not
+deployed yet; sequenced after the Hermes single-user-side config
+tightening (1-2 week trial first) per the page's "When to do this"
+section. Index entry added to [index.md](./index.md). Links into
+[2026-05-01 postmortem follow-ups](./runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md#open-follow-ups)
+and [Phase 6 of the 8-spark plan](./concepts/8-spark-fabric-and-orchestrator.md).
+
+## [2026-04-29] concept | 8-spark-fabric-and-orchestrator | 📌 PINNED — blocked on hardware
+Architecture is **fully designed**: 7-phase migration plan, three-plane
+split (8 Sparks Docker + Ansible / 1 MS-A2 pure systemd, 32 GB / 20×
+ComputeBlade Pi k8s), TP=8 single-replica deployment shape at
+`gpu_memory_utilization=0.75-0.80`, **production model decided** as
+**Qwen3-VL-235B-A22B-FP8** (vision + reasoning + coding unified, 22B-
+active MoE for fast single-stream decode, 256k+ context — vision-as-
+major-plus drives the unified model choice over coding-specialist
+Coder-480B), with A/B targets `Qwen3-Coder-480B-Instruct-AWQ-INT4` /
+`DeepSeek-V3.2-AWQ-INT4` / `Kimi K2.5-AWQ-INT4` accessible via
+`spark-model-cutover`. **Execution paused** awaiting three pieces of
+hardware: (1) Minisforum MS-A2 (32 GB) → unblocks Phases 2-3 (orchestrator1
+provisioning, daemon migration, HF cache origin shift); (2) MikroTik
+CRS804-4DDQ-HRM switch → unblocks Phases 1, 4 (link-local subnet
+migration to `10.10.100.0/24`, switched fabric validation); (3) 6×
+additional DGX Spark → unblocks Phases 5-7 (full 8-node fleet, TP=8
+deploy, 26.04/torchrun re-evaluation). **Today's cluster (26.03-py3 +
+Ray + TP=2 + Qwen3.6-35B-A3B-FP8) stays as is** — no inventory or role
+changes scheduled. **Prefetch is deferred** — `Qwen3-VL-235B-A22B-FP8`
+will NOT be added to `hf_prefetch_models` until Phase 3 lands; until
+then there's no point filling Spark disks for a model the cluster
+can't run yet. New "Next actions on hardware arrival" section in the
+page captures the per-trigger checklist (steps + dependent phases) so
+arrival-day work is mechanical. Optional pre-arrival work (sketch
+`roles/orchestrator/`, file MikroTik config sketch, file Pi cluster
+scope page) listed under "What to do while waiting" — none required.
+Full content + Mermaid diagrams + decision matrix:
+[concepts/8-spark-fabric-and-orchestrator.md](./concepts/8-spark-fabric-and-orchestrator.md).
+
+## [2026-04-29] concept | 8-spark-fabric-and-orchestrator | shipped
+Filed forward-looking architecture concept page for the
+2 → 8 DGX Spark expansion. Captures the hardware roster (Minisforum MS-A2
+control plane, MikroTik CRS804-4DDQ-HRM 4× QSFP-DD switch breakout to 8×
+QSFP56 200 GbE for the Sparks), the **link-local → routable** subnet
+migration (`169.254.0.0/16` → `10.10.100.0/24` in `host_vars` +
+`firewall_spark_interconnect_cidr`; doable on today's direct cable before
+the switch even arrives), a Mermaid topology diagram showing the
+LAN-control-plane vs QSFP-data-plane separation (orchestrator1 is **not**
+on the QSFP fabric — c10d rendezvous is LAN-side, NCCL data plane stays on
+the fabric via `MASTER_ADDR=<rank-0 spark QSFP IP>`), a 7-phase migration
+plan (each phase independently shippable in a maintenance window), and a
+**Docker-vs-k8s decision** for the Sparks: stay on Docker + Ansible
+(matches existing `roles/vllm_stacked_container`, sidesteps the
+NCCL+CNI-overlay problem that makes RoCE-in-pods a research project), run
+k3s on `orchestrator1` for everything **else** (gateway, daemons,
+observability, future Hermes microservices). Decision is reversible — we
+can join Sparks into the k3s cluster later if multi-tenant or fleet>16
+becomes a concern. Two genuine k8s wins called out (auto-restart of
+`vllm serve` on crash, and declarative rolling image upgrades replacing
+the autoupgrade daemon); the first is achievable with simpler bare Docker
+by baking `vllm serve` into the container entrypoint instead of
+`docker exec -d`-ing it after Ray comes up — already an open follow-up
+from the 2026-04-27 postmortem. Repo readiness check shows N=2 → N=8
+generalises cleanly with two real action items: re-render
+`vllm-stack-autoupgrade` `peers:` list from inventory iteration, and
+rewrite `just spark-vllm-{head,worker}-*` recipes to iterate
+`groups['sparks']` instead of hardcoding `nvidia1`/`nvidia2`. Full
+content + diagrams + cross-refs:
+[concepts/8-spark-fabric-and-orchestrator.md](./concepts/8-spark-fabric-and-orchestrator.md).
+
+## [2026-04-29] run | cluster-recovery-and-26.04-rollback | shipped
+Five-cause incident chain in 3 hours of a single morning after an ASUS Ascent
+firmware update reboot (BIOS `0100.2025.0916.1213` → `0103.2026.0129.1152` on
+both Sparks): (1) **OTel `getenv()` SIGSEGV** in `vllm/tracing/otel.py`'s
+`OtlpGrpcMetricExporter` periodic exporter — known aarch64 + glibc + gRPC
+race; kills the worker `RayWorkerWrapper` actor on nvidia2; engine core sees
+`ActorDiedError`; API never binds. Fix: `OTEL_SDK_DISABLED=true` +
+`OTEL_{METRICS,TRACES,LOGS}_EXPORTER=none` in `vllm_distributed_extra_env`.
+(2) **HF Hub HEAD storm** at startup — `transformers` probes optional config
+files (e.g. `preprocessor_config.json`) on every cold start; today HF
+returned a transient `504`. Same retry path that hung 2026-04-27
+post-engine-init. Fix: re-added `HF_HUB_OFFLINE=1` to
+`vllm_distributed_extra_env` (paired with `hf-prefetch.service`'s local-cache
+guarantee). (3) **nvidia2 abrupt power-off at 10:49:40 EEST** — all four
+mlx5 NICs go LINK DOWN simultaneously on nvidia1, ARP entry to .229 goes
+`FAILED`; nvidia2 is unreachable on LAN + interconnect. Same
+kernel-undetectable platform-level shutdown postmortemed for nvidia1 on
+[2026-04-27](./runs/2026-04-27-ray-head-exited-postmortem.md), now confirmed
+on both Sparks. ASUS firmware update did NOT fix the underlying issue. (4)
+While operator was triaging the abrupt-power-off, **`vllm-stack-autoupgrade`
+fired** at 11:15:44 and promoted `nvcr.io/nvidia/vllm:26.03-py3` →
+`26.04-py3` (synced earlier today by `ngc-image-sync.service`). The new
+container exited 127 in a loop: `/bin/bash: line 1: ray: command not
+found` — 26.04 puts `ray` on a path only on the **login shell** PATH; our
+role's `--entrypoint /bin/bash -c 'ray start ...'` was broken on this
+image. Fix: changed `bash -c` → **`bash -lc`** in
+`roles/vllm_stacked_container/tasks/main.yml` for both head and worker
+docker runs (forward-compat with any future image PATH change). Daemon
+correctly went into `status=error, reason="promotion failed — operator
+triage required"` per its safety rail; we manually rolled back via
+`just spark-vllm-provision-recreate`. (5) **`spark_apt` role
+tag-propagation bug** — `--tags apt` only matched the outer
+`include_role` task, not the role's inner `apt update`/`upgrade`/
+`autoremove` tasks. Same wart filed as a follow-up in
+[runs/2026-04-19-qwen3_6-35b-a3b-promoted.md](./runs/2026-04-19-qwen3_6-35b-a3b-promoted.md).
+Fix: added `apply: { tags: [spark, apt] }` to the `include_role` in
+`roles/spark_provision/tasks/main.yml`. **apt upgrade then landed
+properly**: `dgx-dashboard 0.23.3 → 0.25.11`,
+`dgx-spark-ota-update-meta 26.03.1 → 26.04.1`,
+`nvidia-dgx-telemetry 4.11 → 5.22`, plus 3 new `nvidia-spark-*`
+packages (`avahi-conf`, `limits`, `ota-check`) pulled by `26.04.1`. Both
+hosts now flag `*** System restart required *** nvidia-spark-limits`.
+**Six new `just` recipes** for the lifecycle: `spark-reboot{,-required}`,
+`spark-apt-upgrade`, and `spark-autoupgrade-{status,enable,disable}`.
+Cluster fully recovered: 2 ALIVE Ray nodes, `/v1/models` returns
+Qwen3.6-35B-A3B-FP8 advertised under multiple `served-model-name`s. Open
+follow-ups: kdump-arm both hosts (per the 2026-04-27 hardening list, now
+confirmed-needed on both), reboot for `nvidia-spark-limits`, only re-arm
+the autoupgrade daemon AFTER the next `spark-vllm-provision-recreate`
+captures the new `bash -lc` argv into running containers, retry
+`iproute2` upgrade under `full` mode. Full timeline + per-issue triage:
+[runs/2026-04-29-cluster-recovery-and-26.04-rollback.md](./runs/2026-04-29-cluster-recovery-and-26.04-rollback.md).
+
+## [2026-04-27] run | ray-head-exited-postmortem | shipped
+Operator returned to the cluster post-reboot to find `vllm-ngc-ray-head`
+in `Exited (1)` despite `--restart unless-stopped`. Diagnosed via
+`docker cp` of the stopped container's `/tmp/ray` session logs +
+previous-boot journal grep — Ray took a clean SIGTERM at 14:28:31 EEST,
+and the previous-boot journal pinned the SIGTERM origin to an Ansible
+`docker stop vllm-ngc-ray-head 2>/dev/null || true` (i.e. the
+`just spark-vllm-stop` operator path). Docker then refused to relaunch
+the container at the 14:42 reboot because `unless-stopped` deliberately
+respects manual stops (`hasBeenManuallyStopped=true`). The role's start
+path tried `docker run -d --name vllm-ngc-ray-head ...` and collided
+with the existing Exited container — fixed by mirroring the worker's
+2026-04-19 "Start stopped Ray worker container (reuse existing name)"
+fallback for the head: `docker start` first, only `docker run` when no
+container exists by that name. New concept page filed:
+[concepts/restart-unless-stopped-after-manual-stop.md](./concepts/restart-unless-stopped-after-manual-stop.md).
+Operator surface filled out with **10 new `just spark-vllm-*` recipes**
+(`ps`, `head-start`, `head-restart`, `worker-restart`, `start`,
+`restart`, `api-kill`, `api-restart`, `dashboard`) closing the
+"`spark-vllm-stop` had no symmetric `spark-vllm-start`" lifecycle gap.
+Separately, exposed the **Ray dashboard on the LAN**: head's
+`ray start --head` now passes
+`--dashboard-host=0.0.0.0 --dashboard-port=8265`; new defaults
+`vllm_stacked_container_dashboard_host` /
+`vllm_stacked_container_dashboard_port`; 8265 added to
+`firewall_trusted_lan_tcp_ports` only (LAN, not world); new recipe
+`just spark-vllm-dashboard` opens
+`http://192.168.1.104:8265/`. Hygiene: removed `HF_HUB_OFFLINE: "1"`
+from `vllm_distributed_extra_env` again (had reappeared since the
+2026-04-18 fix; `curl -4`/`curl -6` to huggingface.co both `200` after
+this session's reboot), kept `RAY_CGRAPH_get_timeout: "900"`. Open
+follow-up: `vllm serve` API server hangs post-engine-init with current
+Qwen3 flag set on the 5-day-old container path; recommended recovery
+matches the [2026-04-19 fp8-stack-cutover](./runs/2026-04-19-fp8-stack-cutover.md)
+ritual (`spark-vllm-api-kill` + `drop_caches` +
+`spark-vllm-provision-recreate`). Full timeline + diagnostic path:
+[runs/2026-04-27-ray-head-exited-postmortem.md](./runs/2026-04-27-ray-head-exited-postmortem.md).
+
+## [2026-05-19] run | nccl-gid-ray-carryover | shipped (infra + wiki sync)
+
+Cross-node TP=2 failed at `ncclCommInitRank` (“unhandled system error”) even after
+per-host `show_gids` / `spark_nccl_ib_gid_index` landed in Ansible: vLLM's Ray executor
+still **copied `NCCL_IB_GID_INDEX` from the driver into followers**, overwriting
+follower-local env-file values. Fix: bind-mount `/etc/vllm-ngc-stacked/ray_non_carry_over_env_vars.json`
+→ `/root/.config/vllm/ray_non_carry_over_env_vars.json` on **both** NGC containers
+(listing `NCCL_IB_GID_INDEX`) + **recreate** to pick up the volume. Canonical page:
+[runs/2026-05-19-nccl-gid-ray-carryover.md](./runs/2026-05-19-nccl-gid-ray-carryover.md).
+Concept refresh (fixes historical drift vs dual PCIe path Cage A):
+[concepts/nccl-on-spark.md](./concepts/nccl-on-spark.md),
+[concepts/ngc-stacked-container-stack.md](./concepts/ngc-stacked-container-stack.md).
+
+## [2026-05-19] meta | bootstrap path | note for agents
+
+The repo's agent bootstrap markdown is **`llmwiki/AGENTS.md`** (see “Bootstrapping order”).
+There is **no top-level `./AGENTS.md`** in-tree today — start from **`llmwiki/AGENTS.md`**
+when an operator mentions “AGENTS.md” without a path.
+

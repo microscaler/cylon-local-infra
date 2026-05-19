@@ -1,0 +1,30 @@
+[Unit]
+Description=NVIDIA DCGM Exporter (GPU Prometheus metrics, host-network, loopback bind)
+Documentation=https://github.com/NVIDIA/dcgm-exporter
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+TimeoutStartSec=60
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=10
+
+# Always remove a stale container on start (in case of unclean shutdown).
+ExecStartPre=-/usr/bin/docker rm -f dcgm-exporter
+ExecStart=/usr/bin/docker run --rm \
+  --name dcgm-exporter \
+  --network host \
+  --runtime nvidia \
+  --gpus all \
+  --cap-add SYS_ADMIN \
+  --restart=no \
+  -e DCGM_EXPORTER_LISTEN={{ spark_observability_dcgm_exporter_bind }} \
+  {{ spark_observability_dcgm_exporter_image }}
+
+ExecStop=/usr/bin/docker stop -t 15 dcgm-exporter
+
+[Install]
+WantedBy=multi-user.target

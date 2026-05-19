@@ -8,10 +8,19 @@
 spark_provision_sudoers: true
 spark_provision_cuda_apt_cleanup: true
 spark_provision_apt: true
+# Kernel pin / apt-hold / NVIDIA OTA service mask (roles/spark_kernel).
+# Defaults are flag-driven and idempotent: with the role's own defaults the
+# only change made on a fresh host is masking nvidia-spark-run-apt-upgrade.service
+# and holding the HWE meta packages — no kernel pin until you set
+# `spark_kernel_pin` in inventory. See roles/spark_kernel/README.md.
+spark_provision_kernel: true
 spark_provision_docker: true
 spark_provision_firewall: true
-# Per-host optional sysctl (see tasks/lan_ipv6_sysctl.yml, host_vars e.g. nvidia1).
+# LAN IPv6-off — NetworkManager ipv6.method disabled + sysctl pair (see tasks/lan_ipv6_*.yml).
+# Inventory: spark_lan_disable_ipv6_on_interface in group_vars/sparks.yml (both Sparks today).
 spark_provision_lan_ipv6_sysctl: true
+# /etc/hosts interconnect aliases (gx10-*, nvidia*) — roles/spark_hosts
+spark_provision_hosts: true
 # CUDA toolkit on the host is no longer needed for vLLM (NGC image is self-contained).
 # Enable only if you also run playbooks/nccl_sparks.yml (host-side NCCL build).
 spark_provision_cuda_toolkit: false
@@ -28,3 +37,8 @@ spark_provision_vllm_autoupgrade: false
 spark_provision_hf: false
 # Optional — Docker + HF cache diagnostics.
 spark_provision_diagnostics: false
+# Push-based observability pipeline (roles/spark_observability) — node_exporter,
+# dcgm-exporter, otel-agent, promtail, rasdaemon textfile shipper. All bind to
+# 127.0.0.1; the otel-agent and promtail push to ms02 (192.168.1.189). Metrics
+# at 15s; logs via journald. See roles/spark_observability/README.md.
+spark_provision_observability: true

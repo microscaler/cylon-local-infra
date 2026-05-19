@@ -3,7 +3,7 @@ title: NCCL on Spark (RoCE v2 + GPUDirect RDMA)
 kind: concept
 status: active
 tags: [nccl, spark, networking, gb10, rdma, roce, connectx-7]
-updated: 2026-04-19
+updated: 2026-05-19
 related:
   - concepts/spark-interconnect.md
   - runs/2026-04-19-roce-cutover.md
@@ -36,21 +36,23 @@ NGC image (`NCCL_VERSION=2.29.7`).
 
 Managed by `roles/nccl_sparks/` and `playbooks/nccl_sparks.yml`.
 
-## Runtime env — container stack, RoCE+GDR (canonical, 2026-04-19)
+## Runtime env — container stack, RoCE+GDR (canonical; refreshed 2026-05-19 for GID + Ray carry-over)
 
-Lives in `inventory/group_vars/sparks.yml` under `vllm_distributed_extra_env`;
-rendered into `head.env` + `worker-<host>.env` via `--env-file`.
+Canonical values live in `inventory/group_vars/sparks.yml` under
+`vllm_distributed_extra_env`; templates render **`head.env` / `worker-<host>.env`**
+and **append** `NCCL_IB_GID_INDEX` **last** (`roles/vllm_stacked_container/templates/ngc-ray-*.env.j2`).
 
-| Var | Value | Role |
+| Var | Typical value | Role |
 |---|---|---|
-| `NCCL_SOCKET_IFNAME` | `enp1s0f0np0` | **Bootstrap only.** ncclUniqueId / OOB over QSFP IP. |
+| `NCCL_SOCKET_IFNAME` | `enp1s0f0np0` | **Bootstrap only** — ncclUniqueId / OOB over QSFP link-local (`169.254.0.0/16`). |
 | `GLOO_SOCKET_IFNAME` | same | PyTorch gloo fallback. |
 | `UCX_NET_DEVICES` | same | UCX scoped to the QSFP IF. |
 | `OMPI_MCA_btl_tcp_if_include` | same | OpenMPI TCP transport scoped. |
 | `TP_SOCKET_IFNAME` | same | vLLM TP socket path. |
 | **`NCCL_IB_DISABLE`** | **`0`** | Enable NCCL's *internal* verbs transport (`NET/IB`). |
-| **`NCCL_IB_HCA`** | **`rocep1s0f0`** | Pin to the cabled ConnectX-7 port (others are DOWN or uncabled). |
-| **`NCCL_NET_GDR_LEVEL`** | **`PHB`** | Enable GPUDirect RDMA at PCIe-host-bridge distance — per `nvidia-smi topo -m` GB10 GPU↔NIC sits at `NODE`, so `PHB` is the permissive floor. |
+| **`NCCL_IB_HCA`** | **`rocep1s0f0`** *or* **`rocep1s0f0,roceP2p1s0f0`** | Single-rail vs **dual PCIe path into Cage A** — driven by `spark_dual_hca_enabled` / `nccl_ib_hca` **in sparks.yml**. |
+| **`NCCL_IB_GID_INDEX`** | **per host** (`spark_nccl_ib_gid_index`) | RoCE v2 + IPv4 row in **`show_gids`** — **gx10-e1ce** (`nvidia1`) uses **`3`** on both rails today; **`gx10-47b5` (`nvidia2`) uses `4`** (index 3 is absent locally). Wrong index ⇒ `PyNcclCommunicator` / `ncclCommInitRank` “unhandled system error”. **Do not** set this inside `vllm_distributed_extra_env` dict — templates own it so it stays last in the env file. |
+| **`NCCL_NET_GDR_LEVEL`** | **`PHB`** | GPUDirect RDMA at PCIe-host-bridge permissive floor (GB10 `nvidia-smi topo -m`). |
 | **`NCCL_NET_PLUGIN`** | **`none`** | **Keep external plugins off.** The 26.01-py3 abort that forced us to sockets was inside `aws-ofi-nccl` / `hpcx rdma-sharp` / `spectrum-x` / `ibext` — not inside NCCL's internal IB path. Belt-and-braces. |
 | `NCCL_P2P_DISABLE` | `1` | No NVLink between separate Sparks. |
 | `NCCL_CUMEM_ENABLE` | `0` | Defensive. NCCL VMM allocator disabled — preserved from the 26.01 era, not re-qualified. |
@@ -76,6 +78,19 @@ Without these, `ibv_open_device` fails and NCCL silently falls back to sockets
 (or crashes, depending on version). Confirm via `docker inspect ... --format
 '{{.HostConfig.Devices}}'` after a recreate.
 
+### vLLM Ray + NCCL env carry-over (failure mode fixed 2026-05-19)
+
+vLLM 0.17.x logs (Ray backend) explicitly **copy prefixed env vars onto workers**:
+
+> `Env var prefixes to copy: ['HF_', ..., 'NCCL_', 'UCX_', 'VLLM_']`
+
+That includes **`NCCL_IB_GID_INDEX`**, overwriting the follower container's
+`--env-file` with the leader's index. Mitigation wired in Ansible:
+`/etc/vllm-ngc-stacked/ray_non_carry_over_env_vars.json` mounted read-only at
+`/root/.config/vllm/ray_non_carry_over_env_vars.json` listing `NCCL_IB_GID_INDEX`,
+per upstream hint in logs. **`docker run` must include the bind-mount** —
+re-provision **with recreate** after pulling the role change.
+
 ## The plugin-vs-transport distinction (important)
 
 `NCCL_NET_PLUGIN` and `NCCL_IB_DISABLE` are **orthogonal**:
@@ -96,15 +111,15 @@ we re-enabled only the internal one after proving it via a standalone two-rank
 Each Spark has 4× ConnectX-7 ports at 200 Gb/s:
 
 ```
-rocep1s0f0  → enp1s0f0np0      ACTIVE LINK_UP  ← cabled (QSFP link-local)
-rocep1s0f1  → enp1s0f1np1      DOWN
-roceP2p1s0f0 → enP2p1s0f0np0   ACTIVE LINK_UP  ← uncabled (second ASIC)
+rocep1s0f0   → enp1s0f0np0     ACTIVE LINK_UP  ← Cage A, fabric 1 (link-local QSFP transport)
+rocep1s0f1   → enp1s0f1np1     DOWN           ← Cage B (intentionally uncabled HA layout)
+roceP2p1s0f0 → enP2p1s0f0np0   ACTIVE LINK_UP  ← same **Cage A** wire, second PCIe path (fabric 2 /30 IPs)
 roceP2p1s0f1 → enP2p1s0f1np1   DOWN
 ```
 
-`link_layer: Ethernet` → RoCE v2 (not native IB). `max_mtu: 4096`, but
-`active_mtu: 1024` today — lifting that is a deferred follow-up in the cutover
-run doc.
+`link_layer: Ethernet` → RoCE v2 (not native IB). Jumbo framing + pinned GID indices
+were qualified in **`runs/2026-04-19-dual-rail-cutover.md`** (may differ slightly on disk name).
+If this table disagrees with `rdma link show` on-metal, **`rdma link show` wins**.
 
 ## Firewall
 

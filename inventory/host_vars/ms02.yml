@@ -3,43 +3,49 @@
 # Cursor Remote-SSH target, soon NFSv4 exporter). Defaults from the invoked
 # roles apply unless overridden here.
 
-# ── Firewall (ufw) — opens NFSv4 to the LAN ───────────────────────────────
+# ── Firewall (ufw) — LAN-only services on ms02 ────────────────────────────
 # The base `firewall` role leaves LAN exposure empty by default. Explicitly
-# grant the Mac's subnet access to 2049/tcp (NFS). Port 445 (SMB) is NOT
+# grant the home subnet access to selected TCP ports. Port 445 (SMB) is NOT
 # added — see llmwiki/concepts/workspace-mount-protocols.md for why we're
 # not picking SMB. SSH (22) is already in firewall_allow_tcp_ports so it's
-# universally open; the NFS port is LAN-only.
+# universally open; the entries below are LAN-only.
 #
-# Note: until the USB 2.5GbE wired adapter arrives, Mac → ms02 NFS traffic
-# goes over the SSH ControlMaster tunnel (~/.ssh/config.d/ms02-dev-tunnel
-# has `LocalForward 2049 localhost:2049`), so the LAN allow here is mostly
-# preparation for the post-Starlink path. Leaving it on now is harmless —
-# the Starlink router still drops the packets before they reach ufw.
+# LAN dev access from picolino (and any host on the home /24). SSH-tunneled
+# NFS is retired — direct :2049 + this TCP range must work from the Mac.
+#
+# `firewall_trusted_lan_cidr` covers picolino when it has a 192.168.1.x address
+# (Wi-Fi or USB Ethernet to the same switch as ms02). Narrow to a host IP only
+# if you intentionally want to exclude other LAN clients.
 firewall_trusted_lan_cidr: "192.168.1.0/24"
 firewall_trusted_lan_tcp_ports:
-  - 2049    # NFSv4 — only port we need for v4 (no portmapper, no mountd)
+  - 22
+  - 2049           # NFSv4 (macOS `just nfs-up`; not inside 7000–12000)
+  - "7000:12000"   # Tilt (10348), Hermes (9119), Wrangler (8787), nodeports, observability, …
+  # Sparks → ms02 push targets (kind extraPortMappings forward kind:NodePort → host).
+  # See llmwiki/concepts/sparks-observability-pipeline.md and roles/spark_observability.
+  - 3100           # Loki push API (Promtail-on-Spark → ms02:3100/loki/api/v1/push)
+  - 4317           # OTLP gRPC (otel-agent-on-Spark → otel-collector in kind)
+  - 4318           # OTLP HTTP (alternative; same path)
+
+# --- Hermes agent — optional dotenv patch (playbooks/sync_hermes_ms02.yml; cutover --sync-hermes)
+# Set `hermes_agent_dotenv_path` to the env file Hermes loads on ms02 (must exist).
+# Example (adjust to your checkout):
+#   hermes_agent_dotenv_path: "/home/casibbald/Workspace/microscaler/hermes/.env"
+# Optional: non-interactive restart after the patch (shell one-liner on ms02):
+#   hermes_agent_post_sync_command: "sudo -u casibbald bash -lc 'cd ~/hermes && docker compose restart'"
+hermes_agent_dotenv_path: ""
+hermes_agent_post_sync_command: ""
 
 # ── NFSv4 server — exports /home/casibbald/Workspace ──────────────────────
-# Two client blocks because they need different option sets:
+#   192.168.1.0/24  — the home LAN (picolino, etc.). Uses `insecure` so macOS
+#                     `noresvport` clients work; export still rw + all_squash.
+#                     (SSH-tunneled NFS / 127.0.0.1 export retired — LAN + firewall.)
 #
-#   192.168.1.0/24  — the Mac's LAN subnet. Default `secure` (server
-#                     requires privileged-port source, which the Mac's NFS
-#                     client does natively when mounting directly). Used
-#                     once the wired 2.5GbE adapter retires the Starlink
-#                     port filter.
-#
-#   127.0.0.1/32    — the loopback, for SSH-tunneled NFS (port 2049 on ms02
-#                     is reached via `ssh -L 2049:localhost:2049`). Needs
-#                     `insecure` because ssh-forwarded connections arrive
-#                     at nfsd with a non-privileged source port. Safe: the
-#                     SSH tunnel itself is authenticated before any NFS
-#                     traffic is allowed through.
-#
-# Both use `sec=sys` (trust the UID/username asserted by the client) which
+# Uses `sec=sys` (trust the UID/username asserted by the client) which
 # is the right level for single-user LAN. Upgrade path to `sec=krb5p` when
 # the LAN moves to a zero-trust posture.
 #
-# Both also use `all_squash,anonuid=1000,anongid=1000` — single-operator
+# Also uses `all_squash,anonuid=1000,anongid=1000` — single-operator
 # dev mount. Discovered during the 2026-04-20 cutover: the Mac's casibbald
 # is UID 502 / gid 20 (staff), while ms02's is UID 1000 / gid 1000
 # (casibbald). `sec=sys` transmits raw UIDs over the wire, so unless
@@ -52,7 +58,7 @@ firewall_trusted_lan_tcp_ports:
 nfs_server_exports:
   - path: /home/casibbald/Workspace
     clients:
+      # `insecure` — macOS mount_nfs uses non-privileged client ports (noresvport);
+      # without this, direct LAN mounts fail with "RPC prog not available" / access denied.
       - cidr: 192.168.1.0/24
-        options: "rw,sync,no_subtree_check,sec=sys,all_squash,anonuid=1000,anongid=1000"
-      - cidr: 127.0.0.1/32
         options: "rw,sync,no_subtree_check,sec=sys,insecure,all_squash,anonuid=1000,anongid=1000"

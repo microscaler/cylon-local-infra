@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  role_name: spark_hosts
+  author: Microscaler
+  description: Managed /etc/hosts entries for DGX Spark QSFP interconnect hostnames
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+dependencies: []

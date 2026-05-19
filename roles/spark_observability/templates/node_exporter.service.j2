@@ -1,0 +1,30 @@
+[Unit]
+Description=Prometheus node_exporter (host metrics for Spark)
+Documentation=https://github.com/prometheus/node_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ spark_observability_node_exporter_user }}
+Group={{ spark_observability_node_exporter_user }}
+ExecStart={{ spark_observability_bin_dir }}/node_exporter \
+  --web.listen-address={{ spark_observability_node_exporter_bind }} \
+  --collector.systemd \
+  --collector.systemd.unit-include=^(docker|nvidia-.*|vllm-.*|hf-prefetch|ngc-image-sync|vllm-stack-autoupgrade|otel-agent|promtail|node_exporter|dcgm-exporter)\.service$ \
+  --collector.processes \
+  --collector.tcpstat \
+  --collector.hwmon \
+  --collector.thermal_zone \
+  --collector.textfile \
+  --collector.textfile.directory={{ spark_observability_textfile_dir }}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths={{ spark_observability_textfile_dir }}
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

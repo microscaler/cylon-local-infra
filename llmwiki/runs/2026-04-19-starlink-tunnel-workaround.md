@@ -126,3 +126,13 @@ for now by `kubectl port-forward` through the already-working tunnel.
       times out for `3000/9090/16686` etc. despite pods `1/1 Running`
       (likely a ClusterIP/endpoint/CNI issue inside the kind container, or
       the kind node's kube-proxy not matching the iptables-mode/rules).
+
+## Update (2026-04 onward)
+
+Home LAN + **ms02 `ufw`** (trusted `192.168.1.0/24`, **2049**, **7000–12000**, …)
+made SSH port-forwards unnecessary for day-to-day dev. **cylon-local-infra**
+removed **`dev-tunnel-*`** just recipes and the Ansible-managed
+**`ms02-dev-tunnel`** fragment; **`mac-provision`** deletes that file if present.
+Use **`just ms02-lan-check`**, **`just nfs-up`**, and kubeconfig **`server:`** pointed
+at **`https://192.168.1.189:38839`** (or **`https://ms02:38839`**) — see current
+**`docs/dev_hosts.md`**.

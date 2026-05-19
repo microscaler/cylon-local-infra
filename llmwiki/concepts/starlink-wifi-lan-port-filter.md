@@ -12,6 +12,15 @@ sources:
 
 # Starlink Wi-Fi ↔ LAN port filter
 
+## Current posture (operator machines)
+
+**SSH tunnel / `ms02-dev-tunnel` is retired from cylon-local-infra.** ms02
+`ufw` + inventory allow **`192.168.1.0/24` → dev ports** (including **2049**,
+**7000–12000**, …); the Mac uses **direct LAN URLs** and **`just ms02-lan-check`**.
+`mac-provision` **removes** `~/.ssh/config.d/ms02-dev-tunnel` if it still exists.
+The sections below document the **historical** Starlink filter and the tunnel
+pattern for context only.
+
 ## Symptom
 
 Mac on Starlink Wi-Fi and a Linux host on the same Starlink router's LAN-out
@@ -44,49 +53,40 @@ Run in this order; the first step that succeeds tells you where the block is:
 4. Compare behaviour on port 22 vs. other ports. If 22 works but others
    don't, well-known-port whitelisting on the router is the smoking gun.
 
-## Workaround — SSH ControlMaster + `LocalForward`
+## Historical workaround — SSH ControlMaster + `LocalForward` (retired in-repo)
 
-Since port 22 is unaffected, multiplex every dev-stack port through a single
-SSH channel. The Mac's `127.0.0.1` becomes a clone of the wired host's
-`127.0.0.1`.
+When port 22 was the only reliable path, multiplexing dev ports through SSH
+worked. **This repo no longer ships** the `ms02-dev-tunnel` fragment or
+`dev-tunnel-*` just recipes — use **LAN** access (see `docs/dev_hosts.md`). If you
+ever need the pattern again (café / broken router), recreate a **personal**
+`~/.ssh/config.d/*` stanza; do not expect Ansible to manage it.
 
-Files (for this repo):
+**What we used to ship (2026-04):**
 
-- `~/.ssh/config.d/ms02-dev-tunnel` — Host stanza with ~22 `LocalForward`s
-  covering Tilt 10348, kube-apiserver 38839, the kind NodePort host-bindings
-  (3000/9090/16686/...), MinIO, Postgres, Redis, Docker registry, plus a
-  `DynamicForward 1080` SOCKS5 catch-all.
-- `~/.ssh/config` — `Include ~/.ssh/config.d/*`.
-- `cylon-local-infra/justfile` — `dev-tunnel-{up,down,status,check,restart,
-  logs,config}` recipes.
+- `~/.ssh/config.d/ms02-dev-tunnel` — `LocalForward`s + `DynamicForward 1080`.
+- `just dev-tunnel-up` / `dev-tunnel-down` / … in the top-level `justfile`.
 
-Operator commands:
+Once up historically: `http://localhost:10348/` was Tilt, `https://localhost:38839`
+was kube-apiserver **via loopback on the Mac** (today prefer **`https://192.168.1.189:38839`**
+in kubeconfig when on the home LAN).
 
-```bash
-just dev-tunnel-up      # ssh -N -f ms02-dev-tunnel, idempotent
-just dev-tunnel-check   # HTTP probe every UI through the tunnel
-just dev-tunnel-down    # ssh -O exit, deletes ControlMaster socket
-```
-
-Once up: `http://localhost:10348/` is Tilt, `https://localhost:38839` is the
-kube-apiserver (matches ms02's kubeconfig verbatim — no rewrite needed),
-`curl --socks5 127.0.0.1:1080 ...` is the escape hatch for un-mapped ports.
-
-Proven on 2026-04-19: Tilt UI, MinIO console, Docker registry and `kubectl
-get pods -n observability` all reachable from the Mac over the tunnel, while
-direct TCP to the same ports on the wired host's LAN IP continues to drop.
+Proven on 2026-04-19: services were reachable over the tunnel while direct TCP
+to the wired host's LAN IP still dropped — motivating the **ms02 firewall**
+work that made tunnels unnecessary for home dev.
 
 ## Why not just use a VPN?
 
 Could work (Tailscale, WireGuard) but adds an identity plane + NAT traversal
 for a problem that's already solved in under a page of SSH config. When the
-physical L2 problem is fixed (USB 2.5GbE adapter, ETA days), we just
-`dev-tunnel-down` and carry on — no extra infrastructure to decommission.
+physical L2 problem is fixed (USB 2.5GbE adapter, better router rules, or
+ms02 `ufw` + LAN routing), drop any personal forwards and use direct IPs — no
+extra infrastructure to decommission.
 
 ## Retire criterion
 
-`ping <wired-host>` sub-millisecond on the new wired link → tear down the
-tunnel, keep the SSH stanza parked for future café/hotel scenarios.
+`ping <wired-host>` sub-millisecond on the new wired link (and dev TCP ports
+answer from the Mac) → **no tunnel needed**; keep a minimal personal SSH stanza
+only for actual remote access scenarios.
 
 ## Related
 

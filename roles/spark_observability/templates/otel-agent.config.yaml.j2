@@ -1,0 +1,74 @@
+---
+# otel-collector-contrib agent config (per-Spark).
+# Scrapes local exporters every {{ spark_observability_scrape_interval }},
+# attaches resource attributes (cluster, host, kernel), batches, and pushes
+# OTLP gRPC to {{ spark_observability_otlp_endpoint }}.
+#
+# Bind addresses are loopback on each Spark — no LAN exposure of metrics.
+# All cross-host traffic is the agent's outbound OTLP push.
+
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: node_exporter
+          scrape_interval: {{ spark_observability_scrape_interval }}
+          static_configs:
+            - targets: ["{{ spark_observability_node_exporter_bind }}"]
+
+        - job_name: dcgm_exporter
+          scrape_interval: {{ spark_observability_scrape_interval }}
+          static_configs:
+            - targets: ["{{ spark_observability_dcgm_exporter_bind }}"]
+
+        - job_name: vllm
+          # vLLM API also lives on a Unix-style health check; if it's not
+          # listening (no `vllm serve` payload yet), the scrape will simply
+          # fail until the API comes up — no error needed in this config.
+          scrape_interval: {{ spark_observability_scrape_interval }}
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["127.0.0.1:{{ vllm_stacked_container_api_port | default(8000) }}"]
+
+processors:
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  resource:
+    attributes:
+{% for k, v in spark_observability_resource_attributes.items() %}
+      - key: {{ k }}
+        value: "{{ v }}"
+        action: upsert
+{% endfor %}
+
+exporters:
+  otlp:
+    endpoint: {{ spark_observability_otlp_endpoint }}
+    tls:
+      insecure: true       # LAN-trust posture; matches existing cluster auth_enabled=false
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+  # Local debug exporter — `journalctl -u otel-agent` shows scrape + push errors.
+  debug:
+    verbosity: basic
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp, debug]

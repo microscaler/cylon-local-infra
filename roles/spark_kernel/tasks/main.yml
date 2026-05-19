@@ -1,0 +1,224 @@
+---
+# Pin GRUB default kernel + apt-mark hold the kernel/HWE meta packages +
+# mask the NVIDIA OTA auto-apt-upgrade systemd service. See
+# defaults/main.yml for the inventory flags.
+
+# --- Discovery (read-only; safe in --check mode) --------------------------
+
+- name: Kernel — discover currently running kernel
+  ansible.builtin.command: uname -r
+  register: spark_kernel_uname
+  changed_when: false
+  check_mode: false
+
+- name: Kernel — discover installed kernel images
+  ansible.builtin.shell: |
+    set -o pipefail
+    # Match BOTH 'install ok installed' (ii) AND 'hold ok installed' (hi).
+    # Once spark_kernel_apt_hold has been applied, the pinned kernel sits in
+    # the 'hold' desired-state — exact-matching 'install ok installed' would
+    # falsely fail the "is the pinned kernel installed?" assertion below.
+    dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*-nvidia' 2>/dev/null \
+      | awk -F'\t' '$1 ~ /ok installed$/ && $2 ~ /^linux-image-[0-9]/ { sub(/^linux-image-/,"",$2); print $2 }'
+  args:
+    executable: /bin/bash
+  register: spark_kernel_installed
+  changed_when: false
+  check_mode: false
+
+- name: Kernel — discover currently held packages
+  ansible.builtin.command: apt-mark showhold
+  register: spark_kernel_current_holds
+  changed_when: false
+  check_mode: false
+
+- name: Kernel — summary
+  ansible.builtin.debug:
+    msg:
+      running: "{{ spark_kernel_uname.stdout }}"
+      installed: "{{ spark_kernel_installed.stdout_lines }}"
+      pinned_target: "{{ spark_kernel_pin if (spark_kernel_pin | length > 0) else '(none — leaving GRUB_DEFAULT untouched)' }}"
+      apt_hold_flag: "{{ spark_kernel_apt_hold }}"
+      ota_service_disabled_flag: "{{ spark_kernel_disable_auto_apt_upgrade }}"
+      show_grub_menu_flag: "{{ spark_kernel_show_grub_menu }}"
+      currently_held: "{{ spark_kernel_current_holds.stdout_lines }}"
+
+# --- GRUB default kernel (only when spark_kernel_pin is set) --------------
+
+- name: Kernel — validate spark_kernel_pin matches an installed kernel
+  ansible.builtin.assert:
+    that:
+      - spark_kernel_pin in spark_kernel_installed.stdout_lines
+    fail_msg: >-
+      spark_kernel_pin='{{ spark_kernel_pin }}' is NOT an installed kernel on
+      this host. Installed: {{ spark_kernel_installed.stdout_lines }}. Either
+      `apt install linux-image-{{ spark_kernel_pin }}` first, or correct the
+      version string in inventory.
+  when: spark_kernel_pin | length > 0
+
+- name: Kernel — read root filesystem UUID
+  ansible.builtin.command: findmnt -nrvo UUID /
+  register: spark_kernel_root_uuid
+  changed_when: false
+  check_mode: false
+  when: spark_kernel_pin | length > 0
+
+# DGX OS GRUB IDs are deterministic given (root-fs UUID, kernel version):
+#   submenu:   gnulinux-advanced-<UUID>
+#   menuentry: gnulinux-<KVER>-advanced-<UUID>
+# (recovery entries get '-recovery-' instead of '-advanced-' — we never want those)
+- name: Kernel — construct GRUB menuentry IDs from root UUID + kernel version
+  ansible.builtin.set_fact:
+    spark_kernel_submenu_id: "gnulinux-advanced-{{ spark_kernel_root_uuid.stdout }}"
+    spark_kernel_menuentry_id: "gnulinux-{{ spark_kernel_pin }}-advanced-{{ spark_kernel_root_uuid.stdout }}"
+  when: spark_kernel_pin | length > 0
+
+- name: Kernel — verify constructed menuentry id exists in /boot/grub/grub.cfg
+  ansible.builtin.command:
+    argv: [grep, -F, "{{ spark_kernel_menuentry_id }}", /boot/grub/grub.cfg]
+  register: spark_kernel_grub_grep
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: spark_kernel_pin | length > 0
+
+- name: Kernel — fail clearly if the constructed menuentry id was not found
+  ansible.builtin.assert:
+    that:
+      - spark_kernel_grub_grep.rc == 0
+    fail_msg: |
+      Constructed GRUB menuentry id '{{ spark_kernel_menuentry_id }}' for
+      kernel '{{ spark_kernel_pin }}' (root UUID '{{ spark_kernel_root_uuid.stdout }}')
+      was not found in /boot/grub/grub.cfg. Either the kernel isn't installed
+      with a vmlinuz in /boot, /etc/default/grub was rendered with a different
+      naming scheme, or DGX OS has changed its GRUB conventions. Manual probe:
+        ssh {{ inventory_hostname }} "grep '{{ spark_kernel_pin }}' /boot/grub/grub.cfg"
+  when: spark_kernel_pin | length > 0
+
+- name: Kernel — set GRUB_DEFAULT to the pinned kernel
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_DEFAULT='
+    line: 'GRUB_DEFAULT="{{ spark_kernel_submenu_id }}>{{ spark_kernel_menuentry_id }}"'
+    backup: true
+  notify: update-grub
+  when: spark_kernel_pin | length > 0
+
+# --- GRUB menu visibility (independent of spark_kernel_pin) ---------------
+
+- name: Kernel — GRUB_TIMEOUT_STYLE
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_TIMEOUT_STYLE='
+    line: 'GRUB_TIMEOUT_STYLE={{ "menu" if spark_kernel_show_grub_menu else "hidden" }}'
+  notify: update-grub
+
+- name: Kernel — GRUB_TIMEOUT
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_TIMEOUT='
+    line: 'GRUB_TIMEOUT={{ spark_kernel_grub_menu_timeout if spark_kernel_show_grub_menu else 0 }}'
+  notify: update-grub
+
+# --- apt-mark hold (apply or release) -------------------------------------
+
+- name: Kernel — compute candidate hold packages for the pinned kernel
+  ansible.builtin.set_fact:
+    spark_kernel_candidate_holds: >-
+      {{ spark_kernel_hwe_meta_packages
+         + ((['linux-image-' ~ spark_kernel_pin,
+              'linux-modules-' ~ spark_kernel_pin,
+              'linux-modules-extra-' ~ spark_kernel_pin,
+              'linux-modules-nvidia-580-open-' ~ spark_kernel_pin,
+              'linux-modules-nvidia-fs-' ~ spark_kernel_pin,
+              'linux-headers-' ~ spark_kernel_pin])
+            if (spark_kernel_pin | length > 0) else []) }}
+  when: spark_kernel_apt_hold
+
+- name: Kernel — narrow candidate holds to packages actually installed
+  ansible.builtin.shell: |
+    set -o pipefail
+    for p in {{ spark_kernel_candidate_holds | join(' ') }}; do
+      if dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q '^install ok installed$'; then
+        echo "$p"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: spark_kernel_holdable
+  changed_when: false
+  check_mode: false
+  when: spark_kernel_apt_hold
+
+- name: Kernel — apt-mark hold (kernel + HWE meta)
+  ansible.builtin.command:
+    argv: "{{ ['apt-mark', 'hold'] + spark_kernel_holdable.stdout_lines }}"
+  register: spark_kernel_hold_result
+  changed_when: "'set on hold' in (spark_kernel_hold_result.stdout | default(''))"
+  when:
+    - spark_kernel_apt_hold
+    - spark_kernel_holdable.stdout_lines | length > 0
+
+- name: Kernel — release ALL kernel apt holds (when spark_kernel_apt_hold=false)
+  ansible.builtin.command:
+    argv: >-
+      {{ ['apt-mark', 'unhold']
+         + (spark_kernel_current_holds.stdout_lines
+            | select('match', '^(linux-image|linux-headers|linux-modules)')
+            | list) }}
+  register: spark_kernel_unhold_result
+  changed_when: "'unhold' in (spark_kernel_unhold_result.stdout | default(''))"
+  when:
+    - not spark_kernel_apt_hold
+    - (spark_kernel_current_holds.stdout_lines
+        | select('match', '^(linux-image|linux-headers|linux-modules)')
+        | list | length) > 0
+
+# --- NVIDIA OTA auto-apt-upgrade service ----------------------------------
+
+# nvidia-spark-run-apt-upgrade-once.service is a oneshot service that runs at
+# multi-user.target / gdm.service boot. It's gated by ConditionPathExists=!/var/lib/
+# nvidia-spark-run-apt-upgrade-once/done — so it only re-runs after a NVIDIA dpkg
+# trigger removes that done-file. The main recurring threat is Ubuntu's own
+# apt-daily-upgrade.timer, but `apt-mark hold` (above) blocks that path.
+# Masking this oneshot is belt-and-braces: cheap, reversible, prevents a future
+# NVIDIA package update from re-arming the apt-upgrade chain behind our pin.
+- name: Kernel — query nvidia-spark-run-apt-upgrade-once.service unit existence
+  ansible.builtin.command: systemctl list-unit-files nvidia-spark-run-apt-upgrade-once.service
+  register: spark_kernel_ota_unit
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Kernel — mask + stop nvidia-spark-run-apt-upgrade-once.service
+  ansible.builtin.systemd:
+    name: nvidia-spark-run-apt-upgrade-once.service
+    state: stopped
+    enabled: false
+    masked: true
+  when:
+    - spark_kernel_disable_auto_apt_upgrade
+    - "'nvidia-spark-run-apt-upgrade-once.service' in spark_kernel_ota_unit.stdout"
+
+- name: Kernel — unmask nvidia-spark-run-apt-upgrade-once.service (does NOT start)
+  ansible.builtin.systemd:
+    name: nvidia-spark-run-apt-upgrade-once.service
+    masked: false
+  when:
+    - not spark_kernel_disable_auto_apt_upgrade
+    - "'nvidia-spark-run-apt-upgrade-once.service' in spark_kernel_ota_unit.stdout"
+
+# --- Reboot reminder ------------------------------------------------------
+
+- name: Kernel — warn if running kernel != pinned (reboot required)
+  ansible.builtin.debug:
+    msg: >-
+      ⚠ Pinned kernel = '{{ spark_kernel_pin }}' but running kernel =
+      '{{ spark_kernel_uname.stdout }}'. Reboot to adopt the new GRUB
+      default. Operator path: `just spark-reboot` (graceful cluster-wide
+      reboot — stops containers cleanly first). To suppress this warning
+      without rebooting, set spark_kernel_warn_on_reboot_pending=false.
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_pin != spark_kernel_uname.stdout
+    - spark_kernel_warn_on_reboot_pending | bool

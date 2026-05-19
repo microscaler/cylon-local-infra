@@ -1,5 +1,10 @@
 # Firewall (ufw) for dev host. Default: deny incoming, allow outgoing.
 # Inbound: SSH + listed TCP ports.
+#
+# If firewalld is also installed (common on mixed images), both can attach to
+# Netfilter and cause confusing drops even when UFW rules look correct. When
+# true, this role stops and disables firewalld so UFW is the single manager.
+firewall_disable_firewalld: true
 firewall_default_incoming: deny
 firewall_default_outgoing: allow
 # TCP ports to allow inbound from anywhere (HTTP/HTTPS and dev services)

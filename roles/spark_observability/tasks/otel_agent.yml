@@ -1,0 +1,60 @@
+---
+# otel-collector-contrib in agent mode: scrapes node_exporter, dcgm-exporter,
+# and vLLM /metrics locally, then pushes OTLP gRPC to ms02:4317.
+
+- name: otel-agent — check installed version
+  ansible.builtin.command: "{{ spark_observability_bin_dir }}/otelcol-contrib --version"
+  register: spark_obs_otel_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: otel-agent — download tarball
+  ansible.builtin.get_url:
+    url: "{{ spark_observability_otel_agent_url }}"
+    dest: "/tmp/otelcol-contrib-{{ spark_observability_otel_agent_version }}.tar.gz"
+    checksum: "sha256:{{ spark_observability_otel_agent_sha256 }}"
+    mode: "0644"
+    timeout: 180
+  check_mode: false
+  when: spark_observability_otel_agent_version not in (spark_obs_otel_version.stdout | default(''))
+
+- name: otel-agent — extract binary
+  ansible.builtin.unarchive:
+    src: "/tmp/otelcol-contrib-{{ spark_observability_otel_agent_version }}.tar.gz"
+    dest: "{{ spark_observability_bin_dir }}"
+    remote_src: true
+    extra_opts:
+      - --wildcards
+      - "otelcol-contrib"
+    owner: root
+    group: root
+    mode: "0755"
+  when: spark_observability_otel_agent_version not in (spark_obs_otel_version.stdout | default(''))
+  notify: restart otel-agent
+
+- name: otel-agent — config
+  ansible.builtin.template:
+    src: otel-agent.config.yaml.j2
+    dest: "{{ spark_observability_config_dir }}/otel-agent.config.yaml"
+    owner: "{{ spark_observability_otel_agent_user }}"
+    group: "{{ spark_observability_otel_agent_user }}"
+    mode: "0640"
+  notify: restart otel-agent
+
+- name: otel-agent — systemd unit
+  ansible.builtin.template:
+    src: otel-agent.service.j2
+    dest: /etc/systemd/system/otel-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart otel-agent
+
+- name: otel-agent — enable + start
+  ansible.builtin.systemd:
+    name: otel-agent.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode

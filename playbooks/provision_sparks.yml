@@ -8,6 +8,7 @@
 #   ansible-playbook playbooks/provision_sparks.yml --tags apt
 #   ansible-playbook playbooks/provision_sparks.yml --skip-tags vllm_test
 #   ansible-playbook playbooks/provision_sparks.yml --tags vllm_ngc_stack  # NGC Docker Ray + vLLM only (see sparks.yml toggles)
+#   ansible-playbook playbooks/provision_sparks.yml --tags hosts          # /etc/hosts QSFP aliases only
 #
 # Optional — NCCL build, SSH keys, all_gather test (multi-play, not merged):
 #   ansible-playbook playbooks/nccl_sparks.yml

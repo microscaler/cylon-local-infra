@@ -1,0 +1,51 @@
+---
+# Install node_exporter as a systemd unit, binding to 127.0.0.1:9100 only.
+
+- name: node_exporter — check installed version
+  ansible.builtin.command: "{{ spark_observability_bin_dir }}/node_exporter --version"
+  register: spark_obs_ne_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: node_exporter — download tarball (when version mismatch / not installed)
+  ansible.builtin.get_url:
+    url: "{{ spark_observability_node_exporter_url }}"
+    dest: "/tmp/node_exporter-{{ spark_observability_node_exporter_version }}.tar.gz"
+    checksum: "sha256:{{ spark_observability_node_exporter_sha256 }}"
+    mode: "0644"
+    timeout: 120
+  check_mode: false   # actually download even in --check so the unarchive below has a source
+  when: spark_observability_node_exporter_version not in (spark_obs_ne_version.stdout | default(''))
+
+- name: node_exporter — extract binary into /usr/local/bin
+  ansible.builtin.unarchive:
+    src: "/tmp/node_exporter-{{ spark_observability_node_exporter_version }}.tar.gz"
+    dest: "{{ spark_observability_bin_dir }}"
+    remote_src: true
+    extra_opts:
+      - --strip-components=1
+      - --wildcards
+      - "*/node_exporter"
+    owner: root
+    group: root
+    mode: "0755"
+  when: spark_observability_node_exporter_version not in (spark_obs_ne_version.stdout | default(''))
+  notify: restart node_exporter
+
+- name: node_exporter — systemd unit
+  ansible.builtin.template:
+    src: node_exporter.service.j2
+    dest: /etc/systemd/system/node_exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart node_exporter
+
+- name: node_exporter — enable + start
+  ansible.builtin.systemd:
+    name: node_exporter.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode    # unit file doesn't exist on disk in --check; skip the start probe

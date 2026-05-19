@@ -24,8 +24,25 @@ vllm_stacked_container_ray_worker_name: "vllm-ngc-ray-worker-{{ inventory_hostna
 vllm_stacked_container_api_port: 8000
 vllm_stacked_container_api_host: "0.0.0.0"
 
+# Ray dashboard bind on the head node. Default is `localhost` upstream — too
+# restrictive when we want to view the dashboard from operator hosts on the
+# home LAN. 0.0.0.0 binds on every interface (including the host LAN), so
+# `http://<spark-leader-lan-ip>:8265` works from any 192.168.1.0/24 host.
+# Lock down with the firewall (`firewall_trusted_lan_cidr`) — port 8265 is
+# allow-listed only for the trusted LAN, not the world.
+vllm_stacked_container_dashboard_host: "0.0.0.0"
+vllm_stacked_container_dashboard_port: 8265
+
 # Recreate Ray containers when true (image/env change rollout).
 vllm_stacked_container_recreate: false
+
+# Recreate hygiene — GPU KV cache does not survive crashes (see README); these knobs
+# clear host-side leftovers that confuse recovery / memory probes after `docker rm`.
+# Disable with `-e vllm_stacked_container_drop_caches_before_recreate=false` if undesired.
+vllm_stacked_container_drop_caches_before_recreate: true
+# Optional: purge Ray session/socket dir on host (`docker rm` does not delete /tmp/ray).
+vllm_stacked_container_clear_ray_tmp_before_recreate: false
+vllm_stacked_container_ray_tmp_dir: /tmp/ray
 
 # Stop/disable bare-metal systemd units (ray-head, ray-worker, vllm-stacked, vllm) before starting Docker Ray.
 vllm_stacked_container_stop_bare_metal_systemd: true
@@ -37,6 +54,11 @@ vllm_stacked_container_pull_image: true
 vllm_stacked_container_start_api: true
 # Seconds to wait after worker container before API start (Ray worker join).
 vllm_stacked_container_ray_join_delay_sec: 15
+
+# vLLM Ray executor copies NCCL_* from the driver (leader) into remote workers —
+# that overwrites follower-specific NCCL_IB_GID_INDEX from `--env-file`.
+# Mount ray_non_carry_over_env_vars.json so workers keep per-host GID indices.
+vllm_stacked_container_ray_nccl_gid_carryover_exclude: true
 
 # --- RDMA (RoCE v2) device passthrough ---
 # When true, Ray head/worker containers get access to the Mellanox verbs

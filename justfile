@@ -1,102 +1,42 @@
 # cylon-local-infra — operator command surface
 #
-# Primary use today: `dev-tunnel-*` recipes to keep an SSH tunnel open between
-# this Mac and ms02 while the Starlink router filters LAN traffic on the ports
-# our dev stack needs. Retires when the USB 2.5GbE adapter arrives.
+# ms02 dev access is **direct LAN**: Hermes, Tilt, NFSv4, kind API (e.g. :38839),
+# observability UIs, etc. `inventory/host_vars/ms02.yml` opens the needed TCP
+# ports to `192.168.1.0/24` — no SSH LocalForward / SOCKS tunnel in this repo.
 #
 # See:
 #   - docs/dev_hosts.md
-#   - ~/.ssh/config.d/ms02-dev-tunnel
-#   - llmwiki/concepts/starlink-wifi-lan-port-filter.md
+#   - llmwiki/concepts/starlink-wifi-lan-port-filter.md (historical)
+#   - DGX Spark vLLM: `just spark-vllm-*` (Ansible inventory must resolve nvidia1/nvidia2)
+#   - HF model prefetch (leader): `just spark-hf-prefetch-provision`
 
 set shell := ["bash", "-uc"]
 
-# SSH alias defined in ~/.ssh/config.d/ms02-dev-tunnel
-tunnel_host := "ms02-dev-tunnel"
-# ControlMaster socket — matches the ControlPath in the SSH config stanza.
-# Prefixed `tunnel-` to keep it distinct from the plain `Host ms02` alias used
-# by Cursor Remote-SSH, so `dev-tunnel-down` doesn't kill the editor session.
-# %h in the ControlPath expands to the HostName from the SSH config (the IP
-# 192.168.1.189), not the alias — that's deliberate: aliases move, IPs mostly
-# don't.
-tunnel_sock := env_var("HOME") + "/.ssh/cm/tunnel-casibbald@192.168.1.189:22"
-# Where `ssh -f` writes the "connection established" confirmation.
-tunnel_log  := "/tmp/ms02-dev-tunnel.log"
+# ms02 on the home LAN (matches `Host ms02` in ~/.ssh/config when HostName is this IP).
+ms02_lan_ip := "192.168.1.189"
+# NFS lands on ~/Workspace/remote (root:wheel stub from mac_workstation --tags dirs).
+nfs_mac_real_mount := env_var("HOME") + "/Workspace/remote"
+# Ephemeral mount for `just nfs-troubleshoot` (outside $HOME, root:wheel).
+nfs_mac_probe_mount := "/private/tmp/cylon-nfs-ms02-probe"
 
 default:
     @just --list
 
-# ── Tunnel lifecycle ────────────────────────────────────────────────────────
+# ── ms02 LAN reachability (HTTP probes; no SSH tunnel) ─────────────────────
 
-# Start the SSH tunnel in the background (idempotent).
-dev-tunnel-up:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ssh -O check {{tunnel_host}} 2>/dev/null; then
-        echo "✓ tunnel already up ({{tunnel_host}})"
-        exit 0
-    fi
-    : > {{tunnel_log}}
-    # -N = no remote command; -f = background after auth; ExitOnForwardFailure
-    # aborts if any port is already bound locally.
-    ssh -N -f {{tunnel_host}} 2>>{{tunnel_log}}
-    sleep 1
-    ssh -O check {{tunnel_host}}
-    echo
-    echo "Tilt UI:     http://localhost:10348/"
-    echo "Grafana:     http://localhost:3000/"
-    echo "Prometheus:  http://localhost:9090/"
-    echo "Jaeger:      http://localhost:16686/"
-    echo "MinIO:       http://localhost:9001/   (s3 on :9000)"
-    echo "kube-apiserver:  https://localhost:38839   (matches ms02 kubeconfig verbatim)"
-    echo "SOCKS5:      127.0.0.1:1080   (catch-all for un-mapped ports)"
-
-# Stop the SSH tunnel + remove the ControlMaster socket.
-dev-tunnel-down:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ssh -O check {{tunnel_host}} 2>/dev/null; then
-        ssh -O exit {{tunnel_host}} 2>&1 || true
-        echo "✓ tunnel stopped"
-    else
-        echo "tunnel was not running"
-    fi
-    rm -f "{{tunnel_sock}}"
-
-# Show whether the ControlMaster is up + list all forwarded ports that are
-# actually bound on the Mac right now.
-dev-tunnel-status:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ssh -O check {{tunnel_host}} 2>/dev/null; then
-        echo "✓ tunnel UP  (socket: {{tunnel_sock}})"
-    else
-        echo "✗ tunnel DOWN"
-        exit 1
-    fi
-    echo
-    echo "Listening ports on the Mac (from the tunnel):"
-    lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
-        | awk '$1 == "ssh" {print "  " $9}' \
-        | sort -u
-
-# Probe every forwarded UI/API port. Prints one line per port with HTTP code.
-# Green (2xx/3xx) = reachable; '000' = tunnel up but backend not listening yet
-# (e.g. Tilt still pulling images, Grafana not rolled out).
-dev-tunnel-check:
+# HTTP-probe common ms02 services on the LAN. Green (2xx/3xx) = reachable; '000' = blocked or down.
+ms02-lan-check:
     #!/usr/bin/env bash
     set -u
-    if ! ssh -O check {{tunnel_host}} 2>/dev/null; then
-        echo "tunnel is DOWN — run 'just dev-tunnel-up' first" >&2
-        exit 1
-    fi
+    B="{{ms02_lan_ip}}"
     probe() {
         local port="$1" label="$2" code
-        code=$(curl -s -o /dev/null -w "%{http_code}" -m 3 "http://localhost:${port}/" 2>/dev/null || true)
+        code=$(curl -s -o /dev/null -w "%{http_code}" -m 3 "http://${B}:${port}/" 2>/dev/null || true)
         [[ -z "$code" ]] && code="000"
-        printf "  %-5s  %-24s  http=%s\n" "$port" "$label" "$code"
+        printf "  %-5s  %-24s  http=%s  (http://${B}:${port}/)\n" "$port" "$label" "$code"
     }
-    echo "Probing dev-stack UIs via tunnel (3s timeout each):"
+    echo "Probing ms02 on LAN (${B}, 3s timeout each):"
+    probe 9119  "Hermes Web UI"
     probe 10348 "Tilt UI"
     probe 3000  "Grafana"
     probe 9090  "Prometheus"
@@ -107,19 +47,9 @@ dev-tunnel-check:
     probe 8080  "BRRTRouter"
     probe 8000  "Gateway (PW API)"
     probe 5001  "Docker registry"
-
-# Tail whatever ssh has emitted (connection errors, keepalive drops, etc).
-dev-tunnel-logs:
-    @tail -f {{tunnel_log}}
-
-# Quick sanity: show the SSH alias's effective config (--host, keepalives,
-# forwards) that ssh -G would use. Handy when debugging "why isn't port X
-# forwarded?".
-dev-tunnel-config:
-    @ssh -G {{tunnel_host}} 2>/dev/null | grep -E "^(hostname|user|port|controlmaster|controlpath|serveraliveinterval|exitonforwardfailure|localforward|dynamicforward) " | sort
-
-# Restart: down then up. Use after adding/removing forwards in the SSH config.
-dev-tunnel-restart: dev-tunnel-down dev-tunnel-up
+    echo
+    echo "Kubernetes API (kind host map; use this URL in kubeconfig server:): https://${B}:38839/"
+    echo "See docs/dev_hosts.md if your config still points at https://127.0.0.1:38839."
 
 # ── Workspace sync (thin wrapper for the ansible playbook) ──────────────────
 
@@ -160,7 +90,7 @@ sync-path-to-ms02 path:
 
 # ── NFSv4 mount at ~/Workspace/remote ───────────────────────────────────────
 #
-# Mounts ms02:/home/casibbald/Workspace at ~/Workspace/remote on the Mac.
+# Mounts ms02:/home/casibbald/Workspace at ~/Workspace/remote (Ansible: root:wheel stub).
 # Superseded SSHFS at the same path on 2026-04-20.
 #
 # Layout the operator lives in:
@@ -173,51 +103,55 @@ sync-path-to-ms02 path:
 # files that are built/run on ms02 via Cursor Remote-SSH or `just ms02-*`
 # helpers. Don't build against the mount — run builds on ms02.
 #
-# Pre-wired-LAN phase: NFS traffic rides the SSH ControlMaster tunnel via
-# `LocalForward 2049` — see ~/.ssh/config.d/ms02-dev-tunnel. So `nfs-up`
-# requires `just dev-tunnel-up` first. Once the USB 2.5GbE adapter lands
-# and Starlink Wi-Fi↔LAN filtering is out of the way, the source can flip
-# from `127.0.0.1:...` to `ms02:...` with no other client-side change
-# (server export already covers both 127.0.0.1/32 and 192.168.1.0/24).
+# NFSv4 is mounted **directly** to ms02 on the LAN (`{{ms02_lan_ip}}:2049`).
+# Keep `playbooks/nfs_server.yml` applied so exports + `insecure` match macOS.
 #
 # Server-side prerequisite: `ansible-playbook playbooks/nfs_server.yml -l ms02`
 # Mac-side prerequisite:    `ansible-playbook playbooks/mac_workstation.yml --ask-become-pass`
 #
 # See: llmwiki/concepts/workspace-mount-protocols.md
 
-# Mount NFSv4 at ~/Workspace/remote over the SSH LocalForward:2049 tunnel.
+# Mount NFSv4 at ~/Workspace/remote (real_pt = nfs_mac_real_mount).
 nfs-up:
     #!/usr/bin/env bash
     set -euo pipefail
-    mount_pt="$HOME/Workspace/remote"
+    real_pt="{{nfs_mac_real_mount}}"
     # Source matches the export on ms02 (see inventory/host_vars/ms02.yml).
-    # Using 127.0.0.1 so the SSH LocalForward:2049 tunnel carries the traffic.
-    source="127.0.0.1:/home/casibbald/Workspace"
-    if mount | grep -q "on $mount_pt "; then
-        echo "✓ already mounted at $mount_pt"
+    ms02_ip="{{ms02_lan_ip}}"
+    source="${ms02_ip}:/home/casibbald/Workspace"
+    if mount | grep -q "on $real_pt "; then
+        echo "✓ already mounted at $real_pt"
         exit 0
     fi
-    if [ ! -d "$mount_pt" ]; then
-        echo "✗ $mount_pt does not exist — run:  just mac-provision"
+    if [[ -L "$real_pt" ]]; then
+        echo "✗ $real_pt is still a symlink (old Shared layout). Run:"
+        echo "  just nfs-down && ansible-playbook playbooks/mac_workstation.yml --tags dirs --ask-become-pass"
         exit 1
     fi
-    # Tunnel check: NFS needs port 2049 on loopback, which the ControlMaster
-    # tunnel provides via LocalForward. If the forward isn't up, fail loudly
-    # rather than produce an opaque NFS timeout.
-    if ! nc -z -G 2 127.0.0.1 2049 >/dev/null 2>&1; then
-        echo "✗ 127.0.0.1:2049 not reachable — SSH LocalForward:2049 is down"
-        echo "  Run:  just dev-tunnel-up"
-        echo "  And confirm ~/.ssh/config.d/ms02-dev-tunnel has 'LocalForward 2049 localhost:2049'"
+    if [ ! -d "$real_pt" ]; then
+        echo "✗ $real_pt does not exist — run:  ansible-playbook playbooks/mac_workstation.yml --tags dirs --ask-become-pass"
+        exit 1
+    fi
+    if ! nc -z -G 2 "$ms02_ip" 2049 >/dev/null 2>&1; then
+        echo "✗ ${ms02_ip}:2049 not reachable — is nfs-kernel-server up on ms02?"
+        echo "  Server: ansible-playbook playbooks/nfs_server.yml -l ms02"
+        echo "  Client firewall on ms02 must allow 2049/tcp from 192.168.1.0/24 (host_vars/ms02.yml)."
+        exit 1
+    fi
+    # Mount stub must be root:wheel (see mac_workstation role).
+    mp_og=$(stat -f '%Su:%Sg' "$real_pt" 2>/dev/null || echo '')
+    if [[ "$mp_og" != "root:wheel" ]]; then
+        echo "✗ $real_pt must be root:wheel (got ${mp_og:-missing})"
+        echo "  ansible-playbook playbooks/mac_workstation.yml --tags dirs --ask-become-pass"
+        echo "  see:  just nfs-doctor"
         exit 1
     fi
     # NFSv4 client options (macOS mount_nfs):
     #   vers=4                 — force v4 (no v3 fallback to portmapper/mountd)
     #   rsize/wsize=1048576    — 1 MiB; NFSv4 negotiates down if server caps
     #   hard                   — block on server down rather than fail I/O with EIO
-    #   noresvport             — use an unprivileged source port; the SSH
-    #                            LocalForward rewrites it anyway, and the
-    #                            127.0.0.1/32 export has `insecure` to accept
-    #                            non-privileged source ports
+    #   noresvport             — macOS default; server export needs `insecure`
+    #                            for LAN clients (see host_vars/ms02.yml)
     #   nfc                    — normalize filenames to NFC (Unicode) so
     #                            Mac-created names don't break on ext4
     # Deliberately NOT set (the "why" matters for future-us):
@@ -229,50 +163,230 @@ nfs-up:
     #   bg                     — backgrounding on EINVAL leaves zombie retries
     #                            fighting with new mount attempts; fail-fast
     #                            is much easier to debug
-    echo "mounting $source → $mount_pt (via SSH LocalForward:2049)"
+    # macOS 15+ may stamp stub files with com.apple.provenance; some Tahoe builds
+    # have been finicky about mounting over xattr-heavy trees — clear before mount.
+    sudo xattr -cr "$real_pt" 2>/dev/null || true
+    echo "mounting $source → $real_pt (NFSv4, trying noresvport first)"
+    set +e
     sudo mount_nfs \
         -o vers=4,rsize=1048576,wsize=1048576,hard,noresvport,nfc \
-        "$source" "$mount_pt"
-    echo "✓ mounted $mount_pt"
+        "$source" "$real_pt"
+    mount_rc=$?
+    set -e
+    if [[ "$mount_rc" -ne 0 ]]; then
+        echo
+        echo "noresvport failed (exit $mount_rc) — retrying with resvport (common on some macOS builds)..."
+        set +e
+        sudo mount_nfs \
+            -o vers=4,rsize=1048576,wsize=1048576,hard,resvport,nfc \
+            "$source" "$real_pt"
+        mount_rc=$?
+        set -e
+    fi
+    if [[ "$mount_rc" -ne 0 ]]; then
+        echo
+        echo "✗ mount_nfs failed (exit $mount_rc). If you see 'Operation not permitted' on macOS:"
+        echo "  1. System Settings → Privacy & Security → Full Disk Access → enable the app"
+        echo "     that runs this shell (Terminal.app, iTerm, or Cursor — restart the app after)."
+        echo "  2. Probe options + /private/tmp mount:  just nfs-troubleshoot"
+        echo "  Server export: 'insecure' for noresvport clients (inventory/host_vars/ms02.yml)."
+        echo "  Manual resvport only:  just nfs-up-resvport"
+        exit "$mount_rc"
+    fi
+    echo "✓ mounted $real_pt"
     echo "inspect:  just nfs-status"
+
+# Quick client-side checks when `just nfs-up` fails (EPERM, etc.).
+nfs-doctor:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    real_pt="{{nfs_mac_real_mount}}"
+    ms02_ip="{{ms02_lan_ip}}"
+    echo "NFS client diagnostics"
+    echo "  mount stub:   $real_pt"
+    if [[ -L "$real_pt" ]]; then
+        echo "  layout:       symlink → $(readlink "$real_pt") (run dirs tag after nfs-down to remove old layout)"
+    elif [[ -d "$real_pt" ]]; then
+        echo "  layout:       directory (expected)"
+    elif [[ -e "$real_pt" ]]; then
+        echo "  layout:       exists but is not a directory — fix manually"
+    else
+        echo "  layout:       missing — run mac_workstation --tags dirs"
+    fi
+    if [[ -e "$real_pt" ]]; then
+        stat -f "  owner:group  %Su:%Sg  (expect root:wheel)" "$real_pt"
+        stat -f "  mode         %OLp" "$real_pt"
+    else
+        echo "  ✗ $real_pt missing (mac_workstation has not created it on this Mac yet)"
+    fi
+    echo "  ${ms02_ip}:2049  $(nc -z -G 2 "$ms02_ip" 2049 >/dev/null && echo reachable || echo not reachable)"
+    if command -v sudo >/dev/null; then
+        if sudo -n true 2>/dev/null; then
+            echo "  sudo:         non-interactive ok (cached NOPASSWD or similar)"
+        else
+            echo "  sudo:         may prompt (normal if NOPASSWD not installed yet)"
+        fi
+    fi
+    echo
+    if [[ ! -d "$real_pt" ]] || [[ -L "$real_pt" ]]; then
+        echo "── Next step ─────────────────────────────────────────────────────────"
+        echo "  just nfs-down   # if a stale /Users/Shared/... mount exists"
+        echo "  ansible-playbook playbooks/mac_workstation.yml --tags dirs --ask-become-pass"
+        echo "  just nfs-up"
+        echo
+    fi
+    echo "If mount_nfs still says Operation not permitted:  just nfs-troubleshoot"
+    echo "  macOS: System Settings → Privacy & Security → Full Disk Access → enable for your terminal app."
+
+# Deep NFS client diagnostics: probe mount with noresvport vs resvport vs mount(8).
+# Run on picolino when `just nfs-up` returns EPERM. Does not modify the real mount path
+# except create/remove the probe directory under /private/tmp.
+nfs-troubleshoot:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    real_pt="{{nfs_mac_real_mount}}"
+    probe="{{nfs_mac_probe_mount}}"
+    ms02_ip="{{ms02_lan_ip}}"
+    source="${ms02_ip}:/home/casibbald/Workspace"
+    echo "=== macOS ==="
+    sw_vers 2>/dev/null || true
+    uname -a
+    echo
+    echo "=== Layout (mount stub: $real_pt) ==="
+    just nfs-doctor || true
+    echo
+    echo "=== Mount point xattrs (real path) ==="
+    if [[ -e "$real_pt" ]]; then
+        ls -le@ "$real_pt" 2>/dev/null | head -8 || true
+        echo "  (xattr -l on README if present:)"
+        xattr -l "$real_pt/README.md" 2>/dev/null | head -5 || true
+    fi
+    echo
+    echo "=== Prepare probe dir: $probe ==="
+    if mount | grep -q "on $probe "; then
+        echo "unmounting stale probe..."
+        sudo umount "$probe" 2>/dev/null || true
+    fi
+    sudo mkdir -p "$probe"
+    sudo chown root:wheel "$probe"
+    sudo chmod 755 "$probe"
+    sudo xattr -cr "$probe" 2>/dev/null || true
+    try_mount() {
+        local label="$1" rc
+        shift
+        echo
+        echo "── $label ──"
+        "$@"
+        rc=$?
+        if [[ "$rc" -eq 0 ]]; then
+            echo "  ✓ mount ok"
+            ls "$probe" 2>/dev/null | head -8 || true
+            sudo umount "$probe" 2>/dev/null || diskutil unmount force "$probe" 2>/dev/null || true
+            return 0
+        fi
+        echo "  ✗ mount failed (exit $rc)"
+        sudo umount "$probe" 2>/dev/null || true
+        return 1
+    }
+    ok=0
+    set +e
+    try_mount "A: mount_nfs noresvport+nfc (matches just nfs-up)" \
+        sudo mount_nfs -o vers=4,rsize=1048576,wsize=1048576,hard,noresvport,nfc "$source" "$probe" \
+        && ok=1
+    try_mount "B: mount_nfs resvport+nfc (nixCraft-style client port)" \
+        sudo mount_nfs -o vers=4,rsize=1048576,wsize=1048576,hard,resvport,nfc "$source" "$probe" \
+        && ok=1
+    try_mount "C: mount_nfs minimal (vers=4,hard only)" \
+        sudo mount_nfs -o vers=4,hard "$source" "$probe" \
+        && ok=1
+    try_mount "D: mount -t nfs noresvport (alternate front-end)" \
+        sudo mount -t nfs -o vers=4,rsize=1048576,wsize=1048576,hard,noresvport,nfc "$source" "$probe" \
+        && ok=1
+    set -e
+    while mount | grep -q "on $probe "; do
+        sudo umount "$probe" 2>/dev/null || diskutil unmount force "$probe" 2>/dev/null || break
+    done
+    echo
+    echo "=== Interpretation ==="
+    if [[ "$ok" -eq 1 ]]; then
+        echo "At least one probe mount succeeded. If only B worked, try:  just nfs-up-resvport"
+        echo "If A works here but not on $real_pt, compare xattrs/quarantine on both paths."
+    else
+        echo "All probe mounts failed — likely macOS policy (Full Disk Access for Terminal),"
+        echo "or server/export/firewall (on ms02: sudo exportfs -v; ss -lntp | grep 2049)."
+    fi
+    echo "Server check (run on ms02):  sudo exportfs -v | grep -F Workspace"
+
+# Same as nfs-up but use resvport instead of noresvport (try when nixCraft EPERM workaround applies).
+nfs-up-resvport:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    real_pt="{{nfs_mac_real_mount}}"
+    ms02_ip="{{ms02_lan_ip}}"
+    source="${ms02_ip}:/home/casibbald/Workspace"
+    if mount | grep -q "on $real_pt "; then
+        echo "✓ already mounted at $real_pt"
+        exit 0
+    fi
+    [[ -L "$real_pt" ]] && { echo "✗ $real_pt is a symlink — run dirs tag after nfs-down"; exit 1; }
+    [[ -d "$real_pt" ]] || { echo "✗ missing $real_pt"; exit 1; }
+    nc -z -G 2 "$ms02_ip" 2049 >/dev/null || { echo "✗ ${ms02_ip}:2049 closed"; exit 1; }
+    [[ "$(stat -f '%Su:%Sg' "$real_pt")" == "root:wheel" ]] || { echo "✗ $real_pt not root:wheel"; exit 1; }
+    sudo xattr -cr "$real_pt" 2>/dev/null || true
+    echo "mounting $source → $real_pt (resvport — if this works, prefer over noresvport on this Mac)"
+    set +e
+    sudo mount_nfs -o vers=4,rsize=1048576,wsize=1048576,hard,resvport,nfc "$source" "$real_pt"
+    mount_rc=$?
+    set -e
+    if [[ "$mount_rc" -ne 0 ]]; then
+        echo
+        echo "✗ mount_nfs failed (exit $mount_rc). Same fixes as 'just nfs-up' (Full Disk Access for this terminal app, then retry)."
+        echo "  just nfs-troubleshoot"
+        exit "$mount_rc"
+    fi
+    echo "✓ mounted"
 
 # Unmount the NFS share.
 nfs-down:
     #!/usr/bin/env bash
     set -euo pipefail
-    mount_pt="$HOME/Workspace/remote"
+    real_pt="{{nfs_mac_real_mount}}"
+    legacy_shared="/Users/Shared/cylon-ms02-workspace"
+    probe_pt="{{nfs_mac_probe_mount}}"
     # Loop umount to clean up any stacked mounts (can happen if an earlier
     # mount attempt used `bg` and retried in the background while we
     # re-issued the mount command manually).
-    while mount | grep -q "on $mount_pt "; do
-        sudo umount "$mount_pt" 2>/dev/null || diskutil unmount force "$mount_pt"
+    for mount_pt in "$real_pt" "$legacy_shared" "$probe_pt"; do
+        while mount | grep -q "on $mount_pt "; do
+            sudo umount "$mount_pt" 2>/dev/null || diskutil unmount force "$mount_pt"
+        done
     done
-    echo "✓ unmounted $mount_pt"
+    echo "✓ unmounted (checked $real_pt, $legacy_shared, $probe_pt)"
 
 # Show mount status + quick readability check.
 nfs-status:
     #!/usr/bin/env bash
     set -u
-    mount_pt="$HOME/Workspace/remote"
-    if ! mount | grep -q "on $mount_pt "; then
-        echo "✗ NOT mounted"
+    real_pt="{{nfs_mac_real_mount}}"
+    if ! mount | grep -q "on $real_pt "; then
+        echo "✗ NOT mounted at $real_pt"
         exit 1
     fi
     # Count mount entries — should be 1. >1 means a stacked mount (fix via nfs-reconnect).
-    count=$(mount | grep -c "on $mount_pt ")
+    count=$(mount | grep -c "on $real_pt ")
     if [ "$count" -gt 1 ]; then
-        echo "⚠ $count mounts stacked at $mount_pt — run:  just nfs-reconnect"
+        echo "⚠ $count mounts stacked at $real_pt — run:  just nfs-reconnect"
     else
-        echo "✓ mounted $mount_pt"
+        echo "✓ mounted $real_pt"
     fi
-    mount | grep "on $mount_pt " | sed 's/^/   /'
+    mount | grep "on $real_pt " | sed 's/^/   /'
     echo
     echo "Top-level entries (first 15):"
-    ls "$mount_pt" 2>/dev/null | head -15
+    ls "$real_pt" 2>/dev/null | head -15
 
 # NFS metadata throughput smoke test. Run after mounting to confirm the mount
-# is reasonable (dir walk should complete in seconds over SSH-tunneled NFS,
-# minutes would indicate a problem — check `just dev-tunnel-status` first).
+# is reasonable (dir walk should complete in seconds on LAN NFS;
+# minutes would indicate a problem — check `mount` + `just nfs-status`).
 #
 # Deliberately NOT `set -o pipefail`: the `find | head -N` pipeline closes
 # early (head exits at N lines), which sends SIGPIPE upstream to find and
@@ -281,23 +395,23 @@ nfs-status:
 nfs-bench:
     #!/usr/bin/env bash
     set -u
-    nfs_mount="$HOME/Workspace/remote"
-    if ! mount | grep -q "on $nfs_mount "; then
-        echo "✗ $nfs_mount is not mounted — run 'just nfs-up' first"
+    real_pt="{{nfs_mac_real_mount}}"
+    if ! mount | grep -q "on $real_pt "; then
+        echo "✗ $real_pt is not mounted — run 'just nfs-up' first"
         exit 1
     fi
     echo "=== dir walk (depth 3) ==="
-    time (find "$nfs_mount" -maxdepth 3 -type d 2>/dev/null | wc -l)
+    time (find "$real_pt" -maxdepth 3 -type d 2>/dev/null | wc -l)
     echo
     # Collect filenames first, THEN stat — decouples metadata collection
     # from head-driven pipe closure so the timing reflects only the stat
     # phase (no SIGPIPE noise in the exit code).
     echo "=== stat storm (first 500 regular files) ==="
-    files=$(find "$nfs_mount" -type f 2>/dev/null | head -500 || true)
+    files=$(find "$real_pt" -type f 2>/dev/null | head -500 || true)
     time (echo "$files" | xargs stat -f "%N" >/dev/null 2>&1)
     echo
     echo "=== sequential read (largest file in root, capped at 64 MiB) ==="
-    target=$(find "$nfs_mount" -maxdepth 2 -type f -size +1M 2>/dev/null | head -1 || true)
+    target=$(find "$real_pt" -maxdepth 2 -type f -size +1M 2>/dev/null | head -1 || true)
     if [ -n "$target" ]; then
         echo "reading: $target"
         time dd if="$target" of=/dev/null bs=1m count=64 2>&1 | tail -2
@@ -442,3 +556,498 @@ ms02-shell:
 #   just ms02 'cd ~/Workspace/microscaler/shared-kind-cluster && tilt up'
 ms02 +cmd:
     ssh -t ms02 '{{cmd}}'
+
+# ── DGX Spark — vLLM + Ray (stacked NGC containers) ───────────────────────
+#
+# Canonical implementation: Ansible role `vllm_stacked_container` via
+# `playbooks/provision_sparks.yml`. These recipes are thin wrappers so you
+# don't have to remember tags/paths.
+#
+# Prereqs:
+#   - This repo is the Ansible controller cwd (recipes `cd` to the justfile dir).
+#   - SSH host aliases `nvidia1` / `nvidia2` work from this Mac (~/.ssh/config).
+#   - QSFP interconnect is up (see inventory `nccl_interface` / host_vars).
+#
+# Leader OpenAI API on LAN (override if your leader IP differs):
+#   export SPARK_VLLM_API=http://192.168.1.104:8000
+
+spark-vllm-api := env_var_or_default('SPARK_VLLM_API', 'http://192.168.1.104:8000')
+
+# Python probe + local triggers (sync/switchover): see scripts/spark_model_status.py help
+#   just spark-model-status
+#   just spark-model-status --json
+#   just spark-model-status ansible-prefetch
+#   just spark-model-status prefetch-once --ssh-host nvidia1
+#   just spark-model-status ansible-vllm --recreate
+#   just spark-model-cutover --recreate
+#   just spark-stack-observe
+spark-model-status *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    python3 scripts/spark_model_status.py "$@"
+
+# Full local workflow: refresh_hf_prefetch.yml → hf_prefetch --once on leader → vllm_ngc_stack.
+# Edit inventory/group_vars/sparks.yml first (hf_prefetch_models, vllm_default_model).
+spark-model-cutover *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    python3 scripts/spark_model_status.py cutover "$@"
+
+# Patch Hermes agent .env on ms02 (inventory hermes_* vars). See playbooks/sync_hermes_ms02.yml.
+spark-hermes-sync *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    python3 scripts/spark_model_status.py sync-hermes "$@"
+
+# SSH to leader: docker, ports, ray status, vllm-serve.log, /v1/models, /metrics (see docs/provision_sparks.md).
+spark-stack-observe *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    python3 scripts/spark_model_status.py observe "$@"
+
+spark-model-status-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}/scripts'
+    python3 -m unittest test_spark_model_status.py -v
+
+# Render `/etc/hf-prefetch/config.yaml` on the leader from `hf_prefetch_models`
+# in `inventory/group_vars/sparks.yml` and reload the daemon (starts downloads
+# for any new IDs on the next reconcile).
+spark-hf-prefetch-provision:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks --tags hf_prefetch
+
+# Apply / refresh the NGC Ray head + worker + `vllm serve` stack (idempotent).
+spark-vllm-provision:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack
+
+# Same as spark-vllm-provision but forces container recreate (image/env rollout).
+spark-vllm-provision-recreate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    # Recreate tears down Ray+vLLM containers; role also drops Linux page caches on each Spark by default
+    # (vllm_stacked_container_drop_caches_before_recreate=true). GPU KV blocks never persist across crashes —
+    # see roles/vllm_stacked_container/README.md. Optional Ray tmp purge:
+    #   -e vllm_stacked_container_clear_ray_tmp_before_recreate=true
+    ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack \
+        -e vllm_stacked_container_recreate=true
+
+# Leader `/v1/models` via Ansible SSH (Mac does not need to be on the Sparks' LAN).
+spark-vllm-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    echo "=== curl http://127.0.0.1:8000/v1/models inside leader container host ==="
+    ansible nvidia1 -m shell -a \
+      'curl -fsS --max-time 15 http://127.0.0.1:8000/v1/models | head -c 2000'
+
+# Quick probe from *this machine* to the leader LAN IP (handy when your laptop
+# is on the same Ethernet/Wi-Fi as the Sparks). Uses SPARK_VLLM_API.
+spark-vllm-lan-probe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base='{{ spark-vllm-api }}'
+    echo "GET ${base%/}/v1/models"
+    curl -fsS --max-time 15 "${base%/}/v1/models" | head -c 2000
+    echo
+
+# Print + open the Ray dashboard URL (LAN). Default is nvidia1:8265; override
+# with SPARK_RAY_DASHBOARD or SPARK_LEADER_LAN_IP. Requires the head container
+# to have been (re)created with `--dashboard-host=0.0.0.0` (set in
+# inventory/group_vars/sparks.yml + role defaults).
+spark-vllm-dashboard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${SPARK_LEADER_LAN_IP:=192.168.1.104}"
+    : "${SPARK_RAY_DASHBOARD:=http://${SPARK_LEADER_LAN_IP}:8265}"
+    echo "Ray dashboard: ${SPARK_RAY_DASHBOARD}"
+    if command -v open >/dev/null; then
+      open "${SPARK_RAY_DASHBOARD}"
+    elif command -v xdg-open >/dev/null; then
+      xdg-open "${SPARK_RAY_DASHBOARD}"
+    fi
+
+# Show NGC Ray container state on both Sparks (head + worker, any state).
+spark-vllm-ps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a 'docker ps -a --filter name=vllm-ngc-ray-head'
+    ansible nvidia2 -m shell -a 'docker ps -a --filter name=vllm-ngc-ray-worker'
+
+# Start the Ray *head* container on nvidia1. Idempotent: `docker start` is a
+# no-op if already running. Use after `just spark-vllm-stop` or a host reboot
+# that left the container `Exited` (--restart unless-stopped does not relaunch
+# manually-stopped containers).
+spark-vllm-head-start:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a \
+      'docker start vllm-ngc-ray-head || true; docker ps -a --filter name=vllm-ngc-ray-head'
+
+# Restart the Ray *head* container on nvidia1 (graceful stop + start).
+spark-vllm-head-restart:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a \
+      'docker restart vllm-ngc-ray-head; docker ps -a --filter name=vllm-ngc-ray-head'
+
+# Start the Ray *worker* container on nvidia2 only — recovery after a power loss
+# left `vllm-ngc-ray-worker-nvidia2` in `Exited` state (safe to re-run).
+spark-vllm-worker-start:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia2 -m shell -a \
+      'docker start vllm-ngc-ray-worker-nvidia2 || true; docker ps -a --filter name=vllm-ngc-ray-worker-nvidia2'
+
+# Restart the Ray *worker* container on nvidia2.
+spark-vllm-worker-restart:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia2 -m shell -a \
+      'docker restart vllm-ngc-ray-worker-nvidia2; docker ps -a --filter name=vllm-ngc-ray-worker-nvidia2'
+
+# Start the whole NGC stack: head first (nvidia1), then worker (nvidia2). Use
+# after `just spark-vllm-stop` or a reboot. For a fresh provision (image pull,
+# env diff, etc.) prefer `just spark-vllm-provision`.
+spark-vllm-start: spark-vllm-head-start spark-vllm-worker-start
+
+# Restart head + worker. Does NOT restart the detached `vllm serve` process —
+# follow with `just spark-vllm-provision` (or a manual `docker exec ...`)
+# to bring the API server back. Ray cluster state is rebuilt by the daemons.
+spark-vllm-restart: spark-vllm-head-restart spark-vllm-worker-restart
+
+# --- DGX OS / firmware lifecycle ---
+#
+# Both Sparks have shown abrupt power-offs (see
+# llmwiki/runs/2026-04-27-ray-head-exited-postmortem.md and
+# llmwiki/runs/2026-04-29-cluster-recovery-and-26.04-rollback.md).
+# Planned reboots are cheaper than crash-driven ones; these recipes give us
+# clean stop-reboot-start choreography.
+
+# Show whether either Spark wants a reboot (e.g. after `apt upgrade` lands a
+# package like `nvidia-spark-limits` that updates /etc/security/limits.d/*).
+spark-reboot-required:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible sparks -b -m shell -a \
+      'if [ -f /var/run/reboot-required ]; then echo "REBOOT NEEDED"; cat /var/run/reboot-required.pkgs 2>/dev/null; else echo "no reboot needed"; fi'
+
+# Apt-upgrade both Sparks (mode=safe per inventory). Idempotent. Note: the
+# `spark_apt` role had a tag-propagation bug that we fixed 2026-04-29; if
+# `--tags apt` ever stops running the inner tasks, fall back to:
+#   ansible sparks -b -m apt -a 'update_cache=yes upgrade=safe force_apt_get=yes'
+spark-apt-upgrade:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml --tags apt -l sparks
+
+# Reboot **both** Sparks at once (parallel). Stops vllm + ray containers
+# cleanly first so the API doesn't observe a half-cluster, then `reboot`s
+# both hosts in parallel (since with TP=2 we lose service either way — no
+# meaningful "rolling" pattern). After hosts come back:
+#   - Docker `--restart unless-stopped` brings the head + worker containers back
+#   - `vllm serve` is a `docker exec -d` payload and does NOT survive — run
+#     `just spark-vllm-api-restart` (or full `spark-vllm-provision`) to relaunch.
+#
+# Use this when an apt upgrade has flagged "*** System restart required ***"
+# (see `just spark-reboot-required`), or before a maintenance window.
+spark-reboot:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    echo ">>> stopping containers cleanly first"
+    ansible nvidia1 -m shell -a 'docker stop vllm-ngc-ray-head 2>/dev/null || true'
+    ansible nvidia2 -m shell -a 'docker stop vllm-ngc-ray-worker-nvidia2 2>/dev/null || true'
+    echo ">>> rebooting both Sparks (in parallel; ssh sessions will drop)"
+    ansible sparks -b -m shell -a 'shutdown -r +0 "spark-reboot via just spark-reboot"' --forks 2
+    echo ">>> waiting for sparks to come back online (up to 5 min each)..."
+    ansible sparks -m wait_for_connection -a 'delay=20 timeout=300'
+    echo ">>> hosts back. After this finishes:"
+    echo "    just spark-vllm-ps         # confirm head + worker Up"
+    echo "    just spark-vllm-api-restart # relaunch vllm serve in head"
+
+# --- vLLM autoupgrade daemon (vllm-stack-autoupgrade.service) ---
+#
+# Stopped on 2026-04-29 after a failed promotion to nvcr.io/nvidia/vllm:26.04-py3
+# (image PATH change + role's `bash -c` not finding `ray`). Role now uses
+# `bash -lc` so 26.04+ is forward-compatible — but only takes effect after
+# the next `spark-vllm-provision-recreate`. Until then, leave the daemon stopped.
+
+# Show daemon status + state.json (current_image, candidate_tag, errors).
+spark-autoupgrade-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a 'sudo systemctl is-active vllm-stack-autoupgrade; echo; sudo cat /var/lib/vllm-stack-autoupgrade/state.json'
+
+# Stop the autoupgrade daemon (graceful: no in-flight cutover).
+spark-autoupgrade-disable:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -b -m systemd -a 'name=vllm-stack-autoupgrade state=stopped enabled=false'
+
+# Re-enable the autoupgrade daemon. Only do this AFTER a fresh recreate has
+# rolled the role's `bash -lc` fix into the running container's argv (so
+# `docker inspect` captures the safer command), otherwise the daemon may
+# replay the broken `bash -c` spec on the next image bump.
+spark-autoupgrade-enable:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -b -m systemd -a 'name=vllm-stack-autoupgrade state=started enabled=true daemon_reload=true'
+
+# --- Kernel pin (roles/spark_kernel) ---
+#
+# Runs the spark_kernel role only. Picks up `spark_kernel_pin` from
+# host_vars/group_vars and writes GRUB_DEFAULT, apt-mark holds, and
+# masks the NVIDIA OTA service as configured. Idempotent.
+#
+# Currently bisecting GX10 abrupt-power-off:
+#   - nvidia1: pinned to 6.17.0-1008-nvidia (one HWE step back, EXPERIMENT)
+#   - nvidia2: pinned to 6.17.0-1014-nvidia (current HWE, CONTROL)
+#
+# See:
+#   - roles/spark_kernel/README.md
+#   - llmwiki/runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md
+
+# Show running kernel + installed kernels + holds + OTA service state on both Sparks.
+spark-kernel-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible sparks -i inventory/hosts.yml -b -m shell -a '
+        echo "running:    $(uname -r)"
+        echo "installed:"
+        dpkg-query -W -f="  \${Status}\t\${Package} \${Version}\n" "linux-image-*-nvidia" 2>/dev/null | awk -F"\t" "/ok installed/{print \$2}"
+        echo "holds:"
+        ( apt-mark showhold | grep -E "^(linux-image|linux-headers|linux-modules)-" | sed "s/^/  /" ) || echo "  (none)"
+        echo "GRUB_DEFAULT:"
+        grep "^GRUB_DEFAULT=" /etc/default/grub | sed "s/^/  /"
+        echo "GRUB_TIMEOUT_STYLE / TIMEOUT:"
+        grep -E "^GRUB_TIMEOUT(_STYLE)?=" /etc/default/grub | sed "s/^/  /"
+        echo "nvidia-spark-run-apt-upgrade-once.service:"
+        ( systemctl is-enabled nvidia-spark-run-apt-upgrade-once.service 2>&1 | sed "s/^/  enabled=/" ) || true
+        ( systemctl is-active  nvidia-spark-run-apt-upgrade-once.service 2>&1 | sed "s/^/  active= /" ) || true
+    '
+
+# Apply roles/spark_kernel on both Sparks (or a specific host with `host=nvidia1`).
+# Picks up `spark_kernel_pin` from inventory.
+spark-kernel-apply host="sparks":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml --tags kernel -l '{{ host }}'
+
+# Dry-run the kernel role. Shows what GRUB_DEFAULT / holds / OTA mask
+# would change, without writing.
+spark-kernel-check host="sparks":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml --tags kernel -l '{{ host }}' --check --diff
+
+# Ad-hoc one-off pin (overrides inventory). Useful for "let me boot 6.11
+# on nvidia1 just for one provision pass without editing host_vars".
+# Example:
+#   just spark-kernel-pin host=nvidia1 ver=6.11.0-1014-nvidia
+# To unpin (release GRUB_DEFAULT change for THIS run only):
+#   just spark-kernel-pin host=nvidia1 ver=
+spark-kernel-pin host ver:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml --tags kernel \
+      -l '{{ host }}' -e 'spark_kernel_pin={{ ver }}'
+
+# Toggle GRUB menu visibility (5s timeout when on). Useful while bisecting
+# kernels — lets you override at the console without flashing inventory.
+# Examples:
+#   just spark-kernel-show-menu on    # menu visible 5s
+#   just spark-kernel-show-menu off   # restore hidden 0s
+spark-kernel-show-menu state="on":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    case '{{ state }}' in
+      on|true|yes|1)  v=true ;;
+      off|false|no|0) v=false ;;
+      *) echo "usage: just spark-kernel-show-menu on|off"; exit 2 ;;
+    esac
+    ansible-playbook playbooks/provision_sparks.yml --tags kernel \
+      -e "spark_kernel_show_grub_menu=$v"
+
+# --- Observability (roles/spark_observability) ---
+#
+# Push-based: node_exporter + dcgm-exporter + vLLM /metrics → otel-agent → ms02:4317;
+# journald → promtail → ms02:3100. See:
+#   - roles/spark_observability/README.md
+#   - llmwiki/concepts/sparks-observability-pipeline.md
+
+# Show systemd unit + listener state for all 5 components on both Sparks.
+spark-observability-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible sparks -i inventory/hosts.yml -b -m shell -a '
+        for u in node_exporter dcgm-exporter otel-agent promtail rasdaemon-textfile.timer; do
+          state=$(systemctl is-active "$u" 2>&1)
+          enabled=$(systemctl is-enabled "$u" 2>&1)
+          printf "  %-30s active=%-12s enabled=%s\n" "$u" "$state" "$enabled"
+        done
+        echo "listeners (loopback exporters):"
+        ss -tlnp 2>/dev/null | awk "/127.0.0.1:(9100|9400|9080)/ || /:8000 / { printf \"  %s\n\", \$4 }" | sort -u
+    '
+
+# Apply roles/spark_observability on both Sparks (or `host=nvidia1` for one).
+spark-observability-apply host="sparks":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml --tags spark_obs -l '{{ host }}'
+
+# Dry-run the observability role.
+spark-observability-check host="sparks":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml --tags spark_obs -l '{{ host }}' --check --diff
+
+# End-to-end probe: confirm Sparks → ms02 path is alive.
+# 1. local exporter HTTP probes on each Spark
+# 2. ms02 Prometheus has the `up{cluster="cylon-sparks"}` series
+# 3. ms02 Loki has labels for the cluster
+# Cross-check kind extraPortMappings (kind-config.yaml on ms02) against actual
+# NodePort allocations in the kind cluster. Catches the silent-broken-portmap
+# class of issues where ms02:<port> appears to listen (docker-proxy on 0.0.0.0)
+# but actually forwards into the kind container to a NodePort that doesn't exist
+# → 'connection refused' from the LAN. Bit us 2026-05-01 (otel-collector, loki,
+# prometheus, grafana, jaeger were all ClusterIP and the kind extraPortMappings
+# pointed nowhere). See llmwiki/concepts/sparks-observability-pipeline.md.
+ms02-cluster-portmap-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Pull kind extraPortMappings + NodePort allocations from ms02, diff locally.
+    portmap=$(ssh ms02 'awk "/^[[:space:]]*-[[:space:]]*containerPort:/{cp=\$NF} /^[[:space:]]*hostPort:/{print cp, \$NF}" /home/casibbald/Workspace/microscaler/shared-kind-cluster/kind-config.yaml')
+    # JSON + jq for the cluster side (jsonpath's nested-array contexts are unreliable).
+    nodeports=$(ssh ms02 'kubectl get svc -A -o json' \
+      | jq -r '.items[] | select(.spec.type=="NodePort") | .metadata.namespace as $ns | .metadata.name as $n | .spec.ports[] | "\(.nodePort) \($ns)/\($n)"')
+    printf "%-12s  %-10s  %-34s  %s\n" "kind:port" "host:port" "backing Service" "status"
+    printf "%-12s  %-10s  %-34s  %s\n" "----------" "---------" "----------------------------------" "------"
+    ok=0; missing=0
+    while read -r cp hp; do
+      [ -z "${cp:-}" ] && continue
+      backing=$(awk -v p="$cp" '$1==p {print $2; exit}' <<< "$nodeports")
+      if [ -z "$backing" ]; then
+        printf "%-12s  %-10s  %-34s  MISSING — ms02:%s will refuse\n" "$cp" "$hp" "(none)" "$hp"
+        missing=$((missing+1))
+      else
+        printf "%-12s  %-10s  %-34s  OK\n" "$cp" "$hp" "$backing"
+        ok=$((ok+1))
+      fi
+    done <<< "$portmap"
+    echo
+    printf "Summary: %d OK  %d MISSING\n" "$ok" "$missing"
+    if [ "$missing" -gt 0 ]; then
+      echo
+      echo "Each MISSING row = kind extraPortMapping with no backing NodePort Service."
+      echo "Fix in shared-kind-cluster/k8s/<ns>/<svc>.yaml by setting:"
+      echo "  spec:"
+      echo "    type: NodePort"
+      echo "    ports:"
+      echo "      - port: <containerPort>"
+      echo "        nodePort: <containerPort>     # must match"
+      exit 1
+    fi
+
+# Probe the spark observability pipeline end-to-end.
+spark-observability-probe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    echo ">>> 1. local exporter HTTP probes on each Spark"
+    ansible sparks -i inventory/hosts.yml -m shell -a '
+        for tgt in 127.0.0.1:9100 127.0.0.1:9400 127.0.0.1:8000; do
+          code=$(curl -s -o /dev/null -w "%{http_code}" -m 3 "http://${tgt}/metrics" || echo 000)
+          printf "  %-22s http=%s\n" "$tgt/metrics" "$code"
+        done
+    '
+    echo
+    echo ">>> 2. ms02 Prometheus has cluster=cylon-sparks scrape targets"
+    code=$(curl -sG -o /tmp/prom-probe.json -w "%{http_code}" -m 5 \
+      'http://192.168.1.189:9090/api/v1/query' \
+      --data-urlencode 'query=up{cluster="cylon-sparks"}' || echo 000)
+    echo "  http=$code"
+    if [ "$code" = "200" ]; then jq -r '.data.result[] | "  \(.metric.host)\t\(.metric.job)\tup=\(.value[1])"' /tmp/prom-probe.json 2>/dev/null || cat /tmp/prom-probe.json; fi
+    echo
+    echo ">>> 3. ms02 Loki has labels for cluster=cylon-sparks (recent 1h)"
+    code=$(curl -sG -o /tmp/loki-probe.json -w "%{http_code}" -m 5 \
+      'http://192.168.1.189:3100/loki/api/v1/query' \
+      --data-urlencode 'query={cluster="cylon-sparks"}' \
+      --data-urlencode 'limit=1' || echo 000)
+    echo "  http=$code"
+    if [ "$code" = "200" ]; then jq -r '.data.result | length as $n | "  streams=\($n)"' /tmp/loki-probe.json 2>/dev/null || cat /tmp/loki-probe.json; fi
+
+# Stop Ray + vLLM containers on both Sparks (Docker stop; data on disk preserved).
+spark-vllm-stop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a 'docker stop vllm-ngc-ray-head 2>/dev/null || true'
+    ansible nvidia2 -m shell -a 'docker stop vllm-ngc-ray-worker-nvidia2 2>/dev/null || true'
+    echo "✓ stopped head + worker containers"
+
+# Docker logs for the Ray head container (bootstrap); for API server stdout see
+# spark-vllm-logs-serve.
+spark-vllm-logs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a 'docker logs --tail 120 vllm-ngc-ray-head 2>&1'
+
+# Kill the in-container `vllm serve` (model load is slow; engine-core teardown
+# may take ~10s). Useful when the API server is wedged after engine init but
+# Ray itself is healthy. Follow with `just spark-vllm-provision` to relaunch
+# the API; cached weights / torch.compile mean the second start is much faster.
+spark-vllm-api-kill:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a \
+      'docker exec vllm-ngc-ray-head bash -lc "pkill -f \"[v]llm serve\" || true; sleep 2; pgrep -af [v]llm.serve || echo no_vllm_serve_running"'
+
+# Kill the API server then re-run the role's API-start step (no Ray restart).
+spark-vllm-api-restart:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a \
+      'docker exec vllm-ngc-ray-head bash -lc "pkill -f \"[v]llm serve\" || true"'
+    sleep 5
+    ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack
+
+# Tail the detached `vllm serve` log inside the head container (where stderr went).
+spark-vllm-logs-serve:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible nvidia1 -m shell -a \
+      'docker exec vllm-ngc-ray-head bash -lc "tail -n 80 /root/vllm-serve.log"'

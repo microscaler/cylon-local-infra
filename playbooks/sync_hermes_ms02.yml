@@ -1,0 +1,65 @@
+---
+# Optional: patch Hermes agent OpenAI-compat env on ms02 after a Spark model cutover.
+#
+# Enable by setting `hermes_agent_dotenv_path` in inventory/host_vars/ms02.yml to
+# the dotenv Hermes reads (path must already exist on ms02).
+#
+# Values come from inventory/group_vars/dev_hosts.yml:
+#   hermes_agent_openai_base_url
+#   hermes_agent_openai_model_id   (must match a vLLM --served-model-name, e.g. gpt-4o-mini)
+#
+# Run manually:
+#   ansible-playbook playbooks/sync_hermes_ms02.yml -l ms02
+#
+# Or from cutover:
+#   python3 scripts/spark_model_status.py cutover --recreate --sync-hermes
+
+- name: ms02 — sync Hermes agent dotenv (OpenAI base URL + model id)
+  hosts: ms02
+  gather_facts: false
+  vars:
+    _dotenv: "{{ hermes_agent_dotenv_path | default('', true) }}"
+  tasks:
+    - name: Hermes dotenv sync skipped (set hermes_agent_dotenv_path in host_vars/ms02.yml)
+      ansible.builtin.debug:
+        msg: >-
+          No Hermes .env path configured — set hermes_agent_dotenv_path in
+          inventory/host_vars/ms02.yml to patch OPENAI_BASE_URL / OPENAI_MODEL.
+      when: _dotenv | length == 0
+
+    - name: Patch Hermes dotenv when configured
+      when: _dotenv | length > 0
+      block:
+        - name: Stat Hermes dotenv on ms02
+          ansible.builtin.stat:
+            path: "{{ _dotenv }}"
+          register: hermes_dotenv_st
+
+        - name: Fail when Hermes dotenv path is set but file is missing
+          ansible.builtin.fail:
+            msg: "Hermes dotenv {{ _dotenv }} does not exist on ms02 — create it or fix the path."
+          when: not hermes_dotenv_st.stat.exists
+
+        - name: Set OPENAI_BASE_URL in Hermes dotenv
+          ansible.builtin.lineinfile:
+            path: "{{ _dotenv }}"
+            create: false
+            regexp: '^OPENAI_BASE_URL='
+            line: 'OPENAI_BASE_URL={{ hermes_agent_openai_base_url }}'
+            backup: true
+          when: hermes_dotenv_st.stat.exists
+
+        - name: Set OPENAI_MODEL in Hermes dotenv
+          ansible.builtin.lineinfile:
+            path: "{{ _dotenv }}"
+            create: false
+            regexp: '^OPENAI_MODEL='
+            line: 'OPENAI_MODEL={{ hermes_agent_openai_model_id }}'
+            backup: true
+          when: hermes_dotenv_st.stat.exists
+
+        - name: Run optional post-sync command on ms02 (restart Hermes, etc.)
+          ansible.builtin.shell: "{{ hermes_agent_post_sync_command }}"
+          args:
+            executable: /bin/bash
+          when: (hermes_agent_post_sync_command | default('') | length) > 0

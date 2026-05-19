@@ -1,0 +1,12 @@
+---
+# Managed /etc/hosts fragment for QSFP interconnect hostnames (gx10-*, nvidia*).
+# Peers resolve each other and bind local service names to 127.0.0.1 + interconnect IP
+# the same way as a manual Spark pair configuration.
+#
+# Required in inventory/host_vars/<spark>.yml when spark_hosts_manage is true:
+#   spark_hosts_local_ip
+#   spark_hosts_local_aliases   (list of short names, e.g. [gx10-e1ce, nvidia1])
+#   spark_hosts_peer_ip
+#   spark_hosts_peer_aliases
+#
+spark_hosts_manage: true

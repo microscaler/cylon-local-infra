@@ -63,9 +63,25 @@ ansible-playbook playbooks/provision_sparks.yml
 ansible-playbook playbooks/provision_sparks.yml --tags vllm_ngc_stack
 ansible-playbook playbooks/provision_sparks.yml --tags hf_prefetch
 ansible-playbook playbooks/provision_sparks.yml --skip-tags apt
+# Optional — Hermes agent on ms02 (after setting hermes_agent_dotenv_path in host_vars/ms02.yml):
+ansible-playbook playbooks/sync_hermes_ms02.yml -l ms02
 ```
 
 Phases + toggles: [`docs/provision_sparks.md`](docs/provision_sparks.md).
+
+**Model weights (HF prefetch) + which model `vllm serve` loads:** edit
+`inventory/group_vars/sparks.yml` (`hf_prefetch_models`, `vllm_default_model`, …),
+then follow the **Runbook — HF weights sync and vLLM model switchover** in
+[`docs/provision_sparks.md`](docs/provision_sparks.md). From the repo root you
+can use `python3 scripts/spark_model_status.py cutover --recreate` or
+`just spark-model-cutover --recreate`. To refresh **Hermes on ms02** from the
+same inventory, add `hermes_agent_dotenv_path` in `host_vars/ms02.yml`, then use
+`cutover --recreate --sync-hermes` or `just spark-hermes-sync`.
+
+**While Ray or vLLM is starting** (before `/v1/models` responds), use
+`python3 scripts/spark_model_status.py observe --ssh-host nvidia1` or
+`just spark-stack-observe` — see **Observability** in
+[`docs/provision_sparks.md`](docs/provision_sparks.md).
 
 On success: leader serves the OpenAI API at `http://nvidia1:8000/v1`. First model load
 is slow (62 GB weights for Gemma-4 31B); follow along with

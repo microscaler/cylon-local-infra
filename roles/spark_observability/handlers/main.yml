@@ -1,0 +1,24 @@
+---
+- name: restart node_exporter
+  ansible.builtin.systemd:
+    name: node_exporter.service
+    state: restarted
+    daemon_reload: true
+
+- name: restart dcgm-exporter
+  ansible.builtin.systemd:
+    name: dcgm-exporter.service
+    state: restarted
+    daemon_reload: true
+
+- name: restart otel-agent
+  ansible.builtin.systemd:
+    name: otel-agent.service
+    state: restarted
+    daemon_reload: true
+
+- name: restart promtail
+  ansible.builtin.systemd:
+    name: promtail.service
+    state: restarted
+    daemon_reload: true

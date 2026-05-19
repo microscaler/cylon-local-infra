@@ -14,7 +14,8 @@
 #                        without re-prompting within the same session
 #                        (sudo caches creds for ~5 min anyway, but the
 #                        drop-in makes operational recipes silent forever).
-#   2. mac_workstation — dir setup, Spotlight exclusions, /etc/nfs.conf.
+#   2. mac_workstation — ~/Workspace/remote NFS stub (root:wheel), Spotlight,
+#                        /etc/nfs.conf, /etc/hosts, ~/.ssh Include config.d/*.
 #
 # Run:
 #   ansible-playbook playbooks/mac_workstation.yml --ask-become-pass
@@ -22,6 +23,8 @@
 #   ansible-playbook playbooks/mac_workstation.yml --tags sudoers              # just NOPASSWD rules
 #   ansible-playbook playbooks/mac_workstation.yml --tags mdutil               # just Spotlight
 #   ansible-playbook playbooks/mac_workstation.yml --tags nfs_client           # just /etc/nfs.conf
+#   ansible-playbook playbooks/mac_workstation.yml --tags etc_hosts            # just /etc/hosts LAN block
+#   ansible-playbook playbooks/mac_workstation.yml --tags ssh_tunnel           # SSH include + remove retired fragment
 #   ansible-playbook playbooks/mac_workstation.yml --tags dirs                 # just dirs + README
 
 - name: Configure Mac dev workstation(s)

@@ -13,14 +13,14 @@ Authoritative doc for the non-Spark developer workstation, currently **`ms02`**.
 ## Layout at a glance
 
 ```
-Mac (Wi-Fi → Starlink)
-   │  ssh / SOCKS / port-forwards (see "SSH tunnel workaround" below)
+Mac (Wi-Fi or same switch as ms02)
+   │  direct LAN TCP for UIs, NFS, and kind API (no SSH port-forwards in-repo)
    ▼
 ms02 (wired → Starlink LAN out → switch)
    │  docker-proxy binds 0.0.0.0:{3000,3100,8080,9090,...}
    ▼
 kind-control-plane container  (172.19.0.2)
-   │  kube-apiserver on :6443 (host-mapped via DNAT to 127.0.0.1:38839)
+   │  kube-apiserver on :6443 (host-mapped to LAN :38839 — use that from the Mac)
    ▼
 platform namespaces: observability, data, pipeline, scheduling, ...
 ```
@@ -28,116 +28,65 @@ platform namespaces: observability, data, pipeline, scheduling, ...
 Tilt lives inside ms02 and orchestrates the whole app stack; its UI is on
 **`10348`**, bound to `0.0.0.0` via the `TILT_HOST` env var / `shared-kind-cluster`
 justfile, but at present Tilt only opens a v6 socket — dual-stack falls back to
-v4 via `bindv6only=0` so loopback/SSH-forward both work.
+v4 via `bindv6only=0` so the LAN IP works from picolino.
 
-## SSH tunnel workaround (active, 2026-04-19 →)
+## Direct LAN (default)
 
-### What problem this solves
+When the Mac can reach ms02 on the home LAN, use **direct URLs** — no SSH
+`LocalForward` / SOCKS tunnel is maintained in **cylon-local-infra** anymore
+(ms02 `ufw` + inventory open the ports you need from `192.168.1.0/24`).
 
-The Mac is on Starlink Wi-Fi (`192.168.1.130`) and ms02 is on the Starlink
-LAN-out port via a switch (`192.168.1.189`). They're supposed to be on the same
-`/24`, and `ping` + `ssh` (port 22) work. But **TCP to any other port between
-the two is silently dropped or RST'd inside the Starlink router** — confirmed
-on 2026-04-19 by:
+- Hermes: `http://ms02:9119/` or `http://192.168.1.189:9119/`
+- Tilt, Grafana, etc.: `http://192.168.1.189:<port>/` (see `just ms02-lan-check`)
+- NFS: `192.168.1.189:/…` (see `just nfs-up` in the repo justfile)
+- **Kubernetes API** (kind host map): `https://192.168.1.189:38839/` — set this
+  as the `server:` in `~/.kube/config-ms02` (or `https://ms02:38839/` if `ms02`
+  resolves). If your kubeconfig still says `https://127.0.0.1:38839`, change it
+  to the LAN URL after copying from ms02.
 
-1. `ufw` accepts the packets (rule counter increments) — not our firewall.
-2. With `iptables -F; iptables -P INPUT ACCEPT` and `ufw disable`, the Mac
-   still can't reach `ms02:10348/8080/10349/...`.
-3. `tcpdump -i eno4` on ms02 shows the **first SYN** arriving, then subsequent
-   same-destination SYNs never reach `eno4` — the router is holding them.
-4. Same SSH session on port 22 continues to work indefinitely.
+`just ms02-lan-check` probes common HTTP ports on the LAN.
 
-This matches the well-known Starlink Gen3 behaviour where the Wi-Fi ↔ LAN
-bridge filters unfamiliar TCP destinations between clients.
-
-### How it works
-
-A single multiplexed SSH connection over port 22 (which the router honours)
-with ~22 `LocalForward`s + a SOCKS5 `DynamicForward`:
-
-```
-Mac loopback : 10348 ──ssh──► ms02 loopback : 10348  (Tilt UI)
-Mac loopback : 3000  ──ssh──► ms02 loopback : 3000   (Grafana)
-Mac loopback : 38839 ──ssh──► ms02 loopback : 38839  (kube-apiserver)
-...
-Mac SOCKS5 127.0.0.1:1080  ← catch-all for ports not in the list
-```
-
-`ControlMaster` keeps the channel warm so `ssh -O check` / `ssh -O exit` give
-the justfile a clean on/off switch.
-
-### Operator usage
-
-All lifecycle is driven from the repo root:
-
-```bash
-just dev-tunnel-up        # start (idempotent)
-just dev-tunnel-status    # which Mac ports are actively forwarded
-just dev-tunnel-check     # HTTP-probe every UI through the tunnel
-just dev-tunnel-config    # dump effective ssh -G lines (debug)
-just dev-tunnel-restart   # down + up (after editing forwards)
-just dev-tunnel-logs      # tail ssh stderr
-just dev-tunnel-down      # stop + delete ControlMaster socket
-```
-
-Once up, the Mac treats `localhost:<port>` as if it were ms02's loopback:
-
-```bash
-open http://localhost:10348/               # Tilt UI
-open http://localhost:9001/                # MinIO console
-kubectl --kubeconfig ~/.kube/config-ms02 get pods -A   # kubeconfig from ms02 points at 127.0.0.1:38839 — works verbatim
-```
-
-Fetching the kubeconfig once per cluster lifetime:
+### kubectl from the Mac
 
 ```bash
 scp casibbald@ms02:.kube/config ~/.kube/config-ms02
+# Edit server: to https://192.168.1.189:38839 (or https://ms02:38839)
+kubectl --kubeconfig ~/.kube/config-ms02 get pods -A
 ```
 
-For anything not explicitly forwarded (e.g. an app listening on an
-experimental port), point curl / a browser at the SOCKS5 catch-all:
+### Historical: SSH tunnel + SOCKS (retired)
 
-```bash
-curl --socks5 127.0.0.1:1080 http://ms02:12345/healthz
-```
+Older docs used `~/.ssh/config.d/ms02-dev-tunnel` (`LocalForward 38839`,
+`DynamicForward 1080`) when Wi-Fi↔LAN filtering blocked direct TCP. **`mac-provision`**
+now **removes** that fragment if present; use the LAN URLs above. For one-off
+break-glass forwards, add a **personal** stanza under `~/.ssh/config.d/` — not
+this repo.
 
-### Files that make it work
+### Hermes Web UI
 
-| Path | Purpose |
-|---|---|
-| `~/.ssh/config.d/ms02-dev-tunnel` | Host stanza, forwards, ControlMaster |
-| `~/.ssh/config` | `Include ~/.ssh/config.d/*` directive |
-| `cylon-local-infra/justfile` | `dev-tunnel-*` recipes |
-| `~/.ssh/cm/casibbald@ms02:22` | ControlMaster socket (created at runtime) |
-| `/tmp/ms02-dev-tunnel.log` | ssh stderr captured on startup |
+When the Mac shares a flat L2 with ms02 (USB Ethernet to the same switch, or a router that does **not** filter Wi-Fi↔LAN TCP), open **`http://ms02:9119/`** (or `http://192.168.1.189:9119/`) directly. `ufw` on ms02 allows **9119/tcp** from `192.168.1.0/24`, and `mac_workstation` adds **`ms02 → 192.168.1.189`** to `/etc/hosts` on the Mac.
 
-### Retire path (USB 2.5GbE adapter, ETA days)
+If something blocks direct HTTP again, fix routing or `ufw` on ms02 — ad-hoc
+`LocalForward` lines in a **personal** `~/.ssh/config.d/*` file are outside this
+repo.
 
-When the wired USB → 2.5GbE adapter arrives:
+### Optional: wired USB Ethernet
 
-1. Plug the adapter into the Mac and the same switch that feeds ms02.
-2. `ping -c 4 192.168.1.189` — expect sub-millisecond RTT, not ~120 ms (the
-   single cleanest signal that we're on the same L2).
-3. `curl http://192.168.1.189:10348/` — expect `HTTP/1.1 200`.
-4. `just dev-tunnel-down` — tear down the tunnel.
-5. Keep the SSH config stanza in place (cheap insurance for future off-LAN
-   work: café, hotel, etc.); just don't start it by default.
-6. Optionally add a `Host ms02-lan` stanza with no `LocalForward`s so normal
-   `ssh ms02` still works straight.
+Same-switch L2 (USB Ethernet to the switch that feeds ms02) is the usual way to
+get stable sub-ms RTT to **`192.168.1.189`**.
 
 ## Cursor / VS Code Remote-SSH
 
-ms02 is a first-class remote-IDE target. Three SSH aliases are defined on the
-Mac (`~/.ssh/config.d/ms02`, `~/.ssh/config.d/ms02-dev-tunnel`):
+ms02 is a first-class remote-IDE target. Typical SSH aliases on the Mac live in
+`~/.ssh/config.d/` (operator-maintained), e.g.:
 
-| Alias | User | ControlMaster socket | Intended use |
-|---|---|---|---|
-| `ms02` | `casibbald` | `~/.ssh/cm/casibbald@ms02:22` | Cursor Remote-SSH, everyday ssh, git |
-| `ms02-root` | `root` | `~/.ssh/cm/root@ms02:22` | `/etc` surgery, ansible module tests |
-| `ms02-dev-tunnel` | `casibbald` | `~/.ssh/cm/tunnel-casibbald@ms02:22` | LocalForward bundle + SOCKS5 (see tunnel workaround above) |
+| Alias | User | Intended use |
+|---|---|---|
+| `ms02` | `casibbald` | Cursor Remote-SSH, everyday ssh, git |
+| `ms02-root` | `root` | `/etc` surgery, ansible module tests |
 
-Distinct sockets on purpose — `just dev-tunnel-down` only affects the tunnel,
-never the editor session.
+`ansible-playbook playbooks/mac_workstation.yml` ensures **`Include ~/.ssh/config.d/*`**
+in `~/.ssh/config` and **removes** the retired **`ms02-dev-tunnel`** fragment.
 
 ### One-time Cursor setup
 
@@ -161,35 +110,32 @@ Re-apply if it ever drifts:
 ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags dev_workstation
 ```
 
-### Coexistence with the tunnel
-
-Cursor's Remote-SSH opens its own SSH connection over port 22 — doesn't use,
-or share state with, the tunnel's ControlMaster. You can freely:
-- Run Cursor Remote-SSH without the tunnel up (browser-based UIs unreachable
-  until you `just dev-tunnel-up`).
-- Run the tunnel without Cursor attached (UIs reachable, no editor session).
-- Run both — they coexist on separate TCP handshakes.
-
-Agent forwarding (`ForwardAgent yes`) means `git push` from Cursor's remote
-terminal uses the Mac's SSH keys — no secrets copied to ms02.
+Agent forwarding (`ForwardAgent yes`) in your personal `Host ms02` stanza
+means `git push` from Cursor's remote terminal can use the Mac's SSH keys — no
+secrets copied to ms02 unless you choose otherwise.
 
 ## Local names for kind services (`registry.lan`, `*.kind.lan`)
 
 ### Active today
 
-`registry.lan:5001` → Mac loopback → SSH tunnel → `kind-registry` container
-on ms02's `127.0.0.1:5001`.
+**LAN-first:** point `registry.lan` at **ms02's LAN IP** so Docker on the Mac hits
+the registry without an SSH `LocalForward`:
 
 ```
 # /etc/hosts on the Mac
-127.0.0.1  registry.lan
-127.0.0.1  *.kind.lan kind.lan
+192.168.1.189  registry.lan
+127.0.0.1      *.kind.lan kind.lan
 ```
 
+(`ufw` on ms02 should allow **5001/tcp** from the trusted LAN — see inventory.)
+
 ```bash
-docker pull registry.lan:5001/<repo>:<tag>       # from the Mac, via tunnel
+docker pull registry.lan:5001/<repo>:<tag>
 curl -sI http://registry.lan:5001/v2/            # → HTTP/1.1 200 OK
 ```
+
+**Fallback** if you intentionally have no LAN path: use a **personal** SSH
+`LocalForward` or fix routing — not managed in this repo.
 
 No server-side rename — kind internally still uses `localhost:5001` and
 `kind-registry:5000` (Docker DNS name on the kind network).
@@ -202,16 +148,9 @@ maps `80:30080` / `443:30443` (or similar). At that point:
 
 1. Add host-port mappings for 80/443 to `kind-config.yaml` and recreate the
    cluster (`just cluster-recreate` — destructive).
-2. Append these lines to `~/.ssh/config.d/ms02-dev-tunnel` and
-   `just dev-tunnel-restart`:
-
-   ```
-   LocalForward 80  localhost:80
-   LocalForward 443 localhost:443
-   ```
-
-   macOS allows non-root processes to bind 80/443 on loopback since Mojave,
-   so no sudo needed.
+2. Expose ingress on the **LAN** (ms02 IP) via kind port maps + `ufw`, then
+   point DNS or `/etc/hosts` on the Mac at **`192.168.1.189`** for the hostnames
+   you choose (not loopback forwards).
 3. Add explicit per-service `/etc/hosts` entries (wildcards aren't honoured):
 
    ```
@@ -233,19 +172,38 @@ is purely a macOS gotcha.
 
 ## Firewall state
 
-Managed by `roles/firewall`, variables in `inventory/group_vars/dev_hosts.yml`:
+Managed by `roles/firewall`. **Group** defaults live in `inventory/group_vars/dev_hosts.yml`; **ms02** overrides in `inventory/host_vars/ms02.yml` (adds **2049** for NFSv4 from the Mac and widens the LAN dev TCP range).
 
 ```yaml
 firewall_allow_tcp_ports: [22, 80, 5000, 5001, 10350]
 firewall_trusted_lan_cidr: "192.168.1.0/24"
 firewall_trusted_lan_tcp_ports:
   - 22
-  - "8000:11000"   # ufw range syntax — covers Tilt 10348 + microservices
+  - "7000:12000"   # ufw range — picolino/LAN: Tilt, Hermes, nodeports, observability, …
 ```
 
-Even with these in place, Starlink's in-router filter is the outer constraint
-on LAN-to-LAN traffic until the adapter lands. `ufw` is kept correct so the
-moment we're on a flat L2, nothing else needs to change.
+On **ms02**, **`22`**, **`2049`**, and **`7000:12000`** are allowed from **`192.168.1.0/24`** (includes picolino on the home LAN). Re-apply after inventory edits: `ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags firewall`.
+
+### UFW vs firewalld (dual stack)
+
+If **`firewalld` and `ufw` are both enabled**, both can program Netfilter/nftables
+and traffic can drop in ways that look like “bad UFW rules” even when
+`ufw status` shows allows (including for **9119** / Hermes). This role **stops and
+disables `firewalld` when its unit exists** (default: `firewall_disable_firewalld: true`
+in `roles/firewall/defaults/main.yml`), then **`ufw reload`**, so **UFW is the
+single source of truth**. Re-apply with:
+
+```bash
+ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags firewall
+```
+
+To keep firewalld for an unusual layout, set `firewall_disable_firewalld: false`
+in inventory for that host/group and manage rules manually (not recommended on
+hosts that also use this role’s UFW).
+
+If a router filter blocks client-to-client TCP again, symptoms look like firewall
+drops but are outside `ufw`; use `just ms02-lan-check` from the Mac to see which
+HTTP ports answer on the LAN. `ufw` stays the single on-host source of truth (see **UFW vs firewalld** above).
 
 ## Related
 

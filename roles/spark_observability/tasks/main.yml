@@ -1,0 +1,48 @@
+---
+# Orchestrator. Each include is a separate file so per-component runs are easy
+# (`--tags spark_obs_node_exporter` etc.).
+
+- name: Observability — disabled, skipping all components
+  ansible.builtin.debug:
+    msg: "spark_observability_enabled is false; nothing to do."
+  when: not (spark_observability_enabled | bool)
+
+- name: Observability — common (dirs, system users)
+  ansible.builtin.import_tasks: common.yml
+  when: spark_observability_enabled | bool
+  tags: [spark_obs, spark_obs_common]
+
+- name: Observability — node_exporter
+  ansible.builtin.import_tasks: node_exporter.yml
+  when:
+    - spark_observability_enabled | bool
+    - spark_observability_node_exporter_enabled | bool
+  tags: [spark_obs, spark_obs_node_exporter]
+
+- name: Observability — rasdaemon textfile shipper
+  ansible.builtin.import_tasks: rasdaemon_textfile.yml
+  when:
+    - spark_observability_enabled | bool
+    - spark_observability_rasdaemon_textfile_enabled | bool
+  tags: [spark_obs, spark_obs_rasdaemon]
+
+- name: Observability — dcgm-exporter (Docker container)
+  ansible.builtin.import_tasks: dcgm_exporter.yml
+  when:
+    - spark_observability_enabled | bool
+    - spark_observability_dcgm_exporter_enabled | bool
+  tags: [spark_obs, spark_obs_dcgm]
+
+- name: Observability — otel-agent (scrapes locally → OTLP push to ms02)
+  ansible.builtin.import_tasks: otel_agent.yml
+  when:
+    - spark_observability_enabled | bool
+    - spark_observability_otel_agent_enabled | bool
+  tags: [spark_obs, spark_obs_otel]
+
+- name: Observability — promtail (journald → Loki push)
+  ansible.builtin.import_tasks: promtail.yml
+  when:
+    - spark_observability_enabled | bool
+    - spark_observability_promtail_enabled | bool
+  tags: [spark_obs, spark_obs_promtail]

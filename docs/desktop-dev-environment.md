@@ -212,7 +212,7 @@ Two NVIDIA DGX Spark nodes on the LAN. The two nodes are additionally bridged di
 | Ray worker | `nvidia2` | `nvidia` | Joins the head. Uses QSFP interconnect for NCCL. |
 | Operator | both | `casibbald` | Ansible-only. Don't run workloads as this user. |
 
-**Current workload:** vLLM serving `Qwen/Qwen3.5-35B-A3B-FP8` at `http://nvidia1:8000/v1` (OpenAI-compatible). Provisioned by [`roles/spark_provision`](../roles/spark_provision/) and [`roles/vllm_stacked_container`](../roles/vllm_stacked_container/) via [`playbooks/provision_sparks.yml`](../playbooks/provision_sparks.yml).
+**Current workload:** vLLM serving `Qwen/Qwen3.6-35B-A3B-FP8` at `http://nvidia1:8000/v1` (OpenAI-compatible). Provisioned by [`roles/spark_provision`](../roles/spark_provision/) and [`roles/vllm_stacked_container`](../roles/vllm_stacked_container/) via [`playbooks/provision_sparks.yml`](../playbooks/provision_sparks.yml).
 
 **Agents consume via the OpenAI API**, not by SSHing into the boxes. The vLLM server exposes:
 
@@ -221,7 +221,7 @@ POST http://nvidia1:8000/v1/chat/completions   (from LAN, including ms02)
 POST https://<ngrok-domain>/v1/chat/completions (from outside LAN, opt-in tunnel)
 ```
 
-Model name: `Qwen/Qwen3.5-35B-A3B-FP8` (real id) or `qwen3` (short alias for tools that gag on `/` in names — Cursor). Both are advertised via vLLM's `--served-model-name`.
+Model name: `Qwen/Qwen3.6-35B-A3B-FP8` (real id) or `qwen3` (short alias for tools that gag on `/` in names — Cursor). Both are advertised via vLLM's `--served-model-name`.
 
 **Why this matters for agents:** any work you do that could run a model locally should prefer self-hosted vLLM over a cloud endpoint. Customer PII and business documents **must not** cross a network boundary to an LLM vendor we don't control — see [`llmwiki/concepts/pii-ai-data-plane.md`](../llmwiki/concepts/pii-ai-data-plane.md) (the architectural invariant behind the whole stack).
 

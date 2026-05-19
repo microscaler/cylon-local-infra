@@ -93,3 +93,38 @@
         name: ufw
         state: started
         enabled: true
+
+    # Running firewalld alongside UFW can leave two stacks fighting over the same
+    # tables — symptoms: UFW "allows" a port but packets still drop until one
+    # stack is removed. We standardise on UFW for hosts that use this role.
+    - name: Stop and disable firewalld when installed (UFW is authoritative)
+      when: firewall_disable_firewalld | default(true) | bool
+      block:
+        - name: Check whether firewalld unit exists
+          ansible.builtin.command: systemctl cat firewalld.service
+          register: firewalld_unit
+          failed_when: false
+          changed_when: false
+
+        - name: Stop and disable firewalld service
+          ansible.builtin.systemd:
+            name: firewalld
+            state: stopped
+            enabled: false
+          when: firewalld_unit.rc == 0
+          failed_when: false
+
+        # Re-apply UFW after firewalld release (safe even if firewalld was already off).
+        - name: Reload UFW after reconciling with firewalld
+          ansible.builtin.command: ufw reload
+          when: firewalld_unit.rc == 0
+          failed_when: false
+          changed_when: false
+
+        - name: Note when firewalld is inactive
+          ansible.builtin.debug:
+            msg: >-
+              firewalld is stopped/disabled; inbound policy is UFW-only on this host.
+              If you intentionally need firewalld, set firewall_disable_firewalld: false
+              in inventory and reconcile manually.
+          when: firewalld_unit.rc == 0

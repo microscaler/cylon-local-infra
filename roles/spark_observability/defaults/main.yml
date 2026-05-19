@@ -1,0 +1,105 @@
+---
+# roles/spark_observability — push-based metrics & logs from each Spark to
+# ms02's kind cluster observability stack.
+#
+# Pipeline:
+#
+#   per Spark (host):
+#     node_exporter          (127.0.0.1:9100)  ─┐
+#     dcgm-exporter          (127.0.0.1:9400)  ─┼── otel-agent (systemd, scrapes
+#     vLLM /metrics          (127.0.0.1:8000)  ─┘   locally every 15s) ─OTLP gRPC─►
+#     rasdaemon textfile     (node_exporter textfile collector)            ms02:4317
+#
+#   per Spark (host):
+#     journald (kernel + systemd + dockerd + every container via the
+#                journald log-driver) ── promtail (systemd) ─ HTTP push ─► ms02:3100
+#
+# Local exporters bind to 127.0.0.1 only — only the agents talk to ms02.
+#
+# All five components install as native systemd units (binaries downloaded
+# from upstream releases) EXCEPT dcgm-exporter, which is NVIDIA's official
+# container (no clean aarch64 binary distribution).
+#
+# Operator surface: `just spark-observability-{status,apply,probe}`. See
+# llmwiki/concepts/sparks-observability-pipeline.md.
+
+# --- Master toggle --------------------------------------------------------
+spark_observability_enabled: true
+
+# --- ms02 endpoints (push targets) ----------------------------------------
+spark_observability_ms02_host: "192.168.1.189"
+spark_observability_otlp_grpc_port: 4317
+spark_observability_loki_push_port: 3100
+spark_observability_otlp_endpoint: "{{ spark_observability_ms02_host }}:{{ spark_observability_otlp_grpc_port }}"
+spark_observability_loki_endpoint: "http://{{ spark_observability_ms02_host }}:{{ spark_observability_loki_push_port }}/loki/api/v1/push"
+
+# --- Resource attributes attached to every metric / log ---
+# These become Prometheus labels (after otel-collector's prometheus exporter)
+# and Loki stream selectors. cluster + host are the minimum for cross-Spark
+# panels in Grafana.
+spark_observability_resource_attributes:
+  cluster: cylon-sparks
+  host: "{{ inventory_hostname }}"
+  os_kernel: "{{ ansible_kernel | default('unknown') }}"
+  os_distribution: "{{ ansible_distribution | default('Ubuntu') }}-{{ ansible_distribution_version | default('') }}"
+
+# --- Scrape interval ------------------------------------------------------
+# 15s globally — matches Prometheus default; ~1.5 KB/sample × 15 metrics ×
+# 4 hosts × 4 sources = ~6 KB/s aggregate ingest, negligible storage on the
+# kind Loki/Prometheus emptyDir. Bump to 5s during a focused crash hunt;
+# revert after.
+spark_observability_scrape_interval: "15s"
+
+# --- Per-component enable flags -------------------------------------------
+spark_observability_node_exporter_enabled: true
+spark_observability_dcgm_exporter_enabled: true
+spark_observability_otel_agent_enabled: true
+spark_observability_promtail_enabled: true
+spark_observability_rasdaemon_textfile_enabled: true
+
+# --- Versions (override in inventory to bump) -----------------------------
+# All aarch64.
+spark_observability_node_exporter_version: "1.8.2"
+spark_observability_node_exporter_url: >-
+  https://github.com/prometheus/node_exporter/releases/download/v{{ spark_observability_node_exporter_version }}/node_exporter-{{ spark_observability_node_exporter_version }}.linux-arm64.tar.gz
+spark_observability_node_exporter_sha256: "627382b9723c642411c33f48861134ebe893e70a63bcc8b3fc0619cd0bfac4be"
+
+# Promtail version pinned to match the Loki server version on ms02 (2.9.4).
+spark_observability_promtail_version: "2.9.4"
+spark_observability_promtail_url: >-
+  https://github.com/grafana/loki/releases/download/v{{ spark_observability_promtail_version }}/promtail-linux-arm64.zip
+spark_observability_promtail_sha256: "1e7ae650d522c1a897fe38a82708fbeb7d4eaad9873ec641b0ce421595865010"
+
+# OTel collector (contrib) — match ms02 central collector (0.96.0).
+spark_observability_otel_agent_version: "0.96.0"
+spark_observability_otel_agent_url: >-
+  https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ spark_observability_otel_agent_version }}/otelcol-contrib_{{ spark_observability_otel_agent_version }}_linux_arm64.tar.gz
+spark_observability_otel_agent_sha256: "8770bc05103220063670c600cf77b030e30f937aad8d30267ff68d61aafb051d"
+
+# DCGM exporter — NVIDIA NGC container (aarch64). Bump tag as NVIDIA releases new stable.
+spark_observability_dcgm_exporter_image: "nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.1-ubuntu22.04"
+
+# --- Bind addresses (local only — agents scrape on loopback) -------------
+spark_observability_node_exporter_bind: "127.0.0.1:9100"
+spark_observability_dcgm_exporter_bind: "127.0.0.1:9400"
+spark_observability_vllm_metrics_url: "http://127.0.0.1:{{ vllm_stacked_container_api_port | default(8000) }}/metrics"
+
+# --- Install paths --------------------------------------------------------
+spark_observability_install_dir: /opt/spark-observability
+spark_observability_bin_dir: /usr/local/bin
+spark_observability_textfile_dir: /var/lib/node_exporter/textfile
+spark_observability_config_dir: /etc/spark-observability
+
+# --- System users (unprivileged where possible) ---------------------------
+spark_observability_node_exporter_user: node_exporter
+spark_observability_otel_agent_user: otel_agent
+# Promtail needs systemd-journal group membership to read journald.
+spark_observability_promtail_user: promtail
+spark_observability_promtail_groups: [systemd-journal, docker]
+
+# --- Firewall (LAN-side; loopback always works) ---------------------------
+# Local exporters bind to 127.0.0.1 — no firewall change needed for them.
+# Outbound to ms02 (4317, 3100) is open by default per UFW deny-in/allow-out.
+# Variable kept for future when we want to expose any of these on the LAN
+# (e.g. for direct Prometheus pull as a fallback path). Empty = no change.
+spark_observability_lan_expose_tcp_ports: []

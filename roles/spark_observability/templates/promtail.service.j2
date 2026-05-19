@@ -1,0 +1,22 @@
+[Unit]
+Description=Promtail (Loki shipper) — journald → ms02 Loki
+Documentation=https://grafana.com/docs/loki/latest/clients/promtail/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ spark_observability_promtail_user }}
+Group={{ spark_observability_promtail_user }}
+SupplementaryGroups=systemd-journal
+ExecStart={{ spark_observability_bin_dir }}/promtail -config.file={{ spark_observability_config_dir }}/promtail.config.yaml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/promtail
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

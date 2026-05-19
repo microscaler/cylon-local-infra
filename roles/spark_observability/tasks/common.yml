@@ -1,0 +1,55 @@
+---
+# Shared dirs + system users for the observability stack.
+
+- name: Common — install dir
+  ansible.builtin.file:
+    path: "{{ spark_observability_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Common — config dir
+  ansible.builtin.file:
+    path: "{{ spark_observability_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Common — node_exporter system user
+  ansible.builtin.user:
+    name: "{{ spark_observability_node_exporter_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/node_exporter
+    create_home: true
+    state: present
+
+- name: Common — node_exporter textfile dir (used by rasdaemon shipper)
+  ansible.builtin.file:
+    path: "{{ spark_observability_textfile_dir }}"
+    state: directory
+    owner: "{{ spark_observability_node_exporter_user }}"
+    group: "{{ spark_observability_node_exporter_user }}"
+    mode: "0755"
+
+- name: Common — otel-agent system user
+  ansible.builtin.user:
+    name: "{{ spark_observability_otel_agent_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/otel-agent
+    create_home: true
+    state: present
+
+- name: Common — promtail system user (needs systemd-journal + docker groups)
+  ansible.builtin.user:
+    name: "{{ spark_observability_promtail_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/promtail
+    create_home: true
+    groups: "{{ spark_observability_promtail_groups }}"
+    append: true
+    state: present

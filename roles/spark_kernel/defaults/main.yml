@@ -1,0 +1,81 @@
+---
+# roles/spark_kernel — manage the GRUB default kernel + apt holds + the
+# NVIDIA OTA auto-upgrade systemd service. Designed to support kernel
+# bisection during the GX10 abrupt-power-off investigation
+# (llmwiki/runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md).
+#
+# All operations are idempotent and reversible:
+#   - set spark_kernel_pin: ""             → leave GRUB_DEFAULT untouched
+#   - set spark_kernel_apt_hold: false     → release any kernel apt holds
+#   - set spark_kernel_disable_auto_apt_upgrade: false → unmask OTA service
+#   - set spark_kernel_show_grub_menu: false → restore hidden 0s GRUB menu
+#
+# Run only the kernel phase:
+#   ansible-playbook playbooks/provision_sparks.yml --tags kernel
+# or via the operator surface:
+#   just spark-kernel-apply
+#   just spark-kernel-status
+
+# --- Kernel pin -----------------------------------------------------------
+# Which kernel GRUB should boot by default. Empty string = role does NOT
+# touch GRUB_DEFAULT (use this if you only want to manage holds / OTA
+# service without changing the bootloader default).
+#
+# Must match the trailing portion of `uname -r` for an installed kernel:
+#   - "6.17.0-1014-nvidia"    (current HWE default; effectively a no-op pin)
+#   - "6.17.0-1008-nvidia"    (one HWE step back — 2026-05-01 control kernel)
+#   - "6.11.0-1014-nvidia"    (older line; bigger jump back, more module risk)
+#
+# Verify what's installed: `dpkg -l 'linux-image-*' | grep '^ii'`
+spark_kernel_pin: ""
+
+# --- Apt holds ------------------------------------------------------------
+# When true, apt-mark hold the pinned kernel + the HWE meta packages so
+# `apt upgrade` (manual, via Ubuntu's apt-daily-upgrade.timer, or via
+# nvidia-spark-run-apt-upgrade-once.service) won't bump them out from
+# under the pin.
+#
+# When false, the role releases ALL kernel-related apt holds (linux-image*,
+# linux-headers*, linux-modules*) — useful to revert during an upgrade
+# maintenance window.
+spark_kernel_apt_hold: true
+
+# Names of the HWE meta packages held alongside the pinned kernel.
+# Held even when spark_kernel_pin is empty (so the cluster doesn't drift
+# without a deliberate decision). Override only if NVIDIA renames them
+# under a future DGX OS release.
+spark_kernel_hwe_meta_packages:
+  - linux-image-nvidia-hwe-24.04
+  - linux-headers-nvidia-hwe-24.04
+  - linux-modules-nvidia-580-open-nvidia-hwe-24.04
+  - linux-modules-nvidia-fs-nvidia-hwe-24.04
+
+# --- NVIDIA OTA auto-apt-upgrade service ----------------------------------
+# When true, mask + stop nvidia-spark-run-apt-upgrade-once.service. That's
+# the DGX-OS-side oneshot that runs `apt upgrade` at multi-user.target /
+# gdm.service boot, gated by !/var/lib/nvidia-spark-run-apt-upgrade-once/done.
+# It only re-arms after a NVIDIA dpkg trigger removes the done-file, so the
+# usual recurring upgrader is Ubuntu's own apt-daily-upgrade.timer (which
+# respects apt-mark hold). Masking this is belt-and-braces — cheap and
+# reversible.
+#
+# When false, unmask the service (does NOT auto-start it; the unit's own
+# WantedBy=multi-user.target re-takes effect on next boot, subject to its
+# done-file ConditionPath).
+spark_kernel_disable_auto_apt_upgrade: true
+
+# --- GRUB menu visibility -------------------------------------------------
+# DGX OS ships GRUB with `GRUB_TIMEOUT_STYLE=hidden` + `GRUB_TIMEOUT=0` so
+# the menu is never shown. While bisecting kernels it's useful to enable
+# the menu so you can override at the console.
+#
+# When true, set GRUB_TIMEOUT_STYLE=menu + GRUB_TIMEOUT=spark_kernel_grub_menu_timeout.
+# When false, restore hidden + 0s.
+spark_kernel_show_grub_menu: false
+spark_kernel_grub_menu_timeout: 5
+
+# --- Reboot reminder ------------------------------------------------------
+# When true (default), emit a debug message at the end of the play if the
+# running kernel != spark_kernel_pin. The role intentionally does NOT
+# trigger a reboot — that's the operator's call (see `just spark-reboot`).
+spark_kernel_warn_on_reboot_pending: true

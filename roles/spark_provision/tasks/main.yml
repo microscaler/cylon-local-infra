@@ -3,9 +3,17 @@
 # Bare-metal venv path (roles/vllm) and custom-image path (roles/vllm_docker_stack)
 # were removed 2026-04; see llmwiki/runs/2026-04-18-rip-out-bare-metal.md.
 
+# NOTE: Every `include_role` here uses `apply: { tags: [...] }` so that
+# `--tags <name>` actually runs the role's INNER tasks. Without `apply`,
+# Ansible matches only the include line itself and reports `changed=0`.
+# Filed as a recurring wart in
+# llmwiki/runs/2026-04-29-cluster-recovery-and-26.04-rollback.md.
+
 - name: Phase — sudoers and operators
   ansible.builtin.include_role:
     name: sudoers
+    apply:
+      tags: [spark, base, sudoers]
   tags: [spark, base, sudoers]
   when: spark_provision_sudoers | default(true) | bool
 
@@ -13,64 +21,130 @@
   ansible.builtin.include_role:
     name: cuda
     tasks_from: apt_cleanup.yml
+    apply:
+      tags: [spark, prep, cuda, docker]
   tags: [spark, prep, cuda, docker]
   when: spark_provision_cuda_apt_cleanup | default(true) | bool
 
 - name: Phase — APT upgrade
   ansible.builtin.include_role:
     name: spark_apt
+    apply:
+      tags: [spark, apt]
   tags: [spark, apt]
   when: spark_provision_apt | default(true) | bool
+
+- name: Phase — Kernel pin / apt holds / NVIDIA OTA service mask
+  ansible.builtin.include_role:
+    name: spark_kernel
+    apply:
+      tags: [spark, kernel]
+  tags: [spark, kernel]
+  when: spark_provision_kernel | default(true) | bool
 
 - name: Phase — Docker Engine
   ansible.builtin.include_role:
     name: docker
+    apply:
+      tags: [spark, docker]
   tags: [spark, docker]
   when: spark_provision_docker | default(true) | bool
 
 - name: Phase — Firewall (vLLM API + Ray ports)
   ansible.builtin.include_role:
     name: firewall
+    apply:
+      tags: [spark, firewall]
   tags: [spark, firewall]
   when: spark_provision_firewall | default(true) | bool
 
-- name: Phase — optional LAN IPv6 sysctl (per host_vars, e.g. broken v6 default on LAN)
+- name: Phase — optional LAN IPv6 off (NetworkManager + sysctl)
+  ansible.builtin.import_tasks: lan_ipv6_nm.yml
+  tags: [spark, network, sysctl, lan_ipv6]
+  when: spark_provision_lan_ipv6_sysctl | default(true) | bool
+
+- name: Phase — optional LAN IPv6 sysctl reinforcement (paired with NM ipv6.method disabled)
   ansible.builtin.import_tasks: lan_ipv6_sysctl.yml
   tags: [spark, network, sysctl, lan_ipv6]
   when: spark_provision_lan_ipv6_sysctl | default(true) | bool
 
+- name: Phase — /etc/hosts QSFP interconnect aliases (gx10-*, nvidia*)
+  ansible.builtin.include_role:
+    name: spark_hosts
+    apply:
+      tags: [spark, hosts, network, etc_hosts]
+  tags: [spark, hosts, network, etc_hosts]
+  when: spark_provision_hosts | default(true) | bool
+
 - name: Phase — CUDA toolkit on host (only for playbooks/nccl_sparks.yml host-side build)
   ansible.builtin.include_role:
     name: cuda
+    apply:
+      tags: [spark, cuda]
   tags: [spark, cuda]
   when: spark_provision_cuda_toolkit | default(false) | bool
 
 - name: Phase — Hugging Face prefetch daemon (leader-only; downloads once, rsyncs to peers)
   ansible.builtin.include_role:
     name: hf_prefetch_service
+    apply:
+      tags:
+        - spark
+        - hf
+        - hf_prefetch
   tags: [spark, hf, hf_prefetch]
   when: spark_provision_hf | default(false) | bool
 
 - name: Phase — NGC image sync daemon (leader-only; weekly pull + save/load → peers)
   ansible.builtin.include_role:
     name: ngc_image_service
+    apply:
+      tags: [spark, ngc, ngc_image_sync]
   tags: [spark, ngc, ngc_image_sync]
   when: spark_provision_ngc_image_sync | default(false) | bool
 
 - name: Phase — vLLM stack auto-upgrade daemon (leader-only; quiet-window guarded)
   ansible.builtin.include_role:
     name: vllm_stack_autoupgrade
+    apply:
+      tags: [spark, vllm_autoupgrade]
   tags: [spark, vllm_autoupgrade]
   when: spark_provision_vllm_autoupgrade | default(false) | bool
 
 - name: Phase — NGC stacked vLLM (Docker Ray + `vllm serve`)
   ansible.builtin.include_role:
     name: vllm_stacked_container
+    # Without `apply.tags`, `--tags vllm_ngc_stack` only matched this include_task
+    # line — no tasks inside the role ran. Propagate tags to every task in the role.
+    apply:
+      tags:
+        - spark
+        - vllm_ngc_stack
+        - stack_ngc
+        - vllm_container
   tags: [spark, vllm_ngc_stack, stack_ngc, vllm_container]
   when: spark_provision_vllm_stacked_container | default(true) | bool
 
 - name: Phase — diagnostics (Docker + HF cache probes)
   ansible.builtin.include_role:
     name: spark_diagnostics
+    apply:
+      tags: [spark, diagnostics, probe]
   tags: [spark, diagnostics, probe]
   when: spark_provision_diagnostics | default(false) | bool
+
+- name: Phase — Observability (node_exporter, dcgm-exporter, otel-agent, promtail, rasdaemon)
+  ansible.builtin.include_role:
+    name: spark_observability
+    apply:
+      tags:
+        - spark
+        - spark_obs
+        - spark_obs_common
+        - spark_obs_node_exporter
+        - spark_obs_dcgm
+        - spark_obs_otel
+        - spark_obs_promtail
+        - spark_obs_rasdaemon
+  tags: [spark, spark_obs]
+  when: spark_provision_observability | default(true) | bool

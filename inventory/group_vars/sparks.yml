@@ -12,6 +12,13 @@ ansible_user: "{{ spark_ansible_user | default('casibbald') }}"
 ansible_become: true
 ansible_become_method: sudo
 
+# --- LAN uplink (ISP/router Ethernet, typically enP7s7 on GX10) ---
+# Disable IPv6 on this NIC only — avoids DHCPv6 duplicate-address churn vs peers on the same
+# segment and broken IPv6 default routing for HF/ASGI stacks (see llmwiki/concepts/ipv6-asgi-hang.md).
+# QSFP / RoCE netdevs stay IPv6-capable for link-local / GID plumbing; fabric-2 NM profile already
+# pins ipv6.method disabled separately (see interconnect notes below).
+spark_lan_disable_ipv6_on_interface: "enP7s7"
+
 # Runtime user for Ray/vLLM/NCCL (inside / outside containers). HF cache lives under this user's home.
 spark_runtime_user: nvidia
 spark_runtime_home: "/home/{{ spark_runtime_user }}"
@@ -37,11 +44,55 @@ spark_apt_upgrade_mode: safe
 spark_apt_cache_valid_time: 0
 spark_apt_autoremove: false
 
+# --- Kernel pin / apt-mark hold / OTA service mask (roles/spark_kernel) ---
+# Diagnostic step-back for the GX10 abrupt-power-off issue
+# (llmwiki/runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md).
+# Both Sparks pinned to 6.17.0-1008-nvidia in sync — that gives us a clean
+# before/after comparison against the recent crash history (which was on
+# 6.17.0-1014-nvidia). If MTBF improves materially over the next 1-2 weeks,
+# the recent kernel bump is implicated; if not, kernel is ruled out and we
+# move to the load-axis bisection (--max-model-len, --max-num-seqs, Hermes
+# concurrent-aux).
+#
+# Per-host pins in inventory/host_vars/<host>.yml override this if needed
+# for asymmetric experiments later (e.g. step nvidia1 further to 6.11 while
+# nvidia2 stays on 1008).
+#
+# Roll forward to current HWE: change to "6.17.0-1014-nvidia" or "" (the
+# latter releases GRUB_DEFAULT entirely and lets HWE meta drive). Either
+# way needs `just spark-reboot` to adopt.
+spark_kernel_pin: "6.17.0-1008-nvidia"
+spark_kernel_apt_hold: true
+spark_kernel_disable_auto_apt_upgrade: true
+# spark_kernel_show_grub_menu: false       # set true to expose the GRUB menu (5s) for next-boot override
+
 # Docker: use the engine from the DGX / NVIDIA platform image. Do NOT apt-install docker.io.
 docker_install_packages: false
 docker_group_users: [nvidia, casibbald]
 docker_packages: []
-docker_daemon_config: {}
+# journald log driver = uniform observability path: kernel + systemd + dockerd
+# + every container's stdout/stderr all flow into journald, where Promtail
+# (roles/spark_observability) ships them to ms02 Loki via a single scrape config.
+# Avoids a second scrape on /var/lib/docker/containers/*-json.log. Existing
+# containers keep their old logs until restarted; new containers use journald.
+# `live-restore: true` lets containers survive a dockerd restart.
+#
+# `runtimes.nvidia` registers /usr/bin/nvidia-container-runtime as a Docker
+# runtime so `docker run --runtime nvidia ...` works (NVIDIA's canonical
+# pattern in their docs). Without this, only `--gpus all` works (which
+# transparently invokes nvidia-container-toolkit) — fine for our roles, but
+# operators copy-pasting from NVIDIA NGC docs trip on `--runtime nvidia: not
+# registered`. Both flags can coexist (`--runtime nvidia --gpus all`).
+# Default runtime stays `runc`; we just register `nvidia` as an OPTION.
+docker_daemon_config:
+  log-driver: journald
+  log-opts:
+    tag: "{{ '{{' }}.Name{{ '}}' }}"  # makes container name visible in journald CONTAINER_NAME field
+  live-restore: true
+  runtimes:
+    nvidia:
+      path: /usr/bin/nvidia-container-runtime
+      runtimeArgs: []
 
 # CUDA: host-side toolkit is NOT required for the container stack (NGC image is self-contained).
 # Variables below are kept for playbooks/nccl_sparks.yml which builds NCCL on the host.
@@ -151,23 +202,23 @@ vllm_stacked_container_image: "nvcr.io/nvidia/vllm:26.03-py3"
 vllm_stacked_container_api_port: 8000
 # Flip to true to force container recreation when the image tag or env-file changes.
 vllm_stacked_container_recreate: false
+# Recreate-only hygiene (roles/vllm_stacked_container/tasks/recreate_host_cleanup.yml): GPU KV/prefix-cache
+# blocks do not persist across crashes — defaults drop Linux page caches per Spark; optional `/tmp/ray` purge via
+# `vllm_stacked_container_clear_ray_tmp_before_recreate` / `just spark-vllm-provision-recreate` comments.
+
 # Model + TP configuration.
 #
-# CURRENT: Qwen/Qwen3.5-35B-A3B-FP8 — the exact model + quantization the
-# spark-vllm-docker reference recipe runs (see that repo's
-# recipes/qwen3.5-35b-a3b-fp8.yaml). FP8 cuts per-token memory bandwidth ~2×
-# vs BF16, which is the lever that matters on GB10's 273 GB/s LPDDR5X decode
-# wall (see blog.exolabs.net/nvidia-dgx-spark for the architectural story).
+# CURRENT: Qwen/Qwen3.6-35B-A3B-FP8 — FP8 on GB10; prefetch via hf-prefetch
+# (see hf_prefetch_models). Prior production default was Qwen3.5-35B-A3B-FP8
+# (spark-vllm-docker recipes/qwen3.5-35b-a3b-fp8.yaml).
 #
-# Why not Qwen3.6-35B-A3B (the newer hybrid DeltaNet model we were running):
-# it only ships in BF16 on HF at the moment, so decode is bandwidth-bound at
-# ~6 GB/token/node → ~45 tok/s hard ceiling. FP8 halves that to ~3 GB/token
-# → ~90 tok/s. When an FP8 variant of 3.6 lands we'll swap.
+# Historical note: BF16-only Qwen3.6 was decode-bandwidth-bound (~45 tok/s); FP8
+# is the intended fix vs that baseline.
 #
 # Earlier blockers (preserved for institutional memory):
 #   Gemma-4 — requires `vllm/vllm-openai:gemma4-cu130` (different image from NGC).
 #   Gemma-3-27b-it — HF-gated, account not yet approved.
-vllm_default_model: "Qwen/Qwen3.5-35B-A3B-FP8"
+vllm_default_model: "Qwen/Qwen3.6-35B-A3B-FP8"
 vllm_tensor_parallel_size: 2
 # NGC 26.03-py3 ships vllm without the fastsafetensors extra (tested 2026-04-19:
 # `ImportError: Please install vllm[fastsafetensors]`). The qwen-patch step in
@@ -177,13 +228,13 @@ vllm_tensor_parallel_size: 2
 vllm_load_format: "fastsafetensors"
 # Extra `vllm serve` args — tuned for full-cluster throughput.
 #
-# Context: 262144 = Qwen3.5-35B-A3B native max_position_embeddings (no rope
+# Context: 262144 = Qwen3.x MoE native max_position_embeddings (no rope
 # extension). With FP8 weights + fp8 KV cache the per-token KV halves vs
 # BF16, so max_model_len 262144 fits KV comfortably within the 70+ GiB cache
 # vLLM provisions at init.
 #
 # The flag block below is the adopted full set from
-# spark-vllm-docker/recipes/qwen3.5-35b-a3b-fp8.yaml — same image family
+# spark-vllm-docker recipes (qwen3.5-35b-a3b-fp8.yaml lineage) — same image family
 # (NGC vllm 26.03-py3), same GB10 architecture, same model. What each flag
 # buys us (measurements in runs/2026-04-19-qwen35-fp8-adoption.md once we land):
 #
@@ -225,7 +276,7 @@ vllm_api_server_extra_args:
   # Empirically (cursor-guide research 2026-04-20) the following names are
   # rejected by the send-time validator even though Cursor's Add-Model field
   # accepts them at type time:
-  #   - "Qwen/Qwen3.5-35B-A3B-FP8"  (slash is stripped)
+  #   - "Qwen/Qwen3.6-35B-A3B-FP8"  (slash is stripped)
   #   - "Qwen"                       (short bare name)
   #   - "qwen3"                       (no `qwen-*` escape hatch exists)
   # There is NO `custom-*` / `local-*` / `byok-*` prefix. Every self-hosted
@@ -246,7 +297,7 @@ vllm_api_server_extra_args:
   - "--served-model-name"
   - "gpt-4o-mini"
   - "qwen3"
-  - "Qwen/Qwen3.5-35B-A3B-FP8"
+  - "Qwen/Qwen3.6-35B-A3B-FP8"
   - "--max-model-len"
   - "262144"
   - "--gpu-memory-utilization"
@@ -347,12 +398,14 @@ vllm_distributed_extra_env:
   # --- RoCE v2 fast path (data plane) ---
   NCCL_IB_DISABLE: "0"                    # enable NCCL's built-in verbs transport
   NCCL_IB_HCA: "{{ nccl_ib_hca }}"        # single- or multi-rail, see spark_dual_hca_enabled
-  # Pin the RoCE GID index to 3 = RoCE v2 + IPv4. Fabric 2 has no IPv4 GID at
-  # index 0/1 (those are IPv6 link-local from MAC), so auto-selection picks
-  # mismatched GIDs across nodes and QP creation fails with EINVAL. Index 3 is
-  # the RoCE v2 IPv4 slot on BOTH HCAs on both Sparks — verified via
-  # `show_gids` after provisioning. See llmwiki/runs/2026-04-19-dual-rail-cutover.md.
-  NCCL_IB_GID_INDEX: "3"
+  # RoCE GID index: emitted per-host as NCCL_IB_GID_INDEX in
+  # roles/vllm_stacked_container/templates/ngc-ray-*.env.j2 — the local RDMA table
+  # index for RoCE v2 + IPv4 differs by unit (gx10-e1ce uses 3 on both rails;
+  # gx10-47b5 uses 4 — see `show_gids` and inventory/host_vars/nvidia2.yml).
+  # vLLM Ray executor copies NCCL_* from the leader into workers unless listed in
+  # ray_non_carry_over_env_vars.json (role-managed bind-mount); otherwise followers
+  # inherit the leader's GID index and ncclCommInitRank fails cross-node.
+  # Do not set NCCL_IB_GID_INDEX here or it would override the per-host line.
   NCCL_NET_GDR_LEVEL: "PHB"               # GPUDirect RDMA: GPU↔NIC across PCIe host bridge.
                                           #   Per `nvidia-smi topo -m` the GB10 GPU
                                           #   sits at NODE distance from every NIC,
@@ -378,6 +431,35 @@ vllm_distributed_extra_env:
   VLLM_MARLIN_USE_ATOMIC_ADD: "1"
   RAY_memory_monitor_refresh_ms: "0"
   RAY_CGRAPH_get_timeout: "900"
+  # OpenTelemetry SDK off across all Ray actor processes. vLLM's
+  # vllm/tracing/otel.py and the OTel-side `OtlpGrpcMetricExporter` periodic
+  # exporter triggers a `getenv()` SIGSEGV on aarch64 + glibc + gRPC under
+  # this NGC build (observed 2026-04-29 inside `vllm-ngc-ray-worker-nvidia2`,
+  # actor 4210b139…01000000 dies → engine core ActorDiedError → API server
+  # raises `RuntimeError: Engine core initialization failed`). Stack trace is
+  # OpenTelemetryMetricExporter::Export → grpc_core::GetEnv → libc getenv,
+  # i.e. the well-known glibc getenv-vs-env-mutate race.
+  # Side-effects of disabling: we lose nothing we use today — vLLM's
+  # Prometheus `/metrics` endpoint (consumed by `vllm-stack-autoupgrade`'s
+  # quiet-window gate) is independent of OTel push and stays alive.
+  # See: llmwiki/runs/2026-04-29-otel-metrics-segv-engine-died.md (TBD).
+  OTEL_SDK_DISABLED: "true"
+  OTEL_METRICS_EXPORTER: "none"
+  OTEL_TRACES_EXPORTER: "none"
+  OTEL_LOGS_EXPORTER: "none"
+  # Hugging Face Hub: stay strictly local. Every weight/tokenizer/config file
+  # vLLM needs lands on both Sparks via `hf-prefetch.service` before the model
+  # is added to rotation, and Ansible blocks on `state.json` flipping to
+  # `ready`. Without this, `transformers` does HEAD on every config probe at
+  # cold start (preprocessor_config.json, generation_config.json, …) — see
+  # 2026-04-29 07:16:22 vLLM serve log, "HTTP Error 504 thrown while
+  # requesting HEAD https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8/.../
+  # preprocessor_config.json". With HF_HUB_OFFLINE=1, transformers skips the
+  # network and decides cache hit/miss locally — fast, and immune to HF
+  # outages and the 2026-04-18 IPv6 black-hole symptom (concepts/ipv6-asgi-hang.md).
+  # If you ever need to add a model NOT in the cache, set this to "0" via -e
+  # for the one playbook run, or stage it with hf-prefetch first (recommended).
+  HF_HUB_OFFLINE: "1"
   # Ray prestarts 4 python workers per node at bring-up; each is ~200 MiB of
   # unified memory that never gets used by our 2-node TP cluster (vLLM talks
   # to named actors, not the worker pool). Disable.
@@ -427,7 +509,16 @@ spark_provision_vllm_autoupgrade: true
 # take is identical to what Ansible just did with `recreate=true`, and the
 # stabilization + quiet-window gates add safety on top.
 vllm_autoupgrade_enabled: true
-vllm_autoupgrade_pinned_tag: ""          # e.g. "26.03-py3" to pin
+# Pinned to 26.03-py3 since 2026-04-29: nvcr.io/nvidia/vllm:26.04-py3 ships
+# WITHOUT `ray` in any executable path (`find / -name ray -executable` returns
+# nothing in the 26.04 image — NVIDIA repackaged the image without the bundled
+# ray console script). Promotion to 26.04 fails with `/bin/bash: line 1: ray:
+# command not found` regardless of `bash -c` vs `bash -lc`. Lift the pin only
+# after confirming the image either restores `ray` or we update
+# `roles/vllm_stacked_container/tasks/main.yml` to use the new launch pattern
+# (e.g. `python -m ray ...` once we know where Python lives in 26.04+).
+# See: llmwiki/runs/2026-04-29-cluster-recovery-and-26.04-rollback.md.
+vllm_autoupgrade_pinned_tag: "26.03-py3"
 vllm_autoupgrade_poll_interval_sec: 300  # 5 min
 vllm_autoupgrade_stabilization_sec: 3600 # 1 h ready-time before promotion
 vllm_autoupgrade_quiet_window_sec: 300   # 5 min quiet API before bouncing
@@ -447,13 +538,15 @@ vllm_autoupgrade_max_wait_for_quiet_sec: 86400  # give up after 24 h if busy
 #   ssh casibbald@nvidia1 'jq ".models" /var/lib/hf-prefetch/state.json'
 #   ssh casibbald@nvidia1 'journalctl -u hf-prefetch -f'
 spark_provision_hf: true
-# Order matters — daemon processes sequentially. Qwen3.6 first because it's
-# the current best-in-class coder (see concepts/qwen-model-ladder in the wiki
-# for the comparison). Total WAN cost ≈ 130 GB; QSFP save/sync cost ≈ 300 s per
-# model. Background; poll `jq .models /var/lib/hf-prefetch/state.json`.
+# Order matters — daemon processes sequentially. After TinyLlama (smoke),
+# prefetch larger checkpoints in priority order. Poll:
+#   jq .models /var/lib/hf-prefetch/state.json
+# Total WAN cost is multi–100 GB for the Qwen checkpoints; QSFP save/sync is
+# ~minutes per model after each download completes on the leader.
 hf_prefetch_models:
   - TinyLlama/TinyLlama-1.1B-Chat-v1.0            # keep, smoke model
-  - Qwen/Qwen3.5-35B-A3B-FP8                      # primary target, matches spark-vllm-docker recipe
+  - Qwen/Qwen3.6-35B-A3B-FP8                    # production default (vllm_default_model)
+  - Qwen/Qwen3.5-35B-A3B-FP8                    # prior stack; keep warm for rollback / A-B
 # Flip this to true in CI / blocking workflows to have Ansible wait for
 # every model to land (default: false, returns immediately).
 hf_prefetch_wait_for_ready: false
@@ -464,7 +557,13 @@ firewall_default_outgoing: allow
 # Ray uses many TCP ports across Sparks; trust the full interconnect segment.
 firewall_spark_interconnect_cidr: "169.254.0.0/16"
 # Global allow list (any source). Port 8000 is the NGC container API port.
+# 8265 is the Ray dashboard; bound to 0.0.0.0 inside the head container, but
+# only allowed inbound from the trusted LAN (see firewall_trusted_lan_*).
 firewall_allow_tcp_ports: [22, "{{ vllm_ray_port }}", "{{ vllm_stacked_container_api_port }}"]
-# Trust home/LAN for vLLM API + Ray + SSH (override if your subnet differs).
+# Trust home/LAN for vLLM API + Ray + SSH + Ray dashboard (override if your subnet differs).
 firewall_trusted_lan_cidr: "192.168.1.0/24"
-firewall_trusted_lan_tcp_ports: [22, "{{ vllm_stacked_container_api_port }}", "{{ vllm_ray_port }}"]
+firewall_trusted_lan_tcp_ports:
+  - 22
+  - "{{ vllm_stacked_container_api_port }}"
+  - "{{ vllm_ray_port }}"
+  - "{{ vllm_stacked_container_dashboard_port }}"

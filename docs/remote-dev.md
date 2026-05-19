@@ -9,7 +9,7 @@ traffic land on **ms02**. The Mac stays light; ms02 does the work.
 | Surface       | Primary? | What it is                                | Where UI lives | Where files live | Where builds run |
 |---------------|----------|-------------------------------------------|----------------|------------------|------------------|
 | Remote-SSH    | **yes**  | Cursor's bundled `open-remote-ssh` ext    | Mac            | ms02             | ms02             |
-| SSHFS mount   | secondary| Finder/grep/tree convenience from the Mac | Mac            | ms02             | **do not build against this** |
+| NFSv4 `remote/` | secondary | Finder/grep/tree convenience from the Mac (`just nfs-up`) | Mac       | ms02             | **do not build against this** |
 | Cloud Agents  | disabled | Cursor-cloud-driven agents on ms02        | (cursor.com)   | ms02             | ms02             |
 
 The `cursor_agent_worker` role + systemd unit is preserved in the repo but
@@ -59,12 +59,18 @@ with a self-hosted worker. The `cursor_agent_worker` role is ready to
 enable for that; it's disabled by default because day-to-day dev doesn't
 need it.
 
-## SSHFS (secondary convenience)
+## NFSv4 at `~/Workspace/remote` (secondary convenience)
 
-Use case: you want Finder, `rg`, `fzf`, or a quick `ls ~/Workspace/remote`
-from the Mac's terminal without an SSH session. **Do not build against
-this mount** — every read traverses SSH; `cargo build`, `tilt up`, and
-`npm install` across the mount are painfully slow and unreliable.
+Use case: Finder, `rg`, or a quick `ls ~/Workspace/remote` from the Mac without
+Remote-SSH. **Do not build against this mount** — use a Remote-SSH window to
+ms02 for `cargo`, Tilt, `npm`, etc.
+
+Ops docs live in **`local/cylon-local-infra`** (`docs/`, `llmwiki/`). **Do not**
+add or keep **`remote/README.md`** — it pollutes the NFS stub when unmounted and
+confuses Tahoe mounts; Cursor “add README” prompts should target **`local/`** only.
+
+Lifecycle: `just nfs-up`, `just nfs-down`, `just nfs-status` (see that repo's
+`justfile` and `llmwiki/concepts/workspace-mount-protocols.md`).
 
 ### Layout on the Mac
 
@@ -73,49 +79,38 @@ Post-move, `~/Workspace/` is the single root you open in Cursor:
 ```
 ~/Workspace/
 ├── local/          # Mac-native clones (this repo lives under local/cylon-local-infra)
-├── remote/         # SSHFS mount of ms02:~/Workspace  (populated by `just sshfs-up`)
-└── Workspace_old/  # archived pre-move contents, kept as a safety net
+├── remote/         # NFSv4 mount stub → ms02:~/Workspace (`just nfs-up`; root:wheel dir)
+└── Workspace_old/  # archived pre-move contents, kept as a safety net (optional)
 ```
 
 Cursor sees `local/` and `remote/` as siblings in the tree. Edit Mac-side
-stuff under `local/`; do anything build-heavy under `remote/` via Cursor
-Remote-SSH to ms02 (or the `just ms02-*` helpers) so the compile lands on
-ms02's real filesystem, not the FUSE mount.
+stuff under `local/`; do anything build-heavy via Remote-SSH to ms02 (or
+`just ms02-*`) so compiles hit ms02's real filesystem, not NFS from the Mac.
 
 ### Install (Mac-side, one-time)
 
-```
-just sshfs-install        # macfuse + sshfs-mac via Homebrew
-```
-
-macFUSE needs a kernel-extension approval — System Settings → Privacy &
-Security → "Allow", reboot if prompted.
+From `cylon-local-infra`: `ansible-playbook playbooks/mac_workstation.yml --ask-become-pass`
+(`~/Workspace/remote` **root:wheel** stub, Spotlight, `nfs.conf`, `/etc/hosts`, SSH `Include`, …). Server: `playbooks/nfs_server.yml` on ms02.
 
 ### Daily
 
 ```
-just sshfs-up             # mount ms02:~/Workspace at ~/Workspace/remote
-just sshfs-status         # verify
-just sshfs-down           # unmount
-just sshfs-reconnect      # fix "Transport endpoint not connected" after Mac wakes
+just nfs-up               # mount ms02 export at the shared stub (see cylon-local-infra justfile)
+just nfs-status
+just nfs-down
+just nfs-reconnect        # after sleep/wake blips
 ```
 
 Finder: `open ~/Workspace/remote`.
 
-> The mountpoint lives inside `~/Workspace/` so Cursor's single open
-> folder (`~/Workspace`) sees both the Mac-local checkouts (`local/`)
-> and the ms02 view (`remote/`) in one tree. The LAN round-trip to ms02
-> over 10GbE is fast enough that casual reads (`rg`, `open`, Finder
-> preview) feel native; heavy operations still go through a Remote-SSH
-> terminal.
+> Keeping `~/Workspace` as the Cursor root makes `local/` and `remote/`
+> siblings. Casual reads over LAN NFS are fine; heavy work stays on ms02 via
+> Remote-SSH.
 
 ### Known rough edges
 
-- macOS sleep → wake sometimes leaves the mount in a zombie state. Run
-  `just sshfs-reconnect`.
-- Finder may spray `._DS_Store` files — the mount flags already include
-  `noappledouble`/`noapplexattr` to mitigate; if one slips through, drop
-  it from ms02 with `find ~/Workspace -name '._*' -delete`.
+- macOS sleep → wake can leave NFS stale — `just nfs-reconnect`.
+- **Do not** maintain `remote/README.md`; documentation belongs under `local/cylon-local-infra`.
 - Editors pointed at the mount will feel sluggish and mis-fire file
   watchers. Don't do it. Use Remote-SSH for actual editing.
 
@@ -144,9 +139,9 @@ These use the same `ms02` SSH alias and TTY-forward, so Ctrl-C behaves.
      │                                          ├─ cylon-local-infra/
      │                                          ├─ shared-kind-cluster/
      │                                          └─ …
-     │  SSHFS (secondary, browse only)
+     │  NFSv4 (secondary, browse only)
      │
-  ~/Workspace/remote ──────────────────>  same path via FUSE
+  ~/Workspace/remote ──────────────────>  same tree via NFS (`just nfs-up`)
      │
   Terminal / Finder
 ```

@@ -1,0 +1,57 @@
+---
+# Promtail config (per-Spark). Single scrape source: journald — which is
+# the union of kernel + systemd + dockerd + every container's stdout/stderr
+# (because the Spark dockerd is configured with --log-driver=journald via
+# group_vars/sparks.yml: docker_daemon_config).
+#
+# Push target: {{ spark_observability_loki_endpoint }}.
+
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: 9080
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 0
+
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: {{ spark_observability_loki_endpoint }}
+    backoff_config:
+      min_period: 1s
+      max_period: 30s
+      max_retries: 10
+    batchwait: 2s
+    batchsize: 1048576
+
+scrape_configs:
+  - job_name: journal
+    journal:
+      max_age: 12h
+      json: false
+      path: /var/log/journal
+      labels:
+{% for k, v in spark_observability_resource_attributes.items() %}
+        {{ k }}: "{{ v }}"
+{% endfor %}
+        job: journal
+
+    relabel_configs:
+      # Promote useful journald fields to Loki labels (low-cardinality).
+      - source_labels: ['__journal__systemd_unit']
+        target_label: 'unit'
+      - source_labels: ['__journal__hostname']
+        target_label: 'journal_hostname'
+      - source_labels: ['__journal__transport']
+        target_label: 'transport'
+      - source_labels: ['__journal_priority_keyword']
+        target_label: 'level'
+
+      # When the message came via dockerd's journald log-driver (set with
+      # docker_daemon_config: log-opts.tag = "{{ '{{' }}.Name{{ '}}' }}"), the
+      # container name lands in CONTAINER_NAME. Promote it for easy filtering
+      # of vllm-ngc-ray-{head,worker-*} streams in Grafana Explore / Logs.
+      - source_labels: ['__journal_container_name']
+        target_label: 'container_name'
+      - source_labels: ['__journal_image_name']
+        target_label: 'container_image'
