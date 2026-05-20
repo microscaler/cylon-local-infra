@@ -1,9 +1,9 @@
 ---
 title: 8-Spark fabric, MS-A2 orchestrator, switch migration plan
 kind: concept
-status: blocked-on-hardware
+status: in-progress
 tags: [architecture, scale-out, switch, mikrotik, ms-a2, orchestrator, k8s, k3s, future, fabric, qsfp, pinned]
-updated: 2026-04-29
+updated: 2026-05-20
 related:
   - concepts/ngc-stacked-container-stack.md
   - concepts/nccl-on-spark.md
@@ -26,7 +26,7 @@ fabric, fronted by a dedicated control-plane host**. Captures the migration
 plan, the topology, the **Docker-vs-k8s decision** for the inference
 nodes, and the **production model** decision for the TP=8 deployment shape.
 
-> ## 📌 Status: PINNED — blocked on hardware arrival (2026-04-29)
+> ## 📌 Status: IN PROGRESS — Sparks 3–8 arrived 2026-05-20 (MS-A2 + switch TBD)
 >
 > The architecture, model selection, migration phases, and Docker-vs-k8s
 > decision are **all settled** in this page. **No further repo changes

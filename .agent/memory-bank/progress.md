@@ -1,3 +1,9 @@
+## 2026-05-20 — Baseline tag + new workstreams
+
+- **Committed + tagged:** `spark-ray-baseline-2026-05-20` — Ray + 26.03-py3 2-Spark baseline before torchrun migration and 8-node expansion.
+- **Torchrun migration kickoff:** `llmwiki/runs/2026-05-20-torchrun-migration-kickoff.md`
+- **8-Spark hardware arrival:** `llmwiki/runs/2026-05-20-8-spark-hardware-arrival.md` — discovery checklist for 6 new Ascent boxes.
+
 # Progress
 
 ## Done (interim snapshot)
