@@ -33,8 +33,9 @@ observability/autoupgrade before scaling to 8 nodes.
 ### Phase 0 — Pre-flight (2-Spark, still Ray)
 
 - [x] Tag `spark-ray-baseline-2026-05-20`
-- [ ] Confirm both Sparks on pinned kernel `6.17.0-1018-nvidia` + NVIDIA modules present
-- [ ] `just spark-provision` passes `spark_assert` on Ray stack
+- [x] Confirm both Sparks on pinned kernel `6.17.0-1018-nvidia` + NVIDIA modules present
+- [ ] `just spark-provision` passes `spark_assert` on Ray stack — **blocked 2026-05-20**: concurrent
+      provision runs (Ray ↔ torchrun inventory flips) destroy containers mid-playbook
 - [ ] Capture perf baseline (tokens/s, latency) for A/B comparison
 
 ### Phase 1 — Torchrun A/B on 26.03 (optional smoke)
@@ -44,6 +45,18 @@ observability/autoupgrade before scaling to 8 nodes.
 3. `just spark-provision-recreate`
 4. Verify: `just spark-vllm-torchrun-ps`, `just spark-vllm-torchrun-status`, `just spark-vllm-lan-probe`
 5. Roll back to Ray if blocked; restore from tag baseline
+
+**2026-05-20 session status:**
+
+- [x] Root cause fixed: Ray `pgrep -af 'vllm serve'` self-match → `[v]llm serve` (commit `41bfabc`)
+- [x] Torchrun role: leader-first start, headless follower, `master-addr`, `/v1/models` wait (commit `41bfabc`)
+- [x] Qwen patch task: `failed_when: false` so pip SIGKILL does not abort provision (commit `0c51b68`)
+- [x] Torchrun race hardening: defensive `docker rm`, `run_once` leader pause (commit `156c30c`)
+- [ ] `/v1/models` green on torchrun — containers start but model load not validated (parallel provision interference)
+- [ ] HF cache parity on nvidia2 — may need `hf-prefetch` rsync if torchrun fails on weight load
+
+**Operator rule:** run **one** stack reconcile at a time (`just spark-provision-recreate` OR parent agent —
+not both). Inventory must stay stable for the duration of the playbook.
 
 ### Phase 2 — Image bump to 26.04-py3
 
