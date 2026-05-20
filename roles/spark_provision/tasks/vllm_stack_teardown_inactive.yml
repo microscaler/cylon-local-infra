@@ -1,0 +1,52 @@
+---
+# Ray ↔ torchrun are mutually exclusive — both bind :8000, NCCL, and QSFP.
+# Tear down the inactive stack on every provision (and before assert) so partial
+# tag runs and manual `just spark-vllm-start` recovery cannot leave both up.
+
+- name: Remove torchrun containers when Ray stack is declared active
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_torchrun_stacked_container_name | default('vllm-ngc-torchrun-' ~ inventory_hostname) }}"
+  failed_when: false
+  when: (vllm_stack_kind | default('ray')) == 'ray'
+
+- name: Remove stray torchrun containers (Ray stack active)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -aq --filter 'name=vllm-ngc-torchrun' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      docker rm -f $ids
+    fi
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when: (vllm_stack_kind | default('ray')) == 'ray'
+
+- name: Remove Ray head when torchrun stack is declared active
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_stacked_container_ray_head_name | default('vllm-ngc-ray-head') }}"
+  failed_when: false
+  when:
+    - (vllm_stack_kind | default('ray')) == 'torchrun'
+    - inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Remove Ray worker when torchrun stack is declared active
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_stacked_container_ray_worker_name | default('vllm-ngc-ray-worker-' ~ inventory_hostname) }}"
+  failed_when: false
+  when:
+    - (vllm_stack_kind | default('ray')) == 'torchrun'
+    - inventory_hostname != (groups['sparks'] | sort | first)
+
+- name: Remove stray Ray containers (torchrun stack active)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -aq --filter 'name=vllm-ngc-ray' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      docker rm -f $ids
+    fi
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when: (vllm_stack_kind | default('ray')) == 'torchrun'

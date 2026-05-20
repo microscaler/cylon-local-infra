@@ -149,6 +149,40 @@
     - (vllm_stack_kind | default('ray')) == 'torchrun'
   tags: [spark, spark_assert, vllm_torchrun_stack, vllm_container, stack_torchrun]
 
+- name: Assert — no Ray containers when torchrun stack is active
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -q --filter 'name=vllm-ngc-ray' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      echo "Ray containers must not run alongside torchrun (port/NCCL thrash):"
+      docker ps -a --filter 'name=vllm-ngc-ray'
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - spark_assert_enabled | bool
+    - (vllm_stack_kind | default('ray')) == 'torchrun'
+  tags: [spark, spark_assert, vllm_torchrun_stack, vllm_container, stack_torchrun]
+
+- name: Assert — no torchrun containers when Ray stack is active
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -q --filter 'name=vllm-ngc-torchrun' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      echo "torchrun containers must not run alongside Ray (port/NCCL thrash):"
+      docker ps -a --filter 'name=vllm-ngc-torchrun'
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - spark_assert_enabled | bool
+    - (vllm_stack_kind | default('ray')) == 'ray'
+  tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
+
 - name: Assert — vLLM OpenAI /v1/models on leader
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ vllm_stacked_container_api_port | default(8000) }}/v1/models"

@@ -14,3 +14,16 @@
   when:
     - vllm_torchrun_stacked_stop_ray_containers | bool
     - inventory_hostname != (groups['sparks'] | sort | first)
+
+- name: Stop any stray Ray containers when switching to torchrun
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -aq --filter 'name=vllm-ngc-ray' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      docker rm -f $ids
+    fi
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when: vllm_torchrun_stacked_stop_ray_containers | bool

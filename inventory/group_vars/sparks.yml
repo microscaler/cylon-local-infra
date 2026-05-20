@@ -193,13 +193,13 @@ spark_fabric2_peer_network: "10.200.0.0/30"
 #     AllReduces — the +70 % NCCL headroom translates directly to TTFT.
 spark_dual_hca_enabled: true
 
-# --- NGC stacked container stack (roles/vllm_stacked_container | vllm_torchrun_stacked) ---
-# Production stack: torchrun + external_launcher on 26.04-py3 (Ray removed from NGC image).
-# Rollback baseline: git tag `spark-ray-baseline-2026-05-20` + vllm_stack_kind: ray + 26.03-py3.
-# NOTE 2026-05-20: torchrun migration in progress — temporarily on ray until torchrun A/B passes.
-vllm_stack_kind: torchrun   # ray | torchrun
+# --- NGC stacked container stack (roles/vllm_stacked_container) ---
+# Production: Ray + 26.03-py3 + Qwen3.6-35B-A3B-FP8 (TP=2). Torchrun path retained
+# for future A/B only — set vllm_stack_kind: torchrun when re-validating.
+# Baseline snapshot: git tag `spark-ray-baseline-2026-05-20`.
+vllm_stack_kind: ray   # ray | torchrun
 
-# Image tag shared by both stack roles (torchrun inherits via vllm_torchrun_stacked_image).
+# Image tag: pinned to 26.03-py3 (26.04+ drops bundled `ray`; see 2026-04-29 rollback run).
 vllm_stacked_container_image: "nvcr.io/nvidia/vllm:26.03-py3"
 # API port the container binds. Add this to firewall_allow_tcp_ports.
 vllm_stacked_container_api_port: 8000
@@ -464,7 +464,8 @@ vllm_distributed_extra_env:
   # If you ever need to add a model NOT in the cache, set this to "0" via -e
   # for the one playbook run, or stage it with hf-prefetch first (recommended).
   HF_HUB_OFFLINE: "1"
-  # Ray prestarts 4 python workers per node at bring-up; each is ~200 MiB of
+  # Required for --max-model-len 225000 on Qwen3.6 (native 262144; vLLM 26.03+ validates against config).
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   # unified memory that never gets used by our 2-node TP cluster (vLLM talks
   # to named actors, not the worker pool). Disable.
   RAY_num_prestart_python_workers: "0"
@@ -512,7 +513,9 @@ spark_provision_vllm_autoupgrade: true
 # ([runs/2026-04-19-26.03-py3-upgrade.md]). The bounce path the daemon will
 # take is identical to what Ansible just did with `recreate=true`, and the
 # stabilization + quiet-window gates add safety on top.
-vllm_autoupgrade_enabled: false
+vllm_autoupgrade_enabled: true
+# Pinned to 26.03-py3 since 2026-04-29: 26.04-py3 ships without bundled `ray`.
+# See llmwiki/runs/2026-04-29-cluster-recovery-and-26.04-rollback.md.
 vllm_autoupgrade_pinned_tag: "26.03-py3"
 vllm_autoupgrade_poll_interval_sec: 300  # 5 min
 vllm_autoupgrade_stabilization_sec: 3600 # 1 h ready-time before promotion

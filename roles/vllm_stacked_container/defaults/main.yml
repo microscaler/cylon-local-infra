@@ -50,6 +50,8 @@ vllm_stacked_container_ray_tmp_dir: /tmp/ray
 
 # Stop/disable bare-metal systemd units (ray-head, ray-worker, vllm-stacked, vllm) before starting Docker Ray.
 vllm_stacked_container_stop_bare_metal_systemd: true
+# Remove torchrun containers before Ray — Ray and torchrun both bind :8000 / NCCL.
+vllm_stacked_container_stop_torchrun_containers: true
 
 # Pull NGC image during provision.
 vllm_stacked_container_pull_image: true

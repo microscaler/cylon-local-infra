@@ -93,7 +93,6 @@
 - name: Start torchrun vLLM container on leader (NGC image, host network)
   ansible.builtin.shell: |
     set -euo pipefail
-    docker rm -f "{{ vllm_torchrun_stacked_container_name }}" 2>/dev/null || true
     docker run -d --restart unless-stopped \
       --name "{{ vllm_torchrun_stacked_container_name }}" \
       --entrypoint /bin/bash \
@@ -107,7 +106,7 @@
       "{{ vllm_torchrun_stacked_image }}" \
       -lc 'set -euo pipefail
     exec > /root/vllm-torchrun.log 2>&1
-    {% if vllm_torchrun_stacked_triton_cache_invalidate | bool %}
+    {% if vllm_torchrun_stacked_recreate | bool and vllm_torchrun_stacked_triton_cache_invalidate | bool %}
     rm -rf "${TRITON_CACHE_DIR:-$HOME/.triton/cache}"/* 2>/dev/null || true
     {% endif %}
     {% if vllm_torchrun_stacked_qwen_moe_patches_enabled | bool %}
@@ -123,7 +122,7 @@
       --master-addr="{{ spark_torchrun_leader_ip }}" \
       --master-port={{ vllm_torchrun_stacked_rdzv_port | int }} \
       -m vllm.entrypoints.openai.api_server \
-      "{{ vllm_default_model }}" \
+      --model "{{ vllm_default_model }}" \
       --host "{{ vllm_torchrun_stacked_api_host }}" \
       --port {{ vllm_torchrun_stacked_api_port | int }} \
       --tensor-parallel-size {{ vllm_tensor_parallel_size | int }} \
@@ -157,26 +156,21 @@
 - name: Pause before starting follower torchrun containers
   ansible.builtin.pause:
     seconds: "{{ vllm_torchrun_stacked_follower_start_delay_sec | int }}"
-  run_once: true
   when:
-    - inventory_hostname == (groups['sparks'] | sort | first)
+    - inventory_hostname != (groups['sparks'] | sort | first)
     - vllm_torchrun_stacked_recreate | bool
-      or vllm_torchrun_stacked_start_leader is changed
+      or vllm_torchrun_stacked_running.rc != 0
       or (
-        vllm_torchrun_stacked_running.rc != 0
-        or (
-          (vllm_torchrun_stacked_running.stdout | default("") | trim) == "false"
-          and (
-            vllm_torchrun_stacked_docker_start is not defined
-            or vllm_torchrun_stacked_docker_start.rc != 0
-          )
+        (vllm_torchrun_stacked_running.stdout | default("") | trim) == "false"
+        and (
+          vllm_torchrun_stacked_docker_start is not defined
+          or vllm_torchrun_stacked_docker_start.rc != 0
         )
       )
 
 - name: Start torchrun vLLM container on followers (headless — no HTTP on rank > 0)
   ansible.builtin.shell: |
     set -euo pipefail
-    docker rm -f "{{ vllm_torchrun_stacked_container_name }}" 2>/dev/null || true
     docker run -d --restart unless-stopped \
       --name "{{ vllm_torchrun_stacked_container_name }}" \
       --entrypoint /bin/bash \
@@ -190,7 +184,7 @@
       "{{ vllm_torchrun_stacked_image }}" \
       -lc 'set -euo pipefail
     exec > /root/vllm-torchrun.log 2>&1
-    {% if vllm_torchrun_stacked_triton_cache_invalidate | bool %}
+    {% if vllm_torchrun_stacked_recreate | bool and vllm_torchrun_stacked_triton_cache_invalidate | bool %}
     rm -rf "${TRITON_CACHE_DIR:-$HOME/.triton/cache}"/* 2>/dev/null || true
     {% endif %}
     {% if vllm_torchrun_stacked_qwen_moe_patches_enabled | bool %}
@@ -206,7 +200,7 @@
       --master-addr="{{ spark_torchrun_leader_ip }}" \
       --master-port={{ vllm_torchrun_stacked_rdzv_port | int }} \
       -m vllm.entrypoints.openai.api_server \
-      "{{ vllm_default_model }}" \
+      --model "{{ vllm_default_model }}" \
       --headless \
       --host "{{ vllm_torchrun_stacked_api_host }}" \
       --port {{ vllm_torchrun_stacked_api_port | int }} \

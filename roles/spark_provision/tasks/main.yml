@@ -119,6 +119,20 @@
   tags: [spark, vllm_autoupgrade]
   when: spark_provision_vllm_autoupgrade | default(false) | bool
 
+- name: Phase — tear down inactive vLLM stack (Ray ↔ torchrun mutual exclusion)
+  ansible.builtin.import_tasks: vllm_stack_teardown_inactive.yml
+  tags:
+    - spark
+    - vllm_ngc_stack
+    - vllm_torchrun_stack
+    - stack_ngc
+    - stack_torchrun
+    - vllm_container
+    - spark_assert
+  when:
+    - spark_provision_vllm_stacked_container | default(true) | bool
+      or spark_provision_vllm_torchrun_stacked | default(true) | bool
+
 - name: Phase — NGC stacked vLLM (Docker Ray + `vllm serve`)
   ansible.builtin.include_role:
     name: vllm_stacked_container

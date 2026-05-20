@@ -584,14 +584,22 @@ spark-provision *extra:
     cd '{{ justfile_directory() }}'
     ansible-playbook playbooks/provision_sparks.yml -l sparks ${extra[@]+"${extra[@]}"}
 
-# Full reconcile + recreate vLLM containers (active stack per vllm_stack_kind in inventory).
+# Full reconcile + recreate vLLM containers for the active stack only (vllm_stack_kind in inventory).
 spark-provision-recreate:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
-    ansible-playbook playbooks/provision_sparks.yml -l sparks \
-        -e vllm_stacked_container_recreate=true \
-        -e vllm_torchrun_stacked_recreate=true
+    stack="$(awk '/^vllm_stack_kind:/ {print $2; exit}' inventory/group_vars/sparks.yml | tr -d ' \"')"
+    stack="${stack:-ray}"
+    extra=()
+    if [[ "$stack" == "torchrun" ]]; then
+      extra=(-e vllm_torchrun_stacked_recreate=true)
+      echo ">>> vllm_stack_kind=torchrun — recreating torchrun only (Ray will be torn down)"
+    else
+      extra=(-e vllm_stacked_container_recreate=true)
+      echo ">>> vllm_stack_kind=ray — recreating Ray only (torchrun will be torn down)"
+    fi
+    ansible-playbook playbooks/provision_sparks.yml -l sparks "${extra[@]}"
 
 # Dry-run full provision (check mode).
 spark-provision-check:
@@ -706,13 +714,17 @@ spark-vllm-ps:
     ansible nvidia2 -m shell -a 'docker ps -a --filter name=vllm-ngc-ray-worker'
 
 # Start the Ray *head* container on nvidia1. Idempotent: `docker start` is a
-# no-op if already running. Use after `just spark-vllm-stop` or a host reboot
-# that left the container `Exited` (--restart unless-stopped does not relaunch
-# manually-stopped containers).
+# no-op if already running. Only valid when inventory vllm_stack_kind=ray —
+# use `just spark-provision` for torchrun.
 spark-vllm-head-start:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
+    stack="$(awk '/^vllm_stack_kind:/ {print $2; exit}' inventory/group_vars/sparks.yml | tr -d ' \"')"
+    if [[ "${stack:-ray}" == "torchrun" ]]; then
+      echo "✗ inventory vllm_stack_kind=torchrun — use just spark-provision, not spark-vllm-head-start"
+      exit 1
+    fi
     ansible nvidia1 -m shell -a \
       'docker start vllm-ngc-ray-head || true; docker ps -a --filter name=vllm-ngc-ray-head'
 
@@ -1052,14 +1064,27 @@ spark-observability-probe:
     echo "  http=$code"
     if [ "$code" = "200" ]; then jq -r '.data.result | length as $n | "  streams=\($n)"' /tmp/loki-probe.json 2>/dev/null || cat /tmp/loki-probe.json; fi
 
-# Stop Ray + vLLM containers on both Sparks (Docker stop; data on disk preserved).
+# Stop all vLLM stack containers (Ray + torchrun) on both Sparks.
 spark-vllm-stop:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
-    ansible nvidia1 -m shell -a 'docker stop vllm-ngc-ray-head 2>/dev/null || true'
-    ansible nvidia2 -m shell -a 'docker stop vllm-ngc-ray-worker-nvidia2 2>/dev/null || true'
-    echo "✓ stopped head + worker containers"
+    ansible sparks -m shell -a '
+      docker stop $(docker ps -q --filter name=vllm-ngc-ray --filter name=vllm-ngc-torchrun 2>/dev/null) 2>/dev/null || true
+      docker ps -a --filter name=vllm-ngc-ray --filter name=vllm-ngc-torchrun
+    '
+    echo "✓ stopped Ray + torchrun containers"
+
+# Remove the inactive stack and leave only vllm_stack_kind from inventory running.
+# Use when Ray and torchrun are both up (port/NCCL thrash).
+spark-vllm-stack-teardown:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks \
+      --tags vllm_ngc_stack,vllm_torchrun_stack,spark_assert \
+      -e spark_provision_assert=false \
+      --skip-tags apt,kernel,docker,firewall,hf,ngc,spark_obs,spark_wifi
 
 # Docker logs for the Ray head container (bootstrap); for API server stdout see
 # spark-vllm-logs-serve.

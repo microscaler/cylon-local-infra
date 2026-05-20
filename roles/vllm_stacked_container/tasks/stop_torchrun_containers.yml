@@ -1,0 +1,20 @@
+---
+# Belt-and-braces when provisioning Ray — spark_provision also runs
+# vllm_stack_teardown_inactive.yml, but tag-scoped Ray-only runs need this.
+
+- name: Stop torchrun container on this host before Ray stack
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_torchrun_stacked_container_name | default('vllm-ngc-torchrun-' ~ inventory_hostname) }}"
+  failed_when: false
+
+- name: Stop any stray torchrun containers on this host
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -aq --filter 'name=vllm-ngc-torchrun' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      docker rm -f $ids
+    fi
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false

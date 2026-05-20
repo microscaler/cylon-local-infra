@@ -6,6 +6,10 @@
   ansible.builtin.import_tasks: stop_bare_metal_systemd.yml
   when: vllm_stacked_container_stop_bare_metal_systemd | bool
 
+- name: Stop torchrun stack containers before Ray
+  ansible.builtin.import_tasks: stop_torchrun_containers.yml
+  when: vllm_stacked_container_stop_torchrun_containers | default(true) | bool
+
 - name: Interconnect IPv4 for Ray and NCCL env templates
   ansible.builtin.import_tasks: preflight_interconnect.yml
 
