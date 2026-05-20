@@ -1081,36 +1081,61 @@ spark-vllm-api-kill:
       'docker exec vllm-ngc-ray-head bash -lc "pkill -f \"[v]llm serve\" || true; sleep 2; pgrep -af [v]llm.serve || echo no_vllm_serve_running"'
 
 # Kill the API server then re-run the role's API-start step (no Ray restart).
+# Active stack follows inventory `vllm_stack_kind` (ray | torchrun).
 spark-vllm-api-restart:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
-    ansible nvidia1 -m shell -a \
-      'docker exec vllm-ngc-ray-head bash -lc "pkill -f \"[v]llm serve\" || true"'
-    sleep 5
-    ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack
+    stack_kind=$(grep -E '^vllm_stack_kind:' inventory/group_vars/sparks.yml | awk '{print $2}' | tr -d ' ')
+    if [[ "${stack_kind}" == torchrun ]]; then
+      echo ">>> stack_kind=torchrun — reconcile torchrun containers (no Ray pkill)"
+      ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_torchrun_stack
+    else
+      ansible nvidia1 -m shell -a \
+        'docker exec vllm-ngc-ray-head bash -lc "pkill -f \"[v]llm serve\" || true"'
+      sleep 5
+      ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack
+    fi
 
-# Tail the detached `vllm serve` log inside the head container (where stderr went).
+# Tail detached vLLM API logs on the leader (Ray: vllm serve; torchrun: api_server).
+# Reads `vllm_stack_kind` from inventory; exits 0 when log not created yet.
 spark-vllm-logs-serve:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
+    stack_kind=$(grep -E '^vllm_stack_kind:' inventory/group_vars/sparks.yml | awk '{print $2}' | tr -d ' ')
+    if [[ "${stack_kind}" == torchrun ]]; then
+      container=vllm-ngc-torchrun-nvidia1
+      log=/root/vllm-torchrun.log
+      proc_grep='torchrun|vllm.entrypoints.openai.api_server'
+      restart_hint='just spark-vllm-api-restart   # or: just spark-provision --tags vllm_torchrun_stack'
+    else
+      container=vllm-ngc-ray-head
+      log=/root/vllm-serve.log
+      proc_grep='[v]llm serve'
+      restart_hint='just spark-vllm-api-restart'
+    fi
     ansible nvidia1 -m shell -a \
-      'docker exec vllm-ngc-ray-head bash -lc "
-        if pgrep -af \"[v]llm serve\" >/dev/null 2>&1; then
-          echo \"=== vllm serve process ===\"
-          pgrep -af \"[v]llm serve\"
-          echo
-        else
-          echo \"vllm serve is not running in vllm-ngc-ray-head\"
-          echo \"Relaunch with: just spark-vllm-api-restart\"
-          echo
-        fi
-        if [[ -f /root/vllm-serve.log ]]; then
-          echo \"=== tail /root/vllm-serve.log ===\"
-          tail -n 80 /root/vllm-serve.log
-        else
-          echo \"No /root/vllm-serve.log yet (created when serve starts via provision)\"
-          exit 0
-        fi
-      "'
+      "if ! docker inspect ${container} >/dev/null 2>&1; then
+         echo \"Container ${container} not found (stack_kind=${stack_kind})\";
+         docker ps -a --filter name=vllm-ngc || true;
+         echo \"Relaunch with: ${restart_hint}\";
+         exit 0;
+       fi;
+       docker exec ${container} bash -lc \"
+         if pgrep -af '${proc_grep}' >/dev/null 2>&1; then
+           echo '=== vLLM API process (${stack_kind}) ===';
+           pgrep -af '${proc_grep}';
+           echo;
+         else
+           echo 'vLLM API is not running in ${container}';
+           echo 'Relaunch with: ${restart_hint}';
+           echo;
+         fi;
+         if [[ -f ${log} ]]; then
+           echo '=== tail ${log} ===';
+           tail -n 80 ${log};
+         else
+           echo 'No ${log} yet (created when stack starts via provision)';
+         fi
+       \""

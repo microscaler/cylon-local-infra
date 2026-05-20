@@ -193,17 +193,13 @@ spark_fabric2_peer_network: "10.200.0.0/30"
 #     AllReduces — the +70 % NCCL headroom translates directly to TTFT.
 spark_dual_hca_enabled: true
 
-# --- NGC stacked container stack (roles/vllm_stacked_container) ---
-# Select Ray (26.03 default) or torchrun external_launcher (26.04+ migration path).
-# A/B: set vllm_stack_kind: torchrun and run `just spark-vllm-torchrun-provision-recreate`.
+# --- NGC stacked container stack (roles/vllm_stacked_container | vllm_torchrun_stacked) ---
+# Production stack: torchrun + external_launcher on 26.04-py3 (Ray removed from NGC image).
+# Rollback baseline: git tag `spark-ray-baseline-2026-05-20` + vllm_stack_kind: ray + 26.03-py3.
+# NOTE 2026-05-20: torchrun migration in progress — temporarily on ray until torchrun A/B passes.
 vllm_stack_kind: ray   # ray | torchrun
 
-# Image tag: pinned to match what is currently on the Sparks (nvidia1, nvidia2).
-# 26.03-py3 unlocks Qwen3.6-35B-A3B (`Qwen3_5MoeForConditionalGeneration` is in
-# vLLM 0.17.1's ModelRegistry and vllm's get_config loads the qwen3_5_moe
-# architecture cleanly even though transformers 4.57.5 still lacks it in
-# CONFIG_MAPPING). Also carries Qwen3-Next / Qwen3-VL-Moe / Qwen3-Omni arches
-# for future use.
+# Image tag shared by both stack roles (torchrun inherits via vllm_torchrun_stacked_image).
 vllm_stacked_container_image: "nvcr.io/nvidia/vllm:26.03-py3"
 # API port the container binds. Add this to firewall_allow_tcp_ports.
 vllm_stacked_container_api_port: 8000
@@ -516,16 +512,7 @@ spark_provision_vllm_autoupgrade: true
 # ([runs/2026-04-19-26.03-py3-upgrade.md]). The bounce path the daemon will
 # take is identical to what Ansible just did with `recreate=true`, and the
 # stabilization + quiet-window gates add safety on top.
-vllm_autoupgrade_enabled: true
-# Pinned to 26.03-py3 since 2026-04-29: nvcr.io/nvidia/vllm:26.04-py3 ships
-# WITHOUT `ray` in any executable path (`find / -name ray -executable` returns
-# nothing in the 26.04 image — NVIDIA repackaged the image without the bundled
-# ray console script). Promotion to 26.04 fails with `/bin/bash: line 1: ray:
-# command not found` regardless of `bash -c` vs `bash -lc`. Lift the pin only
-# after confirming the image either restores `ray` or we update
-# `roles/vllm_stacked_container/tasks/main.yml` to use the new launch pattern
-# (e.g. `python -m ray ...` once we know where Python lives in 26.04+).
-# See: llmwiki/runs/2026-04-29-cluster-recovery-and-26.04-rollback.md.
+vllm_autoupgrade_enabled: false
 vllm_autoupgrade_pinned_tag: "26.03-py3"
 vllm_autoupgrade_poll_interval_sec: 300  # 5 min
 vllm_autoupgrade_stabilization_sec: 3600 # 1 h ready-time before promotion

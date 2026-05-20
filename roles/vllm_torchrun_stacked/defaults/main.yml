@@ -10,6 +10,8 @@ vllm_torchrun_stacked_config_dir: /etc/vllm-ngc-torchrun
 vllm_torchrun_stacked_image: "{{ vllm_stacked_container_image | default('nvcr.io/nvidia/vllm:26.03-py3') }}"
 
 vllm_torchrun_stacked_hf_home: "{{ vllm_hf_home | default(spark_runtime_home ~ '/.cache/huggingface') }}"
+# Path inside the NGC container (must match docker -v ...:/root/.cache/huggingface).
+vllm_torchrun_stacked_hf_container_home: /root/.cache/huggingface
 vllm_torchrun_stacked_shm_size: "{{ vllm_stacked_container_shm_size | default('10.24g') }}"
 
 vllm_torchrun_stacked_container_name: "vllm-ngc-torchrun-{{ inventory_hostname }}"
@@ -20,6 +22,8 @@ vllm_torchrun_stacked_api_host: "{{ vllm_stacked_container_api_host | default('0
 # torchrun rendezvous (Gloo control plane on interconnect).
 vllm_torchrun_stacked_rdzv_port: 29500
 vllm_torchrun_stacked_rdzv_id: vllm-spark-tp2
+# Seconds to wait for leader rendezvous port before starting followers.
+vllm_torchrun_stacked_follower_start_delay_sec: 15
 
 vllm_torchrun_stacked_recreate: false
 vllm_torchrun_stacked_drop_caches_on_provision: true
@@ -41,6 +45,10 @@ vllm_torchrun_stacked_rdma_device_path: "{{ vllm_stacked_container_rdma_device_p
 
 # Required for deterministic scheduling under external_launcher (26.04 migration note).
 vllm_torchrun_stacked_v1_multiprocessing_disabled: true
+
+# Leader-only poll for /v1/models after container start (model load can take many minutes).
+vllm_torchrun_stacked_api_ready_retries: "{{ vllm_stacked_container_api_ready_retries | default(120) }}"
+vllm_torchrun_stacked_api_ready_delay_sec: "{{ vllm_stacked_container_api_ready_delay_sec | default(15) }}"
 
 # Extra env merged into torchrun.env.j2 after vllm_distributed_extra_env.
 vllm_torchrun_stacked_extra_env: {}

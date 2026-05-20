@@ -137,7 +137,8 @@
   when:
     - inventory_hostname == (groups['sparks'] | sort | first)
     - vllm_stacked_container_head_gpu_probe is defined
-    - vllm_stacked_container_head_gpu_probe.rc != 0
+    - vllm_stacked_container_head_gpu_probe.rc is defined
+    - (vllm_stacked_container_head_gpu_probe.rc | int) != 0
     - not (vllm_stacked_container_recreate | bool)
 
 - name: Note Ray head GPU stale recreate
@@ -250,7 +251,8 @@
   when:
     - inventory_hostname != (groups['sparks'] | sort | first)
     - vllm_stacked_container_worker_gpu_probe is defined
-    - vllm_stacked_container_worker_gpu_probe.rc != 0
+    - vllm_stacked_container_worker_gpu_probe.rc is defined
+    - (vllm_stacked_container_worker_gpu_probe.rc | int) != 0
     - not (vllm_stacked_container_recreate | bool)
 
 - name: Note Ray worker GPU stale recreate
@@ -378,7 +380,7 @@
 
 - name: Check for vLLM serve in head container
   ansible.builtin.shell: |
-    docker exec "{{ vllm_stacked_container_ray_head_name }}" bash -lc "pgrep -af 'vllm serve' || true"
+    docker exec "{{ vllm_stacked_container_ray_head_name }}" bash -lc "pgrep -af '[v]llm serve' || true"
   args:
     executable: /bin/bash
   register: vllm_stacked_container_vllm_ps

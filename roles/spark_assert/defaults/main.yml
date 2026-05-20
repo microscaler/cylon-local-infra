@@ -6,7 +6,7 @@ spark_assert_enabled: true
 
 # vLLM API smoke on leader (requires stack provision phase to have run this play).
 spark_assert_vllm_api: true
-spark_assert_vllm_api_timeout_sec: 60
+spark_assert_vllm_api_timeout_sec: 120
 
 # Ray-only: expect this many alive Ray nodes (TP=2 → 2 Sparks).
 spark_assert_ray_alive_nodes: "{{ groups['sparks'] | length }}"
