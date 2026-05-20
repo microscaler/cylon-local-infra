@@ -197,7 +197,7 @@ spark_dual_hca_enabled: true
 # Production stack: torchrun + external_launcher on 26.04-py3 (Ray removed from NGC image).
 # Rollback baseline: git tag `spark-ray-baseline-2026-05-20` + vllm_stack_kind: ray + 26.03-py3.
 # NOTE 2026-05-20: torchrun migration in progress — temporarily on ray until torchrun A/B passes.
-vllm_stack_kind: ray   # ray | torchrun
+vllm_stack_kind: torchrun   # ray | torchrun
 
 # Image tag shared by both stack roles (torchrun inherits via vllm_torchrun_stacked_image).
 vllm_stacked_container_image: "nvcr.io/nvidia/vllm:26.03-py3"

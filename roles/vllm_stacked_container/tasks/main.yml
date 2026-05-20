@@ -353,11 +353,12 @@
           || echo "[qwen-patch] fastsafetensors: install FAILED"
       fi
       echo "[qwen-patch] done"
-    '
+    ' || true
   args:
     executable: /bin/bash
   register: qwen_patch_out
   changed_when: "'fastsafetensors: installed' in (qwen_patch_out.stdout | default(''))"
+  failed_when: false
   when:
     - vllm_stacked_container_qwen_moe_patches_enabled | bool
     - vllm_stacked_container_start_api | bool
