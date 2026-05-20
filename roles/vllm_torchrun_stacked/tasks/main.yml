@@ -93,6 +93,7 @@
 - name: Start torchrun vLLM container on leader (NGC image, host network)
   ansible.builtin.shell: |
     set -euo pipefail
+    docker rm -f "{{ vllm_torchrun_stacked_container_name }}" 2>/dev/null || true
     docker run -d --restart unless-stopped \
       --name "{{ vllm_torchrun_stacked_container_name }}" \
       --entrypoint /bin/bash \
@@ -156,21 +157,26 @@
 - name: Pause before starting follower torchrun containers
   ansible.builtin.pause:
     seconds: "{{ vllm_torchrun_stacked_follower_start_delay_sec | int }}"
+  run_once: true
   when:
-    - inventory_hostname != (groups['sparks'] | sort | first)
+    - inventory_hostname == (groups['sparks'] | sort | first)
     - vllm_torchrun_stacked_recreate | bool
-      or vllm_torchrun_stacked_running.rc != 0
+      or vllm_torchrun_stacked_start_leader is changed
       or (
-        (vllm_torchrun_stacked_running.stdout | default("") | trim) == "false"
-        and (
-          vllm_torchrun_stacked_docker_start is not defined
-          or vllm_torchrun_stacked_docker_start.rc != 0
+        vllm_torchrun_stacked_running.rc != 0
+        or (
+          (vllm_torchrun_stacked_running.stdout | default("") | trim) == "false"
+          and (
+            vllm_torchrun_stacked_docker_start is not defined
+            or vllm_torchrun_stacked_docker_start.rc != 0
+          )
         )
       )
 
 - name: Start torchrun vLLM container on followers (headless — no HTTP on rank > 0)
   ansible.builtin.shell: |
     set -euo pipefail
+    docker rm -f "{{ vllm_torchrun_stacked_container_name }}" 2>/dev/null || true
     docker run -d --restart unless-stopped \
       --name "{{ vllm_torchrun_stacked_container_name }}" \
       --entrypoint /bin/bash \
