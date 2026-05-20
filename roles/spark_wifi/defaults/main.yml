@@ -1,0 +1,13 @@
+---
+# Persistently disable Wi-Fi on DGX Sparks — Ethernet (enP7s7) is the operator LAN path.
+# Wi-Fi left up can steal default-route / duplicate IPs and break vLLM Ray unique-IP
+# checks (see vllm-project/vllm#43095). Pair with QSFP interconnect for TP traffic.
+
+spark_wifi_disable: true
+# Boot-time oneshot — NM 1.46 ignores [main] wifi.enabled in conf.d (unknown key).
+spark_wifi_systemd_unit_name: cylon-wifi-radio-off.service
+spark_wifi_systemd_unit_path: "/etc/systemd/system/{{ spark_wifi_systemd_unit_name }}"
+# Legacy drop-in removed on apply (was ineffective on DGX Spark / NM 1.46).
+spark_wifi_legacy_nm_conf_path: /etc/NetworkManager/conf.d/99-cylon-wifi-disabled.conf
+# Assert gate still references this path name for the systemd unit file.
+spark_wifi_nm_conf_path: "{{ spark_wifi_systemd_unit_path }}"

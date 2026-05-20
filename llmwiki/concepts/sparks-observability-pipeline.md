@@ -2,8 +2,8 @@
 title: Sparks → ms02 observability pipeline (push, OTLP + Loki)
 kind: concept
 status: active
-tags: [observability, prometheus, otlp, loki, dcgm, node_exporter, promtail, ms02, sparks]
-updated: 2026-05-01
+tags: [observability, prometheus, otlp, loki, dcgm, node_exporter, promtail, ms02, sparks, interconnect]
+updated: 2026-05-19
 first_observed: 2026-05-01
 related:
   - runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md
@@ -23,11 +23,9 @@ timeseries with cross-host correlation.
 ```
 per Spark (host network, loopback bind):
 
-  node_exporter            127.0.0.1:9100   ─┐
+  node_exporter            127.0.0.1:9100   ─┐  (+ textfile: rasdaemon + ic_probe .prom gauges)
   dcgm-exporter            127.0.0.1:9400   ─┤
-  vLLM /metrics            127.0.0.1:8000   ─┤
-  rasdaemon textfile       (in node_exporter   │
-    .../textfile/...prom)  textfile dir)    ─┘
+  vLLM /metrics            127.0.0.1:8000   ─┘
                                               ▼
                                    otel-collector-contrib
                                    (systemd, scrape every 15s)
@@ -59,9 +57,9 @@ per Spark (host network):
                                             Loki
 ```
 
-**No LAN exposure of metrics endpoints.** All four local exporters bind
-to `127.0.0.1`. Only the agents (otel-agent, promtail) reach the LAN —
-outbound to ms02. UFW outbound is open by default.
+**No LAN exposure of metrics endpoints.** The HTTP exporters bind to
+`127.0.0.1`; textfile gauges share the node_exporter scrape. Only the agents
+(`otel-agent`, `promtail`) reach the LAN — outbound to ms02. UFW outbound is open by default.
 
 ## Components
 
@@ -74,6 +72,7 @@ outbound to ms02. UFW outbound is open by default.
 | `otel-collector-contrib` | 0.96.0 | systemd, `/usr/local/bin/otelcol-contrib`, runs as `otel_agent` system user | Scrapes node_exporter + dcgm-exporter + vLLM /metrics every 15s. Attaches resource attributes (`cluster=cylon-sparks`, `host=nvidiaN`, `os_kernel=…`). Pushes OTLP gRPC to ms02. |
 | `promtail` | 2.9.4 (matches Loki on ms02) | systemd, `/usr/local/bin/promtail`, runs as `promtail` system user (in `systemd-journal` + `docker` groups) | Reads journald (the only log source we need — see below), promotes `_systemd_unit`, `container_name`, `container_image`, `priority` to Loki labels. Pushes HTTP to ms02. |
 | `rasdaemon-textfile.timer` | (systemd timer, 60s) | `/usr/local/sbin/rasdaemon-textfile.sh` writes to `/var/lib/node_exporter/textfile/rasdaemon.prom` | Parses `ras-mc-ctl --summary` into Prometheus counters: `rasdaemon_events_total{category=memory_ce,memory_ue,pcie_aer_correctable,pcie_aer_uncorrectable,pcie_aer_fatal,mce_records,extlog_records,devlink_records}`. node_exporter exposes them via its textfile collector. |
+| `ic-probe-textfile.timer` | (`spark_observability_ic_probe_interval_sec`, default `60`) | `/usr/local/sbin/ic-probe-textfile.sh` → `/var/lib/node_exporter/textfile/ic_probe.prom` | ICMP echo probes to **`spark_hosts_peer_ip`** plus the fabric‑2 `/30` peer mapped by `spark_observability_ic_probe_fabric2_peer*` in role defaults (override for non–two‑node fleets), verifies `physical_state LINK_UP` for every device in **`nccl_ib_hca`**, surfaces RX/TX error + dropped counters on **`nccl_interface`** and **`spark_fabric2_netdev`**, and emits a trio of MLX5 PHY counters (`ethtool -S`, when present). Metric prefix **`spark_ic_*`** is defined in `roles/spark_observability/templates/ic-probe-textfile.sh.j2`. |
 
 ### ms02 (the kind cluster — `shared-kind-cluster`)
 

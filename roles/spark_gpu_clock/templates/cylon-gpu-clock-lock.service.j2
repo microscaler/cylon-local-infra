@@ -1,0 +1,14 @@
+# Managed by Ansible (roles/spark_gpu_clock) — cylon-local-infra
+[Unit]
+Description=Lock DGX Spark GPU graphics clocks at {{ spark_gpu_locked_graphics_clock_mhz }} MHz
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nvidia-smi -pm 1
+ExecStart=/usr/bin/nvidia-smi -lgc {{ spark_gpu_locked_graphics_clock_mhz }},{{ spark_gpu_locked_graphics_clock_mhz }}
+
+[Install]
+WantedBy=multi-user.target

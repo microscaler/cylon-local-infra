@@ -67,13 +67,14 @@ class TestObserveScript(unittest.TestCase):
 class TestTriggers(unittest.TestCase):
     def test_repo_root_from_script(self) -> None:
         root = sms.repo_root_from_script(__file__)
-        self.assertTrue((root / "playbooks" / "refresh_hf_prefetch.yml").is_file())
+        self.assertTrue((root / "playbooks" / sms.CANONICAL_SPARK_PLAYBOOK).is_file())
 
     def test_cmd_ansible_prefetch(self) -> None:
         root = pathlib.Path(__file__).resolve().parent.parent
         cmd = sms.cmd_ansible_prefetch(root, inventory=None, check=False)
         self.assertEqual(cmd[0], "ansible-playbook")
-        self.assertIn(str(root / "playbooks" / "refresh_hf_prefetch.yml"), cmd)
+        self.assertIn(str(root / "playbooks" / sms.CANONICAL_SPARK_PLAYBOOK), cmd)
+        self.assertIn("hf_prefetch,spark_assert", cmd)
 
     def test_cmd_ansible_vllm(self) -> None:
         root = pathlib.Path(__file__).resolve().parent.parent
@@ -81,8 +82,8 @@ class TestTriggers(unittest.TestCase):
             root, inventory=None, extra_vars=["vllm_default_model=X", "vllm_stacked_container_recreate=true"], check=True
         )
         self.assertIn("--check", cmd)
-        self.assertIn("--tags", cmd)
-        self.assertIn("vllm_ngc_stack", cmd)
+        self.assertNotIn("--tags", cmd)
+        self.assertIn(str(root / "playbooks" / sms.CANONICAL_SPARK_PLAYBOOK), cmd)
 
     def test_cmd_ansible_sync_hermes_ms02(self) -> None:
         root = pathlib.Path(__file__).resolve().parent.parent

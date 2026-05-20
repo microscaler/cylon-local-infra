@@ -8,7 +8,8 @@
 #     node_exporter          (127.0.0.1:9100)  ─┐
 #     dcgm-exporter          (127.0.0.1:9400)  ─┼── otel-agent (systemd, scrapes
 #     vLLM /metrics          (127.0.0.1:8000)  ─┘   locally every 15s) ─OTLP gRPC─►
-#     rasdaemon textfile     (node_exporter textfile collector)            ms02:4317
+#     rasdaemon textfile     periodic `rasdaemon.prom` → node_exporter `--collector.textfile` (same HTTP :9100 scrape)
+#     ic-probe textfile      interconnect probes → `ic_probe.prom` (same textfile scrape → OTLP scrape above → ms02:4317)
 #
 #   per Spark (host):
 #     journald (kernel + systemd + dockerd + every container via the
@@ -16,9 +17,10 @@
 #
 # Local exporters bind to 127.0.0.1 only — only the agents talk to ms02.
 #
-# All five components install as native systemd units (binaries downloaded
+# All core components install as native systemd units (binaries downloaded
 # from upstream releases) EXCEPT dcgm-exporter, which is NVIDIA's official
-# container (no clean aarch64 binary distribution).
+# container (no clean aarch64 binary distribution). Rasdaemon textfile shipper +
+# interconnect probe invoke small shell snippets on a timer — same OTEL scrape path.
 #
 # Operator surface: `just spark-observability-{status,apply,probe}`. See
 # llmwiki/concepts/sparks-observability-pipeline.md.
@@ -56,6 +58,13 @@ spark_observability_dcgm_exporter_enabled: true
 spark_observability_otel_agent_enabled: true
 spark_observability_promtail_enabled: true
 spark_observability_rasdaemon_textfile_enabled: true
+spark_observability_ic_probe_enabled: true
+spark_observability_ic_probe_interval_sec: 60
+# Fabric-2 /30 peer for ICMP probes (adjust map when inventory hostnames/topology changes).
+spark_observability_ic_probe_fabric2_peer_map:
+  nvidia1: "10.200.0.2"
+  nvidia2: "10.200.0.1"
+spark_observability_ic_probe_fabric2_peer: "{{ spark_observability_ic_probe_fabric2_peer_map[inventory_hostname] | default('') }}"
 
 # --- Versions (override in inventory to bump) -----------------------------
 # All aarch64.

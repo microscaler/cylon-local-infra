@@ -1,0 +1,18 @@
+---
+# End-of-run gate for playbooks/provision_sparks.yml — fail the play if declared
+# state is not true on the cluster.
+
+spark_assert_enabled: true
+
+# vLLM API smoke on leader (requires stack provision phase to have run this play).
+spark_assert_vllm_api: true
+spark_assert_vllm_api_timeout_sec: 60
+
+# Ray-only: expect this many alive Ray nodes (TP=2 → 2 Sparks).
+spark_assert_ray_alive_nodes: "{{ groups['sparks'] | length }}"
+
+# HF prefetch: require production model ready when daemon is provisioned.
+spark_assert_hf_prefetch_model_ready: true
+
+# Observability: systemd timers/units active when observability phase ran.
+spark_assert_observability: true

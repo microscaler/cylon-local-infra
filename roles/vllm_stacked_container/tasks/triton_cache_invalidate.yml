@@ -1,0 +1,16 @@
+---
+# GB10 sm_121: stale ~/.triton/cache can silently corrupt outputs (#41871).
+# Wipe inside each Ray container before vLLM serve (leader + followers).
+
+- name: Invalidate Triton JIT cache inside Ray container
+  ansible.builtin.command:
+    cmd: >-
+      docker exec "{{ item }}"
+      bash -lc 'rm -rf "${TRITON_CACHE_DIR:-$HOME/.triton/cache}"/* 2>/dev/null || true'
+  loop:
+    - "{{ (inventory_hostname == (groups['sparks'] | sort | first))
+          | ternary(vllm_stacked_container_ray_head_name,
+                    vllm_stacked_container_ray_worker_name) }}"
+  when: vllm_stacked_container_triton_cache_invalidate | bool
+  changed_when: true
+  failed_when: false

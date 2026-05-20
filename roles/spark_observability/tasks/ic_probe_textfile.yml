@@ -1,0 +1,31 @@
+---
+# Interconnect sanity: ping peer(s), RDMA LINK_UP, basic netdev error counters →
+# node_exporter textfile (same pipeline as rasdaemon-textfile).
+
+- name: ic-probe — install textfile shipper script
+  ansible.builtin.template:
+    src: ic-probe-textfile.sh.j2
+    dest: /usr/local/sbin/ic-probe-textfile.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: ic-probe — systemd service (oneshot)
+  ansible.builtin.template:
+    src: ic-probe-textfile.service.j2
+    dest: /etc/systemd/system/ic-probe-textfile.service
+    mode: "0644"
+
+- name: ic-probe — systemd timer
+  ansible.builtin.template:
+    src: ic-probe-textfile.timer.j2
+    dest: /etc/systemd/system/ic-probe-textfile.timer
+    mode: "0644"
+
+- name: ic-probe — enable + start the timer
+  ansible.builtin.systemd:
+    name: ic-probe-textfile.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode

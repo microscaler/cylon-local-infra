@@ -1,10 +1,29 @@
 # Spark provisioning (`provision_sparks.yml`) — container-only
 
-Single entry point for **DGX Spark** hosts in inventory group **`sparks`**:
+**Canonical operator entry:**
 
 ```bash
-ansible-playbook playbooks/provision_sparks.yml
+just spark-provision              # full reconcile + state assert
+just spark-provision-recreate     # full + force vLLM container recreate
 ```
+
+Single Ansible playbook for **DGX Spark** hosts in inventory group **`sparks`**:
+
+```bash
+ansible-playbook playbooks/provision_sparks.yml -l sparks
+```
+
+The play ends with **`roles/spark_assert`** — it **fails** if Wi-Fi is still on,
+Docker is down, vLLM containers are not running, `/v1/models` is unreachable,
+NCCL GID does not match inventory, etc. Disable for debugging:
+`-e spark_provision_assert=false`.
+
+Partial tag runs (escape hatch only): always include **`spark_assert`** for the
+phase you changed. **Do not** run `--tags vllm_ngc_stack` alone — that skips Wi-Fi,
+network, observability, and other declared state and causes drift.
+
+Legacy playbooks **`cutover_roce.yml`** and **`refresh_hf_prefetch.yml`** fail with a
+pointer to `just spark-provision*`.
 
 As of **2026-04** the Spark stack is **container-only** (NGC `nvcr.io/nvidia/vllm`).
 The bare-metal venv path (`roles/vllm/`) and the custom-built-image path
@@ -13,31 +32,37 @@ The bare-metal venv path (`roles/vllm/`) and the custom-built-image path
 
 ## Phases (role `spark_provision`)
 
-| Phase | Variable (default) | Role |
+Production toggles live in **`inventory/group_vars/sparks.yml`** (override role defaults).
+
+| Phase | Variable | Role |
 |---|---|---|
-| Sudoers / users | `spark_provision_sudoers` (true) | `sudoers` |
-| CUDA apt cleanup | `spark_provision_cuda_apt_cleanup` (true) | `cuda` `apt_cleanup` |
-| APT upgrade | `spark_provision_apt` (true) | `spark_apt` |
-| Docker Engine (DGX image repos) | `spark_provision_docker` (true) | `docker` |
-| Firewall (ufw) | `spark_provision_firewall` (true) | `firewall` |
-| LAN IPv6 sysctl (per host_vars) | `spark_provision_lan_ipv6_sysctl` (true) | inline (`tasks/lan_ipv6_sysctl.yml`) |
-| CUDA toolkit on host | `spark_provision_cuda_toolkit` (**false**) | `cuda` — enable only for `playbooks/nccl_sparks.yml` |
-| Hugging Face prefetch daemon (leader-only) | `spark_provision_hf` (false) | `hf_prefetch_service` — systemd service on the leader, downloads once + rsyncs to peers; poll `/var/lib/hf-prefetch/state.json` |
-| NGC image sync daemon (leader-only) | `spark_provision_ngc_image_sync` (false) | `ngc_image_service` — weekly polls NGC for new `nvcr.io/nvidia/vllm:YY.MM-py3` tags, pulls them on the leader, `docker save \| ssh \| docker load` to peers over QSFP; poll `/var/lib/ngc-image-sync/state.json` |
-| vLLM stack auto-upgrade (leader-only) | `spark_provision_vllm_autoupgrade` (false) | `vllm_stack_autoupgrade` — promotes newer NGC tag into running stack after `stabilization_sec` (1 h default) + vLLM `/metrics` quiet-window (5 min default). Installs disabled by default; flip `vllm_autoupgrade_enabled: true` to arm. Poll `/var/lib/vllm-stack-autoupgrade/state.json` |
-| **NGC stacked vLLM** (Docker Ray + `vllm serve`) | **`spark_provision_vllm_stacked_container` (true)** | `vllm_stacked_container` |
-| Diagnostics | `spark_provision_diagnostics` (false) | `spark_diagnostics` |
+| Sudoers / users | `spark_provision_sudoers` | `sudoers` |
+| CUDA apt cleanup | `spark_provision_cuda_apt_cleanup` | `cuda` `apt_cleanup` |
+| APT upgrade | `spark_provision_apt` | `spark_apt` |
+| Kernel pin / holds | `spark_provision_kernel` | `spark_kernel` |
+| Docker Engine | `spark_provision_docker` | `docker` |
+| Firewall (ufw) | `spark_provision_firewall` | `firewall` |
+| LAN IPv6 off | `spark_provision_lan_ipv6_sysctl` | `lan_ipv6_nm.yml` + `lan_ipv6_sysctl.yml` |
+| **Wi-Fi off** | `spark_provision_wifi_disable` | `spark_wifi` |
+| /etc/hosts interconnect | `spark_provision_hosts` | `spark_hosts` |
+| HF prefetch (leader) | `spark_provision_hf` | `hf_prefetch_service` |
+| NGC image sync (leader) | `spark_provision_ngc_image_sync` | `ngc_image_service` |
+| vLLM autoupgrade (leader) | `spark_provision_vllm_autoupgrade` | `vllm_stack_autoupgrade` |
+| **vLLM Ray stack** | `vllm_stack_kind: ray` | `vllm_stacked_container` |
+| **vLLM torchrun stack** | `vllm_stack_kind: torchrun` | `vllm_torchrun_stacked` |
+| Observability | `spark_provision_observability` | `spark_observability` |
+| **State assert gate** | `spark_provision_assert` | `spark_assert` |
 
-## Tags
-
-Commonly used:
+## Tags (escape hatch — always pair with `spark_assert`)
 
 ```bash
-ansible-playbook playbooks/provision_sparks.yml --tags vllm_ngc_stack
-ansible-playbook playbooks/provision_sparks.yml --tags hf_prefetch
-ansible-playbook playbooks/provision_sparks.yml --tags firewall
-ansible-playbook playbooks/provision_sparks.yml --skip-tags apt
+just spark-provision -- --tags hf_prefetch,spark_assert
+just spark-provision -- --tags spark_wifi,spark_assert
+just spark-provision -- --tags spark_obs,spark_assert
+just spark-provision -- --skip-tags apt
 ```
+
+**Avoid** `--tags vllm_ngc_stack` without full provision — use `just spark-provision` instead.
 
 ## What the NGC stack produces
 

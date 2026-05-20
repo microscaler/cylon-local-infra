@@ -56,27 +56,35 @@ in [`llmwiki/concepts/ipv6-asgi-hang.md`](llmwiki/concepts/ipv6-asgi-hang.md).
 
 Run from the repository root (directory containing `ansible.cfg`):
 
-### Sparks — provision (canonical, container-only)
+### Sparks — provision (canonical)
 
 ```bash
-ansible-playbook playbooks/provision_sparks.yml
-ansible-playbook playbooks/provision_sparks.yml --tags vllm_ngc_stack
-ansible-playbook playbooks/provision_sparks.yml --tags hf_prefetch
-ansible-playbook playbooks/provision_sparks.yml --skip-tags apt
-# Optional — Hermes agent on ms02 (after setting hermes_agent_dotenv_path in host_vars/ms02.yml):
-ansible-playbook playbooks/sync_hermes_ms02.yml -l ms02
+just spark-provision              # full reconcile + state assert (daily driver)
+just spark-provision-recreate     # full + force vLLM container recreate
+just spark-provision-check        # dry-run (--check --diff)
 ```
 
-Phases + toggles: [`docs/provision_sparks.md`](docs/provision_sparks.md).
+Advanced escape hatch only:
+
+```bash
+just spark-provision -- --skip-tags apt
+just spark-provision -- --tags hf_prefetch,spark_assert
+```
+
+Legacy playbooks `cutover_roce.yml` and `refresh_hf_prefetch.yml` **fail with a pointer**
+to `just spark-provision*`. Do not call partial `--tags vllm_ngc_stack` without
+`spark_assert` — that path caused fleet drift.
 
 **Model weights (HF prefetch) + which model `vllm serve` loads:** edit
 `inventory/group_vars/sparks.yml` (`hf_prefetch_models`, `vllm_default_model`, …),
 then follow the **Runbook — HF weights sync and vLLM model switchover** in
-[`docs/provision_sparks.md`](docs/provision_sparks.md). From the repo root you
-can use `python3 scripts/spark_model_status.py cutover --recreate` or
-`just spark-model-cutover --recreate`. To refresh **Hermes on ms02** from the
-same inventory, add `hermes_agent_dotenv_path` in `host_vars/ms02.yml`, then use
-`cutover --recreate --sync-hermes` or `just spark-hermes-sync`.
+[`docs/provision_sparks.md`](docs/provision_sparks.md). From the repo root:
+
+```bash
+just spark-model-cutover --recreate   # or: just spark-provision-recreate
+```
+
+Hermes on ms02: `just spark-hermes-sync` (separate playbook — not Spark provision).
 
 **While Ray or vLLM is starting** (before `/v1/models` responds), use
 `python3 scripts/spark_model_status.py observe --ssh-host nvidia1` or

@@ -1,0 +1,154 @@
+---
+# NGC stacked Sparks — torchrun + external_launcher (multi-node TP, no Ray GCS).
+# Reference: llmwiki/runs/2026-04-29-cluster-recovery-and-26.04-rollback.md
+
+- name: Stop legacy bare-metal Ray/vLLM systemd units
+  ansible.builtin.import_tasks: ../vllm_stacked_container/tasks/stop_bare_metal_systemd.yml
+  when: vllm_torchrun_stacked_stop_bare_metal_systemd | bool
+
+- name: Stop NGC Ray stack containers before torchrun
+  ansible.builtin.import_tasks: stop_ray_containers.yml
+  when: vllm_torchrun_stacked_stop_ray_containers | bool
+
+- name: Interconnect IPv4 for torchrun rendezvous + NCCL
+  ansible.builtin.import_tasks: ../vllm_stacked_container/tasks/preflight_interconnect.yml
+
+- name: Set torchrun leader interconnect IP and node rank
+  ansible.builtin.set_fact:
+    spark_torchrun_leader_ip: "{{ hostvars[groups['sparks'] | sort | first].spark_interconnect_ip }}"
+    spark_torchrun_node_rank: "{{ 0 if inventory_hostname == (groups['sparks'] | sort | first) else 1 }}"
+    spark_torchrun_world_size: "{{ groups['sparks'] | length }}"
+
+- name: Ensure install and config directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ vllm_torchrun_stacked_install_dir }}"
+    - "{{ vllm_torchrun_stacked_config_dir }}"
+
+- name: Ensure Qwen3 MoE patches host directory exists
+  ansible.builtin.file:
+    path: "{{ vllm_torchrun_stacked_qwen_moe_patches_host_dir }}"
+    state: directory
+    mode: "0755"
+  when: vllm_torchrun_stacked_qwen_moe_patches_enabled | bool
+
+- name: Stage Qwen3 MoE patches onto Spark host
+  ansible.builtin.copy:
+    src: "{{ (playbook_dir | dirname) }}/roles/vllm_stacked_container/files/qwen_moe_patches/{{ item }}"
+    dest: "{{ vllm_torchrun_stacked_qwen_moe_patches_host_dir }}/{{ item }}"
+    mode: "0644"
+  loop:
+    - _triton_alloc_setup.py
+    - _triton_alloc_setup.pth
+    - unsloth.jinja
+  when: vllm_torchrun_stacked_qwen_moe_patches_enabled | bool
+
+- name: Pull NGC vLLM image
+  ansible.builtin.command:
+    cmd: docker pull {{ vllm_torchrun_stacked_image }}
+  register: vllm_torchrun_stacked_pull_out
+  changed_when: >-
+    'Image is up to date' not in (
+    (vllm_torchrun_stacked_pull_out.stdout | default(''))
+    ~ (vllm_torchrun_stacked_pull_out.stderr | default(''))
+    )
+  when: vllm_torchrun_stacked_pull_image | bool
+
+- name: Deploy torchrun env file
+  ansible.builtin.template:
+    src: ngc-torchrun.env.j2
+    dest: "{{ vllm_torchrun_stacked_config_dir }}/torchrun-{{ inventory_hostname }}.env"
+    mode: "0644"
+
+- name: Remove torchrun container when recreating
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_torchrun_stacked_container_name }}"
+  failed_when: false
+  when: vllm_torchrun_stacked_recreate | bool
+
+- name: Drop host page caches before torchrun start
+  ansible.builtin.import_tasks: drop_page_caches.yml
+
+- name: Inspect torchrun container state
+  ansible.builtin.command:
+    cmd: docker container inspect -f "{{ '{{' }}json .State.Running{{ '}}' }}" "{{ vllm_torchrun_stacked_container_name }}"
+  register: vllm_torchrun_stacked_running
+  failed_when: false
+  changed_when: false
+
+- name: Start stopped torchrun container (reuse existing name)
+  ansible.builtin.command:
+    cmd: docker start "{{ vllm_torchrun_stacked_container_name }}"
+  register: vllm_torchrun_stacked_docker_start
+  when:
+    - not (vllm_torchrun_stacked_recreate | bool)
+    - vllm_torchrun_stacked_running.rc == 0
+    - (vllm_torchrun_stacked_running.stdout | default("") | trim) == "false"
+  failed_when: false
+  changed_when: vllm_torchrun_stacked_docker_start.rc == 0
+
+- name: Start torchrun vLLM container (NGC image, host network)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker run -d --restart unless-stopped \
+      --name "{{ vllm_torchrun_stacked_container_name }}" \
+      --entrypoint /bin/bash \
+      --network host \
+      --shm-size "{{ vllm_torchrun_stacked_shm_size }}" \
+      --gpus all \
+      {{ ('--device ' + vllm_torchrun_stacked_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_torchrun_stacked_rdma_enabled | bool) else '' }} \
+      --env-file "{{ vllm_torchrun_stacked_config_dir }}/torchrun-{{ inventory_hostname }}.env" \
+      -v "{{ vllm_torchrun_stacked_hf_home }}:/root/.cache/huggingface" \
+      {{ ('-v ' + vllm_torchrun_stacked_qwen_moe_patches_host_dir + ':' + vllm_torchrun_stacked_qwen_moe_patches_container_dir + ':ro') if (vllm_torchrun_stacked_qwen_moe_patches_enabled | bool) else '' }} \
+      "{{ vllm_torchrun_stacked_image }}" \
+      -lc 'set -euo pipefail
+    exec > /root/vllm-torchrun.log 2>&1
+    {% if vllm_torchrun_stacked_triton_cache_invalidate | bool %}
+    rm -rf "${TRITON_CACHE_DIR:-$HOME/.triton/cache}"/* 2>/dev/null || true
+    {% endif %}
+    {% if vllm_torchrun_stacked_qwen_moe_patches_enabled | bool %}
+    PATCH_DIR="{{ vllm_torchrun_stacked_qwen_moe_patches_container_dir }}"
+    SP="$(python3 -c "import sysconfig;print(sysconfig.get_paths()[\"purelib\"])")"
+    cp -f "$PATCH_DIR/_triton_alloc_setup.py" "$PATCH_DIR/_triton_alloc_setup.pth" "$SP/" || true
+    python3 -c "import fastsafetensors" 2>/dev/null || pip install --no-cache-dir --quiet --disable-pip-version-check fastsafetensors || true
+    {% endif %}
+    exec torchrun \
+      --nnodes={{ spark_torchrun_world_size | int }} \
+      --nproc-per-node=1 \
+      --node_rank={{ spark_torchrun_node_rank | int }} \
+      --rdzv_backend=c10d \
+      --rdzv_endpoint="{{ spark_torchrun_leader_ip }}:{{ vllm_torchrun_stacked_rdzv_port | int }}" \
+      --rdzv_id="{{ vllm_torchrun_stacked_rdzv_id }}" \
+      -m vllm.entrypoints.openai.api_server \
+      "{{ vllm_default_model }}" \
+      --host "{{ vllm_torchrun_stacked_api_host }}" \
+      --port {{ vllm_torchrun_stacked_api_port | int }} \
+      --tensor-parallel-size {{ vllm_tensor_parallel_size | int }} \
+      --distributed-executor-backend external_launcher \
+      {% if vllm_load_format | default("") | length > 0 %}--load-format {{ vllm_load_format }} {% endif %}\
+      {% if vllm_enforce_eager | default(false) | bool %}--enforce-eager {% endif %}\
+      {{ vllm_api_server_extra_args | default([]) | join(" ") }}'
+  args:
+    executable: /bin/bash
+  when:
+    - vllm_torchrun_stacked_recreate | bool
+      or vllm_torchrun_stacked_running.rc != 0
+      or (
+        (vllm_torchrun_stacked_running.stdout | default("") | trim) == "false"
+        and (
+          vllm_torchrun_stacked_docker_start is not defined
+          or vllm_torchrun_stacked_docker_start.rc != 0
+        )
+      )
+  register: vllm_torchrun_stacked_start
+
+- name: Wait for vLLM API on leader (rank 0 only binds :8000)
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ vllm_torchrun_stacked_api_port | int }}"
+    delay: 5
+    timeout: 900
+  when: inventory_hostname == (groups['sparks'] | sort | first)

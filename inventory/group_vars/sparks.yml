@@ -45,26 +45,29 @@ spark_apt_cache_valid_time: 0
 spark_apt_autoremove: false
 
 # --- Kernel pin / apt-mark hold / OTA service mask (roles/spark_kernel) ---
-# Diagnostic step-back for the GX10 abrupt-power-off issue
-# (llmwiki/runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md).
-# Both Sparks pinned to 6.17.0-1008-nvidia in sync — that gives us a clean
-# before/after comparison against the recent crash history (which was on
-# 6.17.0-1014-nvidia). If MTBF improves materially over the next 1-2 weeks,
-# the recent kernel bump is implicated; if not, kernel is ruled out and we
-# move to the load-axis bisection (--max-model-len, --max-num-seqs, Hermes
-# concurrent-aux).
+# Fleet-wide pin on the 4K-page nvidia image (NOT *-nvidia-64k). Rolled
+# forward from 6.17.0-1008-nvidia after OTA shipped 6.17.0-1018.18 (May 2026).
+# Notable fixes in 1008→1018: DGX Spark iGPU IOMMU quirk (LP #2150487), RoCE
+# stale GIDs on netdev events (1017 / LP #2148311), r8169 vs r8127 Spark
+# Ethernet contention (LP #2144345). See apt changelog on either Spark:
+#   apt changelog linux-image-unsigned-6.17.0-1018-nvidia-64k
+# Apply + reboot: `just spark-kernel-apply` then `just spark-reboot`.
 #
 # Per-host pins in inventory/host_vars/<host>.yml override this if needed
-# for asymmetric experiments later (e.g. step nvidia1 further to 6.11 while
-# nvidia2 stays on 1008).
+# for asymmetric A/B (e.g. one host on 1008 while the other trials 1018).
 #
-# Roll forward to current HWE: change to "6.17.0-1014-nvidia" or "" (the
-# latter releases GRUB_DEFAULT entirely and lets HWE meta drive). Either
-# way needs `just spark-reboot` to adopt.
-spark_kernel_pin: "6.17.0-1008-nvidia"
+# Release pin entirely: spark_kernel_pin: "" (HWE meta drives GRUB again).
+spark_kernel_pin: "6.17.0-1018-nvidia"
 spark_kernel_apt_hold: true
 spark_kernel_disable_auto_apt_upgrade: true
 # spark_kernel_show_grub_menu: false       # set true to expose the GRUB menu (5s) for next-boot override
+
+# --- GPU graphics clock cap (roles/spark_gpu_clock) ---
+# GB10 thermal mitigation until passive cooling block is installed.
+# Host lock applies to NGC containers (`--gpus all`). Disable when cooled:
+#   spark_gpu_lock_clocks_enabled: false
+spark_gpu_lock_clocks_enabled: true
+spark_gpu_locked_graphics_clock_mhz: 2000
 
 # Docker: use the engine from the DGX / NVIDIA platform image. Do NOT apt-install docker.io.
 docker_install_packages: false
@@ -191,6 +194,10 @@ spark_fabric2_peer_network: "10.200.0.0/30"
 spark_dual_hca_enabled: true
 
 # --- NGC stacked container stack (roles/vllm_stacked_container) ---
+# Select Ray (26.03 default) or torchrun external_launcher (26.04+ migration path).
+# A/B: set vllm_stack_kind: torchrun and run `just spark-vllm-torchrun-provision-recreate`.
+vllm_stack_kind: ray   # ray | torchrun
+
 # Image tag: pinned to match what is currently on the Sparks (nvidia1, nvidia2).
 # 26.03-py3 unlocks Qwen3.6-35B-A3B (`Qwen3_5MoeForConditionalGeneration` is in
 # vLLM 0.17.1's ModelRegistry and vllm's get_config loads the qwen3_5_moe
@@ -228,9 +235,11 @@ vllm_tensor_parallel_size: 2
 vllm_load_format: "fastsafetensors"
 # Extra `vllm serve` args — tuned for full-cluster throughput.
 #
-# Context: 262144 = Qwen3.x MoE native max_position_embeddings (no rope
-# extension). With FP8 weights + fp8 KV cache the per-token KV halves vs
-# BF16, so max_model_len 262144 fits KV comfortably within the 70+ GiB cache
+# Context: native max_position_embeddings is 262144; fleet runs 225000 as a
+# stability margin vs GX10 abrupt-power-off reports at full native context
+# (see llmwiki/runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md).
+# With FP8 weights + fp8 KV cache the per-token KV halves vs BF16, so
+# max_model_len 225000 still fits KV comfortably within the 70+ GiB cache
 # vLLM provisions at init.
 #
 # The flag block below is the adopted full set from
@@ -282,7 +291,7 @@ vllm_api_server_extra_args:
   # There is NO `custom-*` / `local-*` / `byok-*` prefix. Every self-hosted
   # vLLM / Ollama user today masquerades as a frontier-model name. We pick
   # `gpt-4o-mini` as the primary cover:
-  #   - 128k advertised context (our --max-model-len 262144 ≥ that, so no
+  #   - 128k advertised context (our --max-model-len 225000 ≥ that, so no
   #     truncation surprises from Cursor's side)
   #   - no vision injection (unlike gpt-4o)
   #   - no reasoning-mode request shape (unlike o3-mini / o4-mini)
@@ -299,7 +308,7 @@ vllm_api_server_extra_args:
   - "qwen3"
   - "Qwen/Qwen3.6-35B-A3B-FP8"
   - "--max-model-len"
-  - "262144"
+  - "225000"
   - "--gpu-memory-utilization"
   # 0.80 robust default with FP8 weights + dual-HCA + Ray + FlashInfer stack.
   # GB10 reports 119.61 GiB to CUDA (UMA: LPDDR5X shared CPU + GPU pool).
@@ -342,6 +351,8 @@ vllm_api_server_extra_args:
 vllm_enforce_eager: false
 # Ray GCS port (firewall + preflight). Container Ray still uses the same default.
 vllm_ray_port: 6379
+# Ray dashboard on the leader (LAN-only via firewall_trusted_lan_tcp_ports).
+vllm_stacked_container_dashboard_port: 8265
 # HF cache path on host — mounted into the container at /root/.cache/huggingface.
 vllm_hf_home: "{{ spark_runtime_home }}/.cache/huggingface"
 
@@ -402,9 +413,6 @@ vllm_distributed_extra_env:
   # roles/vllm_stacked_container/templates/ngc-ray-*.env.j2 — the local RDMA table
   # index for RoCE v2 + IPv4 differs by unit (gx10-e1ce uses 3 on both rails;
   # gx10-47b5 uses 4 — see `show_gids` and inventory/host_vars/nvidia2.yml).
-  # vLLM Ray executor copies NCCL_* from the leader into workers unless listed in
-  # ray_non_carry_over_env_vars.json (role-managed bind-mount); otherwise followers
-  # inherit the leader's GID index and ncclCommInitRank fails cross-node.
   # Do not set NCCL_IB_GID_INDEX here or it would override the per-host line.
   NCCL_NET_GDR_LEVEL: "PHB"               # GPUDirect RDMA: GPU↔NIC across PCIe host bridge.
                                           #   Per `nvidia-smi topo -m` the GB10 GPU

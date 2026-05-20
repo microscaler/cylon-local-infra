@@ -1,0 +1,10 @@
+---
+# Host page cache only (Linux VM). GPU KV / prefix-cache metadata do not live here.
+# eugr/NVIDIA guidance + llmwiki fp8 cutover: drop before cold `vllm serve` so UMA
+# "free RAM" probes and weight mmap paths see a clean host on every provision.
+
+- name: Sync disks and drop host page caches before vLLM serve
+  ansible.builtin.shell:
+    cmd: sync && echo 3 > /proc/sys/vm/drop_caches
+  when: vllm_stacked_container_drop_caches_on_provision | bool
+  changed_when: true

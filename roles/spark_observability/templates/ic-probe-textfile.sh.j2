@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Emit Prometheus interconnect probe metrics into node_exporter's textfile
+# directory (read by --collector.textfile). Ships to Grafana via the same
+# Spark → otel-agent → ms02 pipeline as other node_exporter samples.
+#
+# Checks: ICMP to QSFP peer (link-local) + optional fabric-2 /30 peer,
+#         RDMA physical_state LINK_UP for each NCCL IB device,
+#         RX/TX errors + drops from ip(8),
+#         selected PHY-layer counters from ethtool -S when available.
+#
+set -euo pipefail
+
+OUT="{{ spark_observability_textfile_dir }}/ic_probe.prom"
+TMP="$(mktemp --tmpdir="{{ spark_observability_textfile_dir }}" ic-probe-XXXXXX.prom.tmp)"
+LOCK="/run/ic-probe-textfile.lock"
+
+{% set ib_list = (nccl_ib_hca | default('rocep1s0f0')).split(',')
+   | map('trim')
+   | reject('equalto', '')
+   | list %}
+
+trap 'rm -f "$TMP"' EXIT
+
+exec 9>"$LOCK"
+flock -n 9 || { echo "previous run still holding lock; skipping" >&2; exit 0; }
+
+PEER_LL="{{ spark_hosts_peer_ip | default('') }}"
+PEER_F2="{{ spark_observability_ic_probe_fabric2_peer | default('') }}"
+DEV_F1="{{ nccl_interface | default('') }}"
+DEV_F2="{{ spark_fabric2_netdev | default('') }}"
+
+IB_DEVICES=(
+{% for d in ib_list | unique %}
+  "{{ d }}"
+{% endfor %}
+)
+
+emit_ping_rows() {
+  local path="$1" peer="$2"
+  local ok=0
+  local rtt="-1"
+
+  if [[ -z "$peer" ]]; then
+    printf 'spark_ic_ping_ok{path="%s",peer="none"} 0\n' "$path"
+    printf 'spark_ic_ping_rtt_ms{path="%s",peer="none"} -1\n' "$path"
+    return 0
+  fi
+
+  if out="$(ping -c 1 -W 2 "$peer" 2>/dev/null)"; then
+    if echo "$out" | grep -Eq ' 0% packet loss|, 0% packet loss|1 received'; then
+      ok=1
+    fi
+    line="$(echo "$out" | grep -m1 'min/avg/max' || true)"
+    if [[ -n "$line" ]]; then
+      rtt="$(echo "$line" | awk -F'/' '/min\/avg\/max/ { print $5 + 0; exit }')"
+    fi
+  fi
+  [[ "$rtt" =~ ^-?[0-9.]+$ ]] || rtt=-1
+
+  printf 'spark_ic_ping_ok{path="%s",peer="%s"} %s\n' "$path" "$peer" "$ok"
+  printf 'spark_ic_ping_rtt_ms{path="%s",peer="%s"} %s\n' "$path" "$peer" "$rtt"
+}
+
+emit_rdma_row() {
+  local dev="$1"
+  local up=0
+
+  [[ -n "$dev" ]] || return 0
+
+  if out="$(rdma link show "$dev" 2>/dev/null)"; then
+    if echo "$out" | grep -q 'physical_state[[:space:]]*LINK_UP'; then
+      up=1
+    fi
+  fi
+
+  printf 'spark_ic_rdma_link_up{device="%s"} %s\n' "$dev" "$up"
+}
+
+netdev_stat() {
+  local dev="$1" field="$2"
+  local val=""
+
+  if [[ -z "$dev" ]]; then
+    echo "0"
+    return 0
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    local json=""
+    json="$(ip -j link show dev "$dev" 2>/dev/null || echo '[]')"
+    case "$field" in
+      rx_errors)
+        val="$(echo "$json" | jq -r '(.[0].stats64.rx.errors // .[0].stats.rx.errors // 0)')" ;;
+      tx_errors)
+        val="$(echo "$json" | jq -r '(.[0].stats64.tx.errors // .[0].stats.tx.errors // 0)')" ;;
+      rx_dropped)
+        val="$(echo "$json" | jq -r '(.[0].stats64.rx.dropped // .[0].stats.rx.dropped // 0)')" ;;
+      tx_dropped)
+        val="$(echo "$json" | jq -r '(.[0].stats64.tx.dropped // .[0].stats.tx.dropped // 0)')" ;;
+      *) val=0 ;;
+    esac
+    [[ "$val" =~ ^[0-9]+$ ]] || val=0
+    echo "$val"
+    return 0
+  fi
+
+  local block=""
+  block="$(ip -s link show dev "$dev" 2>/dev/null || true)"
+  case "$field" in
+    rx_errors)
+      val="$(echo "$block" | awk '/RX:/ { getline; print $3+0; exit }')" ;;
+    tx_errors)
+      val="$(echo "$block" | awk '/TX:/ { getline; print $3+0; exit }')" ;;
+    rx_dropped)
+      val="$(echo "$block" | awk '/RX:/ { getline; print $4+0; exit }')" ;;
+    tx_dropped)
+      val="$(echo "$block" | awk '/TX:/ { getline; print $4+0; exit }')" ;;
+    *) val=0 ;;
+  esac
+  [[ "$val" =~ ^[0-9]+$ ]] || val=0
+  echo "$val"
+}
+
+emit_netdev_rows() {
+  local dev="$1" path="$2"
+  [[ -n "$dev" ]] || return 0
+
+  local rx_e tx_e rx_d tx_d
+  rx_e="$(netdev_stat "$dev" rx_errors)"
+  tx_e="$(netdev_stat "$dev" tx_errors)"
+  rx_d="$(netdev_stat "$dev" rx_dropped)"
+  tx_d="$(netdev_stat "$dev" tx_dropped)"
+
+  printf 'spark_ic_netdev_rx_errors_total{device="%s",path="%s"} %s\n' "$dev" "$path" "$rx_e"
+  printf 'spark_ic_netdev_tx_errors_total{device="%s",path="%s"} %s\n' "$dev" "$path" "$tx_e"
+  printf 'spark_ic_netdev_rx_dropped_total{device="%s",path="%s"} %s\n' "$dev" "$path" "$rx_d"
+  printf 'spark_ic_netdev_tx_dropped_total{device="%s",path="%s"} %s\n' "$dev" "$path" "$tx_d"
+}
+
+emit_ethtool_row() {
+  local dev="$1" path="$2" name="$3"
+  local val=0 line=""
+
+  [[ -n "$dev" ]] || return 0
+  command -v ethtool >/dev/null 2>&1 || return 0
+
+  line="$(ethtool -S "$dev" 2>/dev/null | awk -v want="$name" '$1==want":" {print $2; exit}' || true)"
+  [[ "$line" =~ ^[0-9]+$ ]] || line=0
+  val="$line"
+
+  printf 'spark_ic_ethtool_stat{device="%s",path="%s",name="%s"} %s\n' "$dev" "$path" "$name" "$val"
+}
+
+{
+  cat <<'EOF'
+# HELP spark_ic_ping_ok ICMP echo probe to peer succeeded (1=yes).
+# TYPE spark_ic_ping_ok gauge
+# HELP spark_ic_ping_rtt_ms ICMP round-trip time in ms; -1 if failed or unknown.
+# TYPE spark_ic_ping_rtt_ms gauge
+# HELP spark_ic_rdma_link_up RoCE RDMA device reports physical_state LINK_UP (1=yes).
+# TYPE spark_ic_rdma_link_up gauge
+# HELP spark_ic_netdev_rx_errors_total Kernel RX errors counter for netdev stats.
+# TYPE spark_ic_netdev_rx_errors_total counter
+# HELP spark_ic_netdev_tx_errors_total Kernel TX errors counter for netdev stats.
+# TYPE spark_ic_netdev_tx_errors_total counter
+# HELP spark_ic_netdev_rx_dropped_total Kernel RX dropped counter for netdev stats.
+# TYPE spark_ic_netdev_rx_dropped_total counter
+# HELP spark_ic_netdev_tx_dropped_total Kernel TX dropped counter for netdev stats.
+# TYPE spark_ic_netdev_tx_dropped_total counter
+# HELP spark_ic_ethtool_stat Selected ethtool -S counter (NIC driver / PHY layer).
+# TYPE spark_ic_ethtool_stat counter
+EOF
+
+  emit_ping_rows "linklocal" "$PEER_LL"
+  emit_ping_rows "fabric2" "$PEER_F2"
+
+  for ib in "${IB_DEVICES[@]}"; do
+    [[ -n "$ib" ]] || continue
+    emit_rdma_row "$ib"
+  done
+
+  emit_netdev_rows "$DEV_F1" "fabric1"
+  emit_netdev_rows "$DEV_F2" "fabric2"
+
+  for name in rx_crc_errors_phy corrected_phys_layer_err_drop_events_phy uncorrected_phys_layer_err_drop_events_phy; do
+    emit_ethtool_row "$DEV_F1" "fabric1" "$name"
+    emit_ethtool_row "$DEV_F2" "fabric2" "$name"
+  done
+} > "$TMP"
+
+mv -f "$TMP" "$OUT"
+chmod 0644 "$OUT"

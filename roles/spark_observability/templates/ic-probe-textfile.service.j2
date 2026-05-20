@@ -1,0 +1,6 @@
+[Unit]
+Description=Write Spark interconnect probe metrics to node_exporter textfile dir
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ic-probe-textfile.sh

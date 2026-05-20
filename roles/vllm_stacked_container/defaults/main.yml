@@ -36,10 +36,14 @@ vllm_stacked_container_dashboard_port: 8265
 # Recreate Ray containers when true (image/env change rollout).
 vllm_stacked_container_recreate: false
 
-# Recreate hygiene — GPU KV cache does not survive crashes (see README); these knobs
-# clear host-side leftovers that confuse recovery / memory probes after `docker rm`.
-# Disable with `-e vllm_stacked_container_drop_caches_before_recreate=false` if undesired.
-vllm_stacked_container_drop_caches_before_recreate: true
+# Recreate hygiene — GPU KV cache does not survive crashes (see README); Ray tmp
+# purge clears host-side session dirs after `docker rm`.
+# Page-cache drop runs on every provision (see drop_page_caches.yml), not here.
+vllm_stacked_container_drop_caches_on_provision: true
+# Deprecated alias — use drop_caches_on_provision above.
+vllm_stacked_container_drop_caches_before_recreate: "{{ vllm_stacked_container_drop_caches_on_provision }}"
+# GB10 sm_121 — wipe stale Triton JIT cache before vLLM serve (vllm#41871).
+vllm_stacked_container_triton_cache_invalidate: true
 # Optional: purge Ray session/socket dir on host (`docker rm` does not delete /tmp/ray).
 vllm_stacked_container_clear_ray_tmp_before_recreate: false
 vllm_stacked_container_ray_tmp_dir: /tmp/ray
@@ -54,6 +58,9 @@ vllm_stacked_container_pull_image: true
 vllm_stacked_container_start_api: true
 # Seconds to wait after worker container before API start (Ray worker join).
 vllm_stacked_container_ray_join_delay_sec: 15
+# Poll /v1/models after `vllm serve` starts (35B FP8 cold load can take many minutes).
+vllm_stacked_container_api_ready_retries: 120
+vllm_stacked_container_api_ready_delay_sec: 15
 
 # vLLM Ray executor copies NCCL_* from the driver (leader) into remote workers —
 # that overwrites follower-specific NCCL_IB_GID_INDEX from `--env-file`.

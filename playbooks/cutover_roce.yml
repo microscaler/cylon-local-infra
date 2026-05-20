@@ -1,37 +1,22 @@
 ---
-# One-shot cutover playbook for the Spark RoCE data plane.
+# RETIRED — use playbooks/provision_sparks.yml (canonical).
 #
-# Recreates both Ray containers with the current NCCL env vars + /dev/infiniband
-# passthrough, then restarts `vllm serve` inside the head container. Use this
-# whenever anything under `vllm_distributed_extra_env` in
-# inventory/group_vars/sparks.yml changes (NCCL_IB_HCA, NCCL_IB_GID_INDEX,
-# NCCL_NET_GDR_LEVEL, …) — the bare `--tags vllm_ngc_stack` path on
-# playbooks/provision_sparks.yml is known to skip inner tasks due to an
-# include_role tag-propagation issue, this play bypasses that.
+#   just spark-provision-recreate
+#   # or NCCL/env-only with assert:
+#   just spark-provision --tags vllm_ngc_stack,vllm_container,spark_assert \
+#     -e vllm_stacked_container_recreate=true
 #
-# History:
-#   2026-04-19 — initial cutover: TCP sockets → RoCE v2 + GPUDirect RDMA
-#                (13.93 GB/s NCCL ceiling at active_mtu 1024).
-#   2026-04-19 — dual-PCIe-path cutover: add the second PCIe view of Cage A
-#                (roceP2p1s0f0) + jumbo MTU 9000 + pinned GID index 3.
-#                New NCCL ceiling: 23.75 GB/s (+70 %).
-#
-# Usage (from the controller):
-#   ansible-playbook playbooks/cutover_roce.yml
-#
-# Rollback (revert to single-PCIe-path socket fallback):
-#   1) Edit inventory/group_vars/sparks.yml:
-#        nccl_ib_hca: rocep1s0f0
-#        NCCL_IB_DISABLE: "1"
-#        NCCL_NET_GDR_LEVEL: "0"
-#      and set vllm_stacked_container_rdma_enabled: false
-#   2) ansible-playbook playbooks/cutover_roce.yml
+# This wrapper remains so old docs/scripts fail loudly with a pointer.
 
-- name: Spark cluster — cutover to RoCE v2 + GPUDirect RDMA
-  hosts: sparks
-  gather_facts: true
-  become: true
-  vars:
-    vllm_stacked_container_recreate: true
-  roles:
-    - vllm_stacked_container
+- name: Retired playbook — redirect to provision_sparks.yml
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Stop — cutover_roce.yml is retired
+      ansible.builtin.fail:
+        msg: >-
+          playbooks/cutover_roce.yml is retired. Use:
+            just spark-provision-recreate
+          or:
+            ansible-playbook playbooks/provision_sparks.yml -l sparks
+              -e vllm_stacked_container_recreate=true

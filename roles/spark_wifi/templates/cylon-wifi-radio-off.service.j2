@@ -1,0 +1,14 @@
+# Managed by Ansible (roles/spark_wifi) — cylon-local-infra
+# NetworkManager 1.46+ ignores [main] wifi.enabled in conf.d; run nmcli after NM starts.
+[Unit]
+Description=Disable Wi-Fi radio on DGX Spark (Ethernet-only)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nmcli radio wifi off
+
+[Install]
+WantedBy=multi-user.target

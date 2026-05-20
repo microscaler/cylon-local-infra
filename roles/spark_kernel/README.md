@@ -15,7 +15,7 @@ re-run the role; the next pass converges to the new state.
 # Pin the GRUB default to a specific kernel (any installed kernel — verify
 # with `dpkg -l 'linux-image-*' | grep '^ii'` on the target). Empty string
 # means "leave GRUB_DEFAULT untouched".
-spark_kernel_pin: "6.17.0-1008-nvidia"
+spark_kernel_pin: "6.17.0-1018-nvidia"
 
 # Hold the pinned kernel + the HWE meta packages so apt won't bump them.
 spark_kernel_apt_hold: true
@@ -38,8 +38,8 @@ wins — see [inventory examples](#inventory-examples).
 
 | Flag combination | Meaning |
 |---|---|
-| `spark_kernel_pin: "6.17.0-1014-nvidia"` | Pin to the **current HWE default**. Useful as an explicit no-op (lets you also hold the HWE meta without changing which kernel boots). |
-| `spark_kernel_pin: "6.17.0-1008-nvidia"` | **One step back** on the 6.17 line. Same nvidia-580-open module ABI as 1014. Lowest-risk downgrade. |
+| `spark_kernel_pin: "6.17.0-1018-nvidia"` | **Fleet pin** — 4K-page image with Spark iGPU IOMMU + RoCE GID fixes (May 2026 OTA). |
+| `spark_kernel_pin: "6.17.0-1008-nvidia"` | **Prior control** — one step back on the 6.17 line. |
 | `spark_kernel_pin: "6.11.0-1014-nvidia"` | **Older line** (6.11). Bigger jump back; matches an earlier DGX OS HWE. |
 | `spark_kernel_pin: ""` | Leave GRUB_DEFAULT alone (manage holds and OTA service only). |
 
@@ -52,7 +52,7 @@ The role rejects any value that isn't an installed kernel (`dpkg -l
 default; uncomment to apply to both Sparks):
 
 ```yaml
-# spark_kernel_pin: "6.17.0-1008-nvidia"
+# spark_kernel_pin: "6.17.0-1018-nvidia"
 # spark_kernel_apt_hold: true
 # spark_kernel_disable_auto_apt_upgrade: true
 ```
@@ -92,26 +92,30 @@ just spark-kernel-show-menu yes  # expose GRUB menu for next boot
 1. **Discovery** — `uname -r`, installed `linux-image-*-nvidia` packages,
    currently held packages. Always runs (safe in `--check`); emits a
    debug summary.
-2. **Validate `spark_kernel_pin`** — must be one of the installed
-   `linux-image-*-nvidia` packages. Fails fast if not.
-3. **Discover GRUB menuentry IDs** — slurps `/boot/grub/grub.cfg`, finds
+2. **Install if missing** — when `spark_kernel_install_if_missing: true`
+   (default), `apt install` the pinned `linux-image-*` + module packages
+   before validation. Skipped when the image is already on disk.
+3. **Validate `spark_kernel_pin`** — must be one of the installed
+   `linux-image-*-nvidia` packages (4K `*-nvidia` only; never `*-nvidia-64k`
+   unless you deliberately want 64K pages). Fails fast if not.
+4. **Discover GRUB menuentry IDs** — slurps `/boot/grub/grub.cfg`, finds
    the `Advanced options` submenu id and the `with Linux <ver>` menuentry
    id (recovery entries explicitly excluded). The IDs are per-host
    because they embed the root filesystem UUID — discovery handles this
    automatically.
-4. **Set `GRUB_DEFAULT`** in `/etc/default/grub` to
+5. **Set `GRUB_DEFAULT`** in `/etc/default/grub` to
    `<submenu_id>>$menuentry_id` and `update-grub` (handler).
-5. **Apt holds** — narrows the candidate package list (HWE meta + kernel
+6. **Apt holds** — narrows the candidate package list (HWE meta + kernel
    variants) to packages actually installed on the host, then
    `apt-mark hold`s them. When `spark_kernel_apt_hold: false`, releases
    ALL kernel-related apt holds.
-6. **NVIDIA OTA service** — `mask`+`stop` (or `unmask`) of
+7. **NVIDIA OTA service** — `mask`+`stop` (or `unmask`) of
    `nvidia-spark-run-apt-upgrade-once.service` if the unit exists. (This
    is a oneshot gated by `/var/lib/nvidia-spark-run-apt-upgrade-once/done`,
    so it only re-arms after a NVIDIA dpkg trigger removes the done-file.
    The main recurring upgrader is Ubuntu's `apt-daily-upgrade.timer`,
    which respects the `apt-mark hold`s above.)
-7. **Reboot reminder** — debug message if running kernel ≠ pinned
+8. **Reboot reminder** — debug message if running kernel ≠ pinned
    kernel. Does NOT trigger a reboot — that's the operator's call (see
    `just spark-reboot`).
 
@@ -142,8 +146,9 @@ HWE meta now points at.
   reboot of the Spark cluster is a coordinated event that takes vLLM
   out of service, and `just spark-reboot` already handles the
   graceful-stop sequence.
-- **Does NOT install kernels.** It can only pin / hold / unhold ones
-  already on disk. To install a new kernel for use here:
+- **Does NOT install arbitrary kernels** unless `spark_kernel_install_if_missing`
+  is true and `spark_kernel_pin` is set — then it installs only that pinned
+  4K image + modules. For manual installs outside the pin:
   `apt install linux-image-<ver>-nvidia` first.
 - **No kdump arming.** The role does not configure crashkernel reservation
   (separate concern; current `/proc/cmdline` shows `crashkernel=1G-:0M` →

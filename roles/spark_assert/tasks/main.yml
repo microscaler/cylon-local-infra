@@ -1,0 +1,253 @@
+---
+# Assert end-state after spark_provision phases. Tagged to match the phases they
+# gate so `--tags vllm_ngc_stack,spark_assert` works for targeted reruns.
+
+- name: Preflight — interconnect IP for Ray/NCCL asserts
+  ansible.builtin.import_tasks: preflight_interconnect.yml
+
+- name: Assert — Wi-Fi radio disabled
+  ansible.builtin.command:
+    argv: [nmcli, -t, -f, WIFI, general]
+  register: spark_assert_wifi_radio
+  changed_when: false
+  failed_when: spark_assert_wifi_radio.stdout | trim != "disabled"
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_wifi_disable | default(true) | bool
+  tags: [spark, spark_assert, network, spark_wifi]
+
+- name: Assert — Wi-Fi disabled systemd unit present
+  ansible.builtin.stat:
+    path: "{{ spark_wifi_systemd_unit_path | default(spark_wifi_nm_conf_path | default('/etc/systemd/system/cylon-wifi-radio-off.service')) }}"
+  register: spark_assert_wifi_unit
+  failed_when: not spark_assert_wifi_unit.stat.exists
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_wifi_disable | default(true) | bool
+  tags: [spark, spark_assert, network, spark_wifi]
+
+- name: Assert — NVIDIA driver loaded
+  ansible.builtin.command: nvidia-smi
+  register: spark_assert_nvidia_smi
+  changed_when: false
+  failed_when: spark_assert_nvidia_smi.rc != 0
+  when: spark_assert_enabled | bool
+  tags: [spark, spark_assert, cuda, vllm_ngc_stack, vllm_container]
+
+- name: Assert — Docker daemon active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, docker]
+  register: spark_assert_docker
+  changed_when: false
+  failed_when: spark_assert_docker.stdout | trim != "active"
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_docker | default(true) | bool
+  tags: [spark, spark_assert, docker]
+
+- name: Assert — interconnect IPv4 on QSFP interface
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -4
+      - -o
+      - addr
+      - show
+      - dev
+      - "{{ nccl_interface }}"
+  register: spark_assert_ic_ip
+  changed_when: false
+  failed_when: spark_assert_ic_ip.stdout | trim | length == 0
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_hosts | default(true) | bool
+  tags: [spark, spark_assert, network, hosts]
+
+- name: Assert — Ray head container running (leader)
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}'
+      {{ vllm_stacked_container_ray_head_name | default('vllm-ngc-ray-head') }}
+  register: spark_assert_ray_head
+  changed_when: false
+  failed_when: spark_assert_ray_head.stdout | trim != "true"
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_vllm_stacked_container | default(true) | bool
+    - (vllm_stack_kind | default('ray')) == 'ray'
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
+
+- name: Assert — Ray worker container running (follower)
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}'
+      {{ vllm_stacked_container_ray_worker_name | default('vllm-ngc-ray-worker-' ~ inventory_hostname) }}
+  register: spark_assert_ray_worker
+  changed_when: false
+  failed_when: spark_assert_ray_worker.stdout | trim != "true"
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_vllm_stacked_container | default(true) | bool
+    - (vllm_stack_kind | default('ray')) == 'ray'
+    - inventory_hostname != (groups['sparks'] | sort | first)
+  tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
+
+- name: Assert — Ray cluster lists all Spark interconnect IPs (leader)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    out="$(docker exec "{{ vllm_stacked_container_ray_head_name | default('vllm-ngc-ray-head') }}" bash -lc 'ray list nodes 2>/dev/null' || true)"
+    need="{{ groups['sparks'] | map('extract', hostvars, 'spark_interconnect_ip') | list | join(' ') }}"
+    for ip in $need; do
+      echo "$out" | grep -Fq "$ip" || { echo "missing Ray node IP $ip"; echo "$out"; exit 1; }
+    done
+  args:
+    executable: /bin/bash
+  register: spark_assert_ray_status
+  changed_when: false
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_vllm_stacked_container | default(true) | bool
+    - (vllm_stack_kind | default('ray')) == 'ray'
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
+
+- name: Assert — vllm serve process running in head container (leader)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cname="{{ vllm_stacked_container_ray_head_name | default('vllm-ngc-ray-head') }}"
+    out="$(docker exec "$cname" bash -lc "pgrep -af 'vllm serve' || true")"
+    if [ -z "$out" ]; then
+      echo "no vllm serve process in $cname"
+      docker exec "$cname" bash -lc 'tail -40 /root/vllm-serve.log 2>/dev/null || echo "(no /root/vllm-serve.log)"'
+      exit 1
+    fi
+    echo "$out"
+  args:
+    executable: /bin/bash
+  register: spark_assert_vllm_serve_ps
+  changed_when: false
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_vllm_api | bool
+    - spark_provision_vllm_stacked_container | default(true) | bool
+    - (vllm_stack_kind | default('ray')) == 'ray'
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
+
+- name: Assert — torchrun container running
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}'
+      {{ vllm_torchrun_stacked_container_name | default('vllm-ngc-torchrun-' ~ inventory_hostname) }}
+  register: spark_assert_torchrun
+  changed_when: false
+  failed_when: spark_assert_torchrun.stdout | trim != "true"
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_vllm_torchrun_stacked | default(true) | bool
+    - (vllm_stack_kind | default('ray')) == 'torchrun'
+  tags: [spark, spark_assert, vllm_torchrun_stack, vllm_container, stack_torchrun]
+
+- name: Assert — vLLM OpenAI /v1/models on leader
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ vllm_stacked_container_api_port | default(8000) }}/v1/models"
+    return_content: true
+    status_code: 200
+    timeout: "{{ spark_assert_vllm_api_timeout_sec | int }}"
+  register: spark_assert_vllm_models
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_vllm_api | bool
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - (
+        (spark_provision_vllm_stacked_container | default(true) | bool and (vllm_stack_kind | default('ray')) == 'ray')
+        or (spark_provision_vllm_torchrun_stacked | default(true) | bool and (vllm_stack_kind | default('ray')) == 'torchrun')
+      )
+  tags: [spark, spark_assert, vllm_ngc_stack, vllm_torchrun_stack, vllm_container]
+
+- name: Assert — /v1/models lists configured weights or served alias
+  ansible.builtin.assert:
+    that:
+      - >-
+        (vllm_default_model in spark_assert_vllm_models.content)
+        or ('gpt-4o-mini' in spark_assert_vllm_models.content)
+        or ('qwen3' in spark_assert_vllm_models.content)
+    fail_msg: >-
+      /v1/models did not include vllm_default_model={{ vllm_default_model }}
+      or a known served alias. Body={{ spark_assert_vllm_models.content[:500] }}
+  when:
+    - spark_assert_vllm_models is defined
+    - not (spark_assert_vllm_models.skipped | default(false))
+  tags: [spark, spark_assert, vllm_ngc_stack, vllm_torchrun_stack, vllm_container]
+
+- name: Assert — NCCL_IB_GID_INDEX in vLLM container matches inventory
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cname="{{ ((vllm_stack_kind | default('ray')) == 'torchrun')
+              | ternary(vllm_torchrun_stacked_container_name | default('vllm-ngc-torchrun-' ~ inventory_hostname),
+                        ((inventory_hostname == (groups['sparks'] | sort | first))
+                         | ternary(vllm_stacked_container_ray_head_name | default('vllm-ngc-ray-head'),
+                                   vllm_stacked_container_ray_worker_name | default('vllm-ngc-ray-worker-' ~ inventory_hostname)))) }}"
+    docker exec "$cname" bash -lc 'echo -n "$NCCL_IB_GID_INDEX"'
+  args:
+    executable: /bin/bash
+  register: spark_assert_nccl_gid
+  changed_when: false
+  failed_when: spark_assert_nccl_gid.stdout | trim != (spark_nccl_ib_gid_index | default('3') | string)
+  when:
+    - spark_assert_enabled | bool
+    - (
+        (spark_provision_vllm_stacked_container | default(true) | bool and (vllm_stack_kind | default('ray')) == 'ray')
+        or (spark_provision_vllm_torchrun_stacked | default(true) | bool and (vllm_stack_kind | default('ray')) == 'torchrun')
+      )
+  tags: [spark, spark_assert, vllm_ngc_stack, vllm_torchrun_stack, vllm_container]
+
+- name: Assert — HF prefetch production model ready (leader)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    jq -e --arg m '{{ vllm_default_model }}' '.models[$m].status == "ready"' \
+      /var/lib/hf-prefetch/state.json
+  args:
+    executable: /bin/bash
+  register: spark_assert_hf_ready
+  changed_when: false
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_hf_prefetch_model_ready | bool
+    - spark_provision_hf | default(false) | bool
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  tags: [spark, spark_assert, hf, hf_prefetch]
+
+- name: Assert — node_exporter active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, node_exporter]
+  register: spark_assert_node_exporter
+  changed_when: false
+  failed_when: spark_assert_node_exporter.stdout | trim != "active"
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_observability | bool
+    - spark_provision_observability | default(true) | bool
+  tags: [spark, spark_assert, spark_obs]
+
+- name: Assert — ic-probe textfile timer active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, ic-probe-textfile.timer]
+  register: spark_assert_ic_probe
+  changed_when: false
+  failed_when: spark_assert_ic_probe.stdout | trim != "active"
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_observability | bool
+    - spark_provision_observability | default(true) | bool
+    - spark_observability_ic_probe_enabled | default(true) | bool
+  tags: [spark, spark_assert, spark_obs, spark_obs_ic_probe]
+
+- name: Assert — cluster gate passed
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: declared state OK
+      (stack={{ vllm_stack_kind | default('ray') }})
+  when: spark_assert_enabled | bool
+  tags: [spark, spark_assert]

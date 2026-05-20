@@ -100,7 +100,7 @@
     - inventory_hostname == (groups['sparks'] | sort | first)
     - vllm_stacked_container_recreate | bool
 
-- name: Recreate cleanup — host page cache / optional Ray tmp (leader)
+- name: Recreate cleanup — optional Ray tmp purge (leader)
   ansible.builtin.import_tasks: recreate_host_cleanup.yml
   when:
     - inventory_hostname == (groups['sparks'] | sort | first)
@@ -113,6 +113,39 @@
   failed_when: false
   changed_when: false
   when: inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Check GPU visibility inside running Ray head container
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ vllm_stacked_container_ray_head_name }}"
+      - nvidia-smi
+      - -L
+  register: vllm_stacked_container_head_gpu_probe
+  failed_when: false
+  changed_when: false
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_stacked_container_head_running.rc == 0
+    - (vllm_stacked_container_head_running.stdout | default("") | trim) == "true"
+
+- name: Remove Ray head container when GPU is not visible (stale bind after driver/kernel churn)
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_stacked_container_ray_head_name }}"
+  register: vllm_stacked_container_head_gpu_recreate
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_stacked_container_head_gpu_probe is defined
+    - vllm_stacked_container_head_gpu_probe.rc != 0
+    - not (vllm_stacked_container_recreate | bool)
+
+- name: Note Ray head GPU stale recreate
+  ansible.builtin.set_fact:
+    vllm_stacked_container_head_gpu_stale: true
+  when:
+    - vllm_stacked_container_head_gpu_recreate is defined
+    - vllm_stacked_container_head_gpu_recreate is changed
 
 # Mirrors the worker's "reuse existing name" path. Without this, an Exited
 # head container (e.g. after `just spark-vllm-stop` + reboot — `--restart
@@ -152,6 +185,7 @@
   when:
     - inventory_hostname == (groups['sparks'] | sort | first)
     - vllm_stacked_container_recreate | bool
+      or vllm_stacked_container_head_gpu_stale | default(false) | bool
       or vllm_stacked_container_head_running.rc != 0
       or (
         (vllm_stacked_container_head_running.stdout | default("") | trim) == "false"
@@ -179,7 +213,7 @@
     - inventory_hostname != (groups['sparks'] | sort | first)
     - vllm_stacked_container_recreate | bool
 
-- name: Recreate cleanup — host page cache / optional Ray tmp (followers)
+- name: Recreate cleanup — optional Ray tmp purge (followers)
   ansible.builtin.import_tasks: recreate_host_cleanup.yml
   when:
     - inventory_hostname != (groups['sparks'] | sort | first)
@@ -192,6 +226,39 @@
   failed_when: false
   changed_when: false
   when: inventory_hostname != (groups['sparks'] | sort | first)
+
+- name: Check GPU visibility inside running Ray worker container
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ vllm_stacked_container_ray_worker_name }}"
+      - nvidia-smi
+      - -L
+  register: vllm_stacked_container_worker_gpu_probe
+  failed_when: false
+  changed_when: false
+  when:
+    - inventory_hostname != (groups['sparks'] | sort | first)
+    - vllm_stacked_container_worker_running.rc == 0
+    - (vllm_stacked_container_worker_running.stdout | default("") | trim) == "true"
+
+- name: Remove Ray worker container when GPU is not visible (stale bind after driver/kernel churn)
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_stacked_container_ray_worker_name }}"
+  register: vllm_stacked_container_worker_gpu_recreate
+  when:
+    - inventory_hostname != (groups['sparks'] | sort | first)
+    - vllm_stacked_container_worker_gpu_probe is defined
+    - vllm_stacked_container_worker_gpu_probe.rc != 0
+    - not (vllm_stacked_container_recreate | bool)
+
+- name: Note Ray worker GPU stale recreate
+  ansible.builtin.set_fact:
+    vllm_stacked_container_worker_gpu_stale: true
+  when:
+    - vllm_stacked_container_worker_gpu_recreate is defined
+    - vllm_stacked_container_worker_gpu_recreate is changed
 
 # If a previous power-loss left a *stopped* worker container, `docker run` fails
 # with "name already in use". Prefer `docker start` for that case.
@@ -228,6 +295,7 @@
   when:
     - inventory_hostname != (groups['sparks'] | sort | first)
     - vllm_stacked_container_recreate | bool
+      or vllm_stacked_container_worker_gpu_stale | default(false) | bool
       or vllm_stacked_container_worker_running.rc != 0
       or (
         (vllm_stacked_container_worker_running.stdout | default("") | trim) == "false"
@@ -300,9 +368,19 @@
     - qwen_patch_out is defined
     - qwen_patch_out.stdout_lines is defined
 
+- name: Drop host page caches on every Spark before vLLM serve
+  ansible.builtin.import_tasks: drop_page_caches.yml
+  when: vllm_stacked_container_start_api | bool
+
+- name: Invalidate Triton JIT cache in Ray containers before vLLM serve
+  ansible.builtin.import_tasks: triton_cache_invalidate.yml
+  when: vllm_stacked_container_start_api | bool
+
 - name: Check for vLLM serve in head container
-  ansible.builtin.command:
-    cmd: docker exec "{{ vllm_stacked_container_ray_head_name }}" bash -lc "pgrep -af '[v]llm serve' || true"
+  ansible.builtin.shell: |
+    docker exec "{{ vllm_stacked_container_ray_head_name }}" bash -lc "pgrep -af 'vllm serve' || true"
+  args:
+    executable: /bin/bash
   register: vllm_stacked_container_vllm_ps
   changed_when: false
   failed_when: false
@@ -325,3 +403,15 @@
     - vllm_stacked_container_start_api | bool
     - vllm_stacked_container_vllm_ps.stdout | default("") | length == 0
   register: vllm_stacked_container_api_start
+
+- name: Wait for vLLM OpenAI /v1/models on leader
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ vllm_stacked_container_api_port | int }}/v1/models"
+    status_code: 200
+  register: vllm_stacked_container_api_ready
+  until: vllm_stacked_container_api_ready.status == 200
+  retries: "{{ vllm_stacked_container_api_ready_retries | int }}"
+  delay: "{{ vllm_stacked_container_api_ready_delay_sec | int }}"
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_stacked_container_start_api | bool

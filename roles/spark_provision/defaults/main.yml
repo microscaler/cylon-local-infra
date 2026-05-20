@@ -19,6 +19,10 @@ spark_provision_firewall: true
 # LAN IPv6-off — NetworkManager ipv6.method disabled + sysctl pair (see tasks/lan_ipv6_*.yml).
 # Inventory: spark_lan_disable_ipv6_on_interface in group_vars/sparks.yml (both Sparks today).
 spark_provision_lan_ipv6_sysctl: true
+# Wi-Fi off — wired Ethernet is canonical; avoids duplicate default-route IPs (vllm#43095).
+spark_provision_wifi_disable: true
+# GPU graphics clock cap (roles/spark_gpu_clock) — thermal mitigation until cooling block.
+spark_provision_gpu_clock: true
 # /etc/hosts interconnect aliases (gx10-*, nvidia*) — roles/spark_hosts
 spark_provision_hosts: true
 # CUDA toolkit on the host is no longer needed for vLLM (NGC image is self-contained).
@@ -26,6 +30,8 @@ spark_provision_hosts: true
 spark_provision_cuda_toolkit: false
 # NGC stacked vLLM (Docker Ray head + worker + `vllm serve`) — the only supported path.
 spark_provision_vllm_stacked_container: true
+# torchrun + external_launcher stack (A/B vs Ray; enable via vllm_stack_kind: torchrun).
+spark_provision_vllm_torchrun_stacked: true
 # Leader-only systemd daemon that keeps configured OCI images current
 # (NGC vLLM, etc.) and rsyncs new tags to peer Sparks over the QSFP
 # interconnect. Polls weekly by default.
@@ -42,3 +48,5 @@ spark_provision_diagnostics: false
 # 127.0.0.1; the otel-agent and promtail push to ms02 (192.168.1.189). Metrics
 # at 15s; logs via journald. See roles/spark_observability/README.md.
 spark_provision_observability: true
+# End-of-run state gate — fail play if cluster != declared inventory (roles/spark_assert).
+spark_provision_assert: true

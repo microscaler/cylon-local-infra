@@ -1,8 +1,10 @@
 # Follower (gx10-47b5). LAN IPv6-off default lives in inventory/group_vars/sparks.yml.
 
-# RoCE v2 + IPv4 GID index for NCCL — this unit's `show_gids` places IPv4 RoCE v2 at index 4
-# (not 3) on rocep1s0f0 and roceP2p1s0f0; pinning 3 breaks ncclCommInitRank (PyNCCL unhandled system error).
-spark_nccl_ib_gid_index: "4"
+# RoCE v2 + IPv4 GID index for NCCL (`show_gids` → same IPv4 row style as nvidia1).
+# Live check 2026-05-19: IPv4 RoCE **v2** on `rocep1s0f0` is index **3** (169.254.37.109).
+# Earlier inventory used `"4"` when this host's table differed; pinning `"4"` today leaves no IPv4 v2 at
+# index 4 → NCCL `ibv_modify_qp` / remote GID empty. Re-verify after FW or mlx5 churn — index can move.
+spark_nccl_ib_gid_index: "3"
 
 # QSFP link-local + stable names for Ray/GCS, NCCL OOB, and operator SSH (roles/spark_hosts).
 spark_hosts_local_ip: "169.254.37.109"
@@ -15,6 +17,5 @@ spark_hosts_peer_aliases:
   - nvidia1
 
 # --- Kernel pin (roles/spark_kernel) ---
-# 2026-05-01: cluster-wide step-back to 6.17.0-1008-nvidia is configured at
-# the group level (inventory/group_vars/sparks.yml). No per-host override
-# needed.
+# Cluster-wide pin: 6.17.0-1018-nvidia (4K) in group_vars/sparks.yml.
+# Use *-nvidia-64k only deliberately — different page-size ABI vs fleet CUDA/NCCL.

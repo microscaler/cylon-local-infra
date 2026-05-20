@@ -1,0 +1,8 @@
+---
+# Host page cache — same rationale as vllm_stacked_container/drop_page_caches.yml.
+
+- name: Sync disks and drop host page caches before torchrun vLLM
+  ansible.builtin.shell:
+    cmd: sync && echo 3 > /proc/sys/vm/drop_caches
+  when: vllm_torchrun_stacked_drop_caches_on_provision | bool
+  changed_when: true

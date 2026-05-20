@@ -42,6 +42,14 @@
   tags: [spark, kernel]
   when: spark_provision_kernel | default(true) | bool
 
+- name: Phase — GPU graphics clock lock (thermal mitigation)
+  ansible.builtin.include_role:
+    name: spark_gpu_clock
+    apply:
+      tags: [spark, gpu, spark_gpu_clock]
+  tags: [spark, gpu, spark_gpu_clock]
+  when: spark_provision_gpu_clock | default(true) | bool
+
 - name: Phase — Docker Engine
   ansible.builtin.include_role:
     name: docker
@@ -114,8 +122,6 @@
 - name: Phase — NGC stacked vLLM (Docker Ray + `vllm serve`)
   ansible.builtin.include_role:
     name: vllm_stacked_container
-    # Without `apply.tags`, `--tags vllm_ngc_stack` only matched this include_task
-    # line — no tasks inside the role ran. Propagate tags to every task in the role.
     apply:
       tags:
         - spark
@@ -123,7 +129,23 @@
         - stack_ngc
         - vllm_container
   tags: [spark, vllm_ngc_stack, stack_ngc, vllm_container]
-  when: spark_provision_vllm_stacked_container | default(true) | bool
+  when:
+    - spark_provision_vllm_stacked_container | default(true) | bool
+    - (vllm_stack_kind | default('ray')) == 'ray'
+
+- name: Phase — NGC stacked vLLM (torchrun + external_launcher, no Ray)
+  ansible.builtin.include_role:
+    name: vllm_torchrun_stacked
+    apply:
+      tags:
+        - spark
+        - vllm_torchrun_stack
+        - stack_torchrun
+        - vllm_container
+  tags: [spark, vllm_torchrun_stack, stack_torchrun, vllm_container]
+  when:
+    - spark_provision_vllm_torchrun_stacked | default(true) | bool
+    - (vllm_stack_kind | default('ray')) == 'torchrun'
 
 - name: Phase — diagnostics (Docker + HF cache probes)
   ansible.builtin.include_role:
@@ -133,7 +155,7 @@
   tags: [spark, diagnostics, probe]
   when: spark_provision_diagnostics | default(false) | bool
 
-- name: Phase — Observability (node_exporter, dcgm-exporter, otel-agent, promtail, rasdaemon)
+- name: Phase — Observability (node_exporter, dcgm-exporter, otel-agent, promtail, textfile gauges)
   ansible.builtin.include_role:
     name: spark_observability
     apply:
@@ -146,5 +168,22 @@
         - spark_obs_otel
         - spark_obs_promtail
         - spark_obs_rasdaemon
+        - spark_obs_ic_probe
   tags: [spark, spark_obs]
   when: spark_provision_observability | default(true) | bool
+
+- name: Phase — disable Wi-Fi (systemd + nmcli; last mutating network step before assert)
+  ansible.builtin.include_role:
+    name: spark_wifi
+    apply:
+      tags: [spark, network, spark_wifi]
+  tags: [spark, network, spark_wifi]
+  when: spark_provision_wifi_disable | default(true) | bool
+
+- name: Phase — assert declared cluster state (end-to-end gate)
+  ansible.builtin.include_role:
+    name: spark_assert
+    apply:
+      tags: [spark, spark_assert]
+  tags: [spark, spark_assert]
+  when: spark_provision_assert | default(true) | bool

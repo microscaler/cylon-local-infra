@@ -1,0 +1,77 @@
+---
+# Keep Wi-Fi off on Sparks — wired Ethernet is canonical for operator + LAN API access.
+# NM 1.46 (DGX Spark) warns that [main] wifi.enabled is an unknown key — use nmcli +
+# a boot-time systemd oneshot instead of a conf.d drop-in.
+
+- name: Remove obsolete NetworkManager wifi.enabled drop-in
+  ansible.builtin.file:
+    path: "{{ spark_wifi_legacy_nm_conf_path }}"
+    state: absent
+  register: spark_wifi_legacy_conf_removed
+  when: spark_wifi_disable | bool
+
+- name: Install systemd unit to disable Wi-Fi radio after NetworkManager starts
+  ansible.builtin.template:
+    src: cylon-wifi-radio-off.service.j2
+    dest: "{{ spark_wifi_systemd_unit_path }}"
+    mode: "0644"
+  register: spark_wifi_systemd_unit
+  notify: spark_wifi systemd daemon-reload
+  when: spark_wifi_disable | bool
+
+- name: Enable and start Wi-Fi radio-off systemd unit
+  ansible.builtin.systemd:
+    name: "{{ spark_wifi_systemd_unit_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: spark_wifi_disable | bool
+
+- name: Disable autoconnect on saved Wi-Fi connection profiles
+  ansible.builtin.shell: |
+    set -euo pipefail
+    nmcli -t -f NAME,TYPE connection show \
+      | awk -F: '$2 == "802-11-wireless" { print $1 }' \
+      | while IFS= read -r name; do
+          nmcli connection modify "$name" connection.autoconnect no
+        done
+  args:
+    executable: /bin/bash
+  register: spark_wifi_autoconnect_off
+  changed_when: spark_wifi_autoconnect_off.stdout | length > 0
+  failed_when: false
+  when: spark_wifi_disable | bool
+
+- name: Turn Wi-Fi radio off immediately
+  ansible.builtin.command:
+    argv: [nmcli, radio, wifi, "off"]
+  register: spark_wifi_radio_off
+  changed_when: spark_wifi_radio_off.rc == 0
+  failed_when: spark_wifi_radio_off.rc != 0
+  when: spark_wifi_disable | bool
+
+- name: List active Wi-Fi connections (if any)
+  ansible.builtin.command:
+    argv: [nmcli, -t, -f, NAME,TYPE, connection, show, --active]
+  register: spark_wifi_active_conns
+  changed_when: false
+  failed_when: false
+  when: spark_wifi_disable | bool
+
+- name: Disconnect stray active Wi-Fi connections
+  ansible.builtin.command:
+    argv: [nmcli, connection, down, "{{ item.split(':')[0] }}"]
+  loop: "{{ spark_wifi_active_conns.stdout_lines | default([]) | select('search', ':802-11-wireless') | list }}"
+  when:
+    - spark_wifi_disable | bool
+    - spark_wifi_active_conns.rc == 0
+  changed_when: true
+  failed_when: false
+
+- name: Verify Wi-Fi radio is disabled
+  ansible.builtin.command:
+    argv: [nmcli, -t, -f, WIFI, general]
+  register: spark_wifi_verify
+  changed_when: false
+  failed_when: spark_wifi_verify.stdout | trim != "disabled"
+  when: spark_wifi_disable | bool

@@ -7,8 +7,7 @@
 # See:
 #   - docs/dev_hosts.md
 #   - llmwiki/concepts/starlink-wifi-lan-port-filter.md (historical)
-#   - DGX Spark vLLM: `just spark-vllm-*` (Ansible inventory must resolve nvidia1/nvidia2)
-#   - HF model prefetch (leader): `just spark-hf-prefetch-provision`
+#   - DGX Spark: `just spark-provision` (canonical — full reconcile + assert)
 
 set shell := ["bash", "-uc"]
 
@@ -557,23 +556,51 @@ ms02-shell:
 ms02 +cmd:
     ssh -t ms02 '{{cmd}}'
 
-# ── DGX Spark — vLLM + Ray (stacked NGC containers) ───────────────────────
+# ── DGX Spark — ONE canonical provision path ──────────────────────────────────
 #
-# Canonical implementation: Ansible role `vllm_stacked_container` via
-# `playbooks/provision_sparks.yml`. These recipes are thin wrappers so you
-# don't have to remember tags/paths.
+# Daily driver (only these two — everything else is runtime ops or escape hatches):
 #
-# Prereqs:
-#   - This repo is the Ansible controller cwd (recipes `cd` to the justfile dir).
-#   - SSH host aliases `nvidia1` / `nvidia2` work from this Mac (~/.ssh/config).
-#   - QSFP interconnect is up (see inventory `nccl_interface` / host_vars).
+#   just spark-provision              # playbooks/provision_sparks.yml end-to-end + spark_assert
+#   just spark-provision-recreate     # same + force vLLM container recreate (Ray or torchrun)
 #
-# Leader OpenAI API on LAN (override if your leader IP differs):
-#   export SPARK_VLLM_API=http://192.168.1.104:8000
+# Escape hatch (tags/extra-vars after `--`):
+#   just spark-provision -- --skip-tags apt
+#   just spark-provision -- -e spark_provision_assert=false   # reconcile without assert gate
+#
+# Partial tag runs MUST include spark_assert for the phases you touch, e.g.:
+#   just spark-provision -- --tags hf_prefetch,spark_assert
+#
+# Retired: spark-vllm-provision, cutover_roce.yml, refresh_hf_prefetch.yml — use spark-provision*.
+#
+# Prereqs: SSH to nvidia1/nvidia2; QSFP interconnect up.
+# Leader API: export SPARK_VLLM_API=http://192.168.1.104:8000
 
 spark-vllm-api := env_var_or_default('SPARK_VLLM_API', 'http://192.168.1.104:8000')
 
-# Python probe + local triggers (sync/switchover): see scripts/spark_model_status.py help
+# Canonical — full end-to-end reconcile + state assert.
+spark-provision *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks ${extra[@]+"${extra[@]}"}
+
+# Full reconcile + recreate vLLM containers (active stack per vllm_stack_kind in inventory).
+spark-provision-recreate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks \
+        -e vllm_stacked_container_recreate=true \
+        -e vllm_torchrun_stacked_recreate=true
+
+# Dry-run full provision (check mode).
+spark-provision-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks --check --diff
+
+# ── Spark model / Hermes workflows (call canonical provision internally) ─────
 #   just spark-model-status
 #   just spark-model-status --json
 #   just spark-model-status ansible-prefetch
@@ -587,7 +614,8 @@ spark-model-status *args:
     cd '{{ justfile_directory() }}'
     python3 scripts/spark_model_status.py "$@"
 
-# Full local workflow: refresh_hf_prefetch.yml → hf_prefetch --once on leader → vllm_ngc_stack.
+# Full local workflow: inventory edit → spark_model_status cutover → full provision + assert.
+# Equivalent to: just spark-provision-recreate (after HF prefetch steps in cutover).
 # Edit inventory/group_vars/sparks.yml first (hf_prefetch_models, vllm_default_model).
 spark-model-cutover *args:
     #!/usr/bin/env bash
@@ -615,33 +643,24 @@ spark-model-status-test:
     cd '{{ justfile_directory() }}/scripts'
     python3 -m unittest test_spark_model_status.py -v
 
-# Render `/etc/hf-prefetch/config.yaml` on the leader from `hf_prefetch_models`
-# in `inventory/group_vars/sparks.yml` and reload the daemon (starts downloads
-# for any new IDs on the next reconcile).
-spark-hf-prefetch-provision:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd '{{ justfile_directory() }}'
-    ansible-playbook playbooks/provision_sparks.yml -l sparks --tags hf_prefetch
+# Model cutover: edit sparks.yml → `just spark-model-cutover --recreate` (full provision + assert).
+# Equivalent to: spark-provision-recreate after hf prefetch steps.
 
-# Apply / refresh the NGC Ray head + worker + `vllm serve` stack (idempotent).
-spark-vllm-provision:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd '{{ justfile_directory() }}'
-    ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack
+# ── Spark runtime ops (not provision — read-only / recovery) ────────────────
 
-# Same as spark-vllm-provision but forces container recreate (image/env rollout).
-spark-vllm-provision-recreate:
+spark-vllm-torchrun-ps:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
-    # Recreate tears down Ray+vLLM containers; role also drops Linux page caches on each Spark by default
-    # (vllm_stacked_container_drop_caches_before_recreate=true). GPU KV blocks never persist across crashes —
-    # see roles/vllm_stacked_container/README.md. Optional Ray tmp purge:
-    #   -e vllm_stacked_container_clear_ray_tmp_before_recreate=true
-    ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack \
-        -e vllm_stacked_container_recreate=true
+    ansible sparks -m shell -a 'docker ps -a --filter name=vllm-ngc-torchrun'
+
+spark-vllm-torchrun-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    echo "=== curl :8000/v1/models on leader (torchrun rank 0) ==="
+    ansible nvidia1 -m shell -a \
+      'curl -fsS --max-time 15 http://127.0.0.1:8000/v1/models | head -c 2000'
 
 # Leader `/v1/models` via Ansible SSH (Mac does not need to be on the Sparks' LAN).
 spark-vllm-status:
@@ -724,11 +743,11 @@ spark-vllm-worker-restart:
 
 # Start the whole NGC stack: head first (nvidia1), then worker (nvidia2). Use
 # after `just spark-vllm-stop` or a reboot. For a fresh provision (image pull,
-# env diff, etc.) prefer `just spark-vllm-provision`.
+# env diff, etc.) use `just spark-provision` or `just spark-provision-recreate`.
 spark-vllm-start: spark-vllm-head-start spark-vllm-worker-start
 
 # Restart head + worker. Does NOT restart the detached `vllm serve` process —
-# follow with `just spark-vllm-provision` (or a manual `docker exec ...`)
+# follow with `just spark-provision` (or a manual `docker exec ...`)
 # to bring the API server back. Ray cluster state is rebuilt by the daemons.
 spark-vllm-restart: spark-vllm-head-restart spark-vllm-worker-restart
 
@@ -765,7 +784,7 @@ spark-apt-upgrade:
 # meaningful "rolling" pattern). After hosts come back:
 #   - Docker `--restart unless-stopped` brings the head + worker containers back
 #   - `vllm serve` is a `docker exec -d` payload and does NOT survive — run
-#     `just spark-vllm-api-restart` (or full `spark-vllm-provision`) to relaunch.
+#     `just spark-vllm-api-restart` (or `just spark-provision-recreate`) to relaunch.
 #
 # Use this when an apt upgrade has flagged "*** System restart required ***"
 # (see `just spark-reboot-required`), or before a maintenance window.
@@ -789,7 +808,7 @@ spark-reboot:
 # Stopped on 2026-04-29 after a failed promotion to nvcr.io/nvidia/vllm:26.04-py3
 # (image PATH change + role's `bash -c` not finding `ray`). Role now uses
 # `bash -lc` so 26.04+ is forward-compatible — but only takes effect after
-# the next `spark-vllm-provision-recreate`. Until then, leave the daemon stopped.
+# the next `just spark-provision-recreate`. Until then, leave the daemon stopped.
 
 # Show daemon status + state.json (current_image, candidate_tag, errors).
 spark-autoupgrade-status:
@@ -878,6 +897,25 @@ spark-kernel-pin host ver:
     ansible-playbook playbooks/provision_sparks.yml --tags kernel \
       -l '{{ host }}' -e 'spark_kernel_pin={{ ver }}'
 
+# Lock host GPU graphics clocks (roles/spark_gpu_clock). Default 2000 MHz from inventory.
+spark-gpu-clock-apply host="sparks":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml --tags spark_gpu_clock -l '{{ host }}'
+
+# Show current GPU clocks + lock unit state on Sparks.
+spark-gpu-clock-status host="sparks":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible '{{ host }}' -m shell -a '
+      echo "=== nvidia-smi clocks ==="
+      nvidia-smi -q -d CLOCK | sed -n "/GPU 0000/,/^$/p" | head -20
+      echo "=== lock unit ==="
+      systemctl is-enabled cylon-gpu-clock-lock.service 2>&1 || true
+    ' -become
+
 # Toggle GRUB menu visibility (5s timeout when on). Useful while bisecting
 # kernels — lets you override at the console without flashing inventory.
 # Examples:
@@ -897,18 +935,18 @@ spark-kernel-show-menu state="on":
 
 # --- Observability (roles/spark_observability) ---
 #
-# Push-based: node_exporter + dcgm-exporter + vLLM /metrics → otel-agent → ms02:4317;
+# Push-based: node_exporter (incl. textfile: rasdaemon + ic_probe) + dcgm-exporter + vLLM /metrics → otel-agent → ms02:4317;
 # journald → promtail → ms02:3100. See:
 #   - roles/spark_observability/README.md
 #   - llmwiki/concepts/sparks-observability-pipeline.md
 
-# Show systemd unit + listener state for all 5 components on both Sparks.
+# Show systemd units + listeners (node_exporter, dcgm, otel, promtail + two textfile timers) on Sparks.
 spark-observability-status:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
     ansible sparks -i inventory/hosts.yml -b -m shell -a '
-        for u in node_exporter dcgm-exporter otel-agent promtail rasdaemon-textfile.timer; do
+        for u in node_exporter dcgm-exporter otel-agent promtail rasdaemon-textfile.timer ic-probe-textfile.timer; do
           state=$(systemctl is-active "$u" 2>&1)
           enabled=$(systemctl is-enabled "$u" 2>&1)
           printf "  %-30s active=%-12s enabled=%s\n" "$u" "$state" "$enabled"
@@ -917,12 +955,12 @@ spark-observability-status:
         ss -tlnp 2>/dev/null | awk "/127.0.0.1:(9100|9400|9080)/ || /:8000 / { printf \"  %s\n\", \$4 }" | sort -u
     '
 
-# Apply roles/spark_observability on both Sparks (or `host=nvidia1` for one).
+# Apply observability stack (included in full spark-provision; use for hotfix reruns).
 spark-observability-apply host="sparks":
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
-    ansible-playbook playbooks/provision_sparks.yml --tags spark_obs -l '{{ host }}'
+    ansible-playbook playbooks/provision_sparks.yml --tags spark_obs,spark_assert -l '{{ host }}'
 
 # Dry-run the observability role.
 spark-observability-check host="sparks":
@@ -991,6 +1029,14 @@ spark-observability-probe:
         done
     '
     echo
+    echo ">>> 1b. interconnect textfile gauges (spark_ic_*) exported by node_exporter"
+    ansible sparks -i inventory/hosts.yml -m shell -a '
+        out="$(curl -sf -m 3 http://127.0.0.1:9100/metrics || true)"
+        n=$(printf "%s\n" "$out" | awk "/^spark_ic_/ {c++} END {print c+0}")
+        printf "  spark_ic_* lines=%s sample:\n" "$n"
+        printf "%s\n" "$out" | grep -E "^spark_ic_ping_ok|^spark_ic_rdma_link_up" | head -n 6 || true
+    '
+    echo
     echo ">>> 2. ms02 Prometheus has cluster=cylon-sparks scrape targets"
     code=$(curl -sG -o /tmp/prom-probe.json -w "%{http_code}" -m 5 \
       'http://192.168.1.189:9090/api/v1/query' \
@@ -998,7 +1044,7 @@ spark-observability-probe:
     echo "  http=$code"
     if [ "$code" = "200" ]; then jq -r '.data.result[] | "  \(.metric.host)\t\(.metric.job)\tup=\(.value[1])"' /tmp/prom-probe.json 2>/dev/null || cat /tmp/prom-probe.json; fi
     echo
-    echo ">>> 3. ms02 Loki has labels for cluster=cylon-sparks (recent 1h)"
+    echo ">>> 4. ms02 Loki has labels for cluster=cylon-sparks (recent 1h)"
     code=$(curl -sG -o /tmp/loki-probe.json -w "%{http_code}" -m 5 \
       'http://192.168.1.189:3100/loki/api/v1/query' \
       --data-urlencode 'query={cluster="cylon-sparks"}' \
@@ -1025,7 +1071,7 @@ spark-vllm-logs:
 
 # Kill the in-container `vllm serve` (model load is slow; engine-core teardown
 # may take ~10s). Useful when the API server is wedged after engine init but
-# Ray itself is healthy. Follow with `just spark-vllm-provision` to relaunch
+# Ray itself is healthy. Follow with `just spark-provision` to relaunch
 # the API; cached weights / torch.compile mean the second start is much faster.
 spark-vllm-api-kill:
     #!/usr/bin/env bash
@@ -1050,4 +1096,21 @@ spark-vllm-logs-serve:
     set -euo pipefail
     cd '{{ justfile_directory() }}'
     ansible nvidia1 -m shell -a \
-      'docker exec vllm-ngc-ray-head bash -lc "tail -n 80 /root/vllm-serve.log"'
+      'docker exec vllm-ngc-ray-head bash -lc "
+        if pgrep -af \"[v]llm serve\" >/dev/null 2>&1; then
+          echo \"=== vllm serve process ===\"
+          pgrep -af \"[v]llm serve\"
+          echo
+        else
+          echo \"vllm serve is not running in vllm-ngc-ray-head\"
+          echo \"Relaunch with: just spark-vllm-api-restart\"
+          echo
+        fi
+        if [[ -f /root/vllm-serve.log ]]; then
+          echo \"=== tail /root/vllm-serve.log ===\"
+          tail -n 80 /root/vllm-serve.log
+        else
+          echo \"No /root/vllm-serve.log yet (created when serve starts via provision)\"
+          exit 0
+        fi
+      "'

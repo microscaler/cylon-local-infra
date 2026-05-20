@@ -6,15 +6,7 @@
 # What *does* linger on the host is Linux page cache (weight mmap / I/O) and
 # sometimes stale Ray session dirs under /tmp/ray — those can skew “free RAM”
 # probes right before a cold `vllm serve` (see llmwiki runs on Ray head recovery).
-
-- name: Sync disks and drop host page caches after stacked-container teardown (recreate)
-  # Ansible shell defaults to /bin/sh (dash on Ubuntu); bash-only `set -o pipefail` breaks there.
-  ansible.builtin.shell:
-    cmd: sync && echo 3 > /proc/sys/vm/drop_caches
-  when:
-    - vllm_stacked_container_recreate | bool
-    - vllm_stacked_container_drop_caches_before_recreate | bool
-  changed_when: true
+# Page-cache drop is handled in drop_page_caches.yml (every provision).
 
 - name: Remove stale Ray temp dir before recreate (optional)
   ansible.builtin.file:

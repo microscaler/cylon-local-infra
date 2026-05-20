@@ -1,0 +1,22 @@
+---
+# Resolve interconnect IP before asserts that grep Ray status (fact may be unset on tag-only runs).
+
+- name: Discover interconnect IPv4 for assert gate
+  ansible.builtin.shell: |
+    ip -4 -o addr show dev {{ nccl_interface }} 2>/dev/null | awk '{print $4}' | cut -d/ -f1
+  args:
+    executable: /bin/bash
+  register: spark_assert_ic_ip_out
+  changed_when: false
+  check_mode: false
+  when:
+    - spark_assert_enabled | bool
+    - spark_interconnect_ip is not defined or (spark_interconnect_ip | default('') | length == 0)
+
+- name: Record interconnect IP for assert gate
+  ansible.builtin.set_fact:
+    spark_interconnect_ip: "{{ spark_assert_ic_ip_out.stdout | trim }}"
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_ic_ip_out is defined
+    - spark_assert_ic_ip_out.stdout | default('') | trim | length > 0

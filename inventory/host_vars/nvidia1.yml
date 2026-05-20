@@ -14,11 +14,6 @@ spark_hosts_peer_aliases:
   - nvidia2
 
 # --- Kernel pin (roles/spark_kernel) ---
-# 2026-05-01: cluster-wide step-back to 6.17.0-1008-nvidia is configured at
-# the group level (inventory/group_vars/sparks.yml). No per-host override
-# needed — both Sparks pin to the same kernel for a clean before/after vs
-# the crash history we have on 6.17.0-1014-nvidia.
-#
-# To override here (e.g. step nvidia1 further to 6.11 while nvidia2 stays
-# on 1008 for an asymmetric A/B):
-#   spark_kernel_pin: "6.11.0-1014-nvidia"
+# Cluster-wide pin: 6.17.0-1018-nvidia (4K) in group_vars/sparks.yml.
+# Override here only for asymmetric A/B, e.g.:
+#   spark_kernel_pin: "6.17.0-1008-nvidia"

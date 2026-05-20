@@ -1,0 +1,16 @@
+---
+- name: Stop Ray head container when switching to torchrun
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_stacked_container_ray_head_name | default('vllm-ngc-ray-head') }}"
+  failed_when: false
+  when:
+    - vllm_torchrun_stacked_stop_ray_containers | bool
+    - inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Stop Ray worker container when switching to torchrun
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_stacked_container_ray_worker_name | default('vllm-ngc-ray-worker-' ~ inventory_hostname) }}"
+  failed_when: false
+  when:
+    - vllm_torchrun_stacked_stop_ray_containers | bool
+    - inventory_hostname != (groups['sparks'] | sort | first)

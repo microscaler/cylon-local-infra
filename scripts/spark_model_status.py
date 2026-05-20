@@ -54,18 +54,46 @@ DEFAULT_RAY_DASHBOARD_PORT = "8265"
 DEFAULT_RAY_GCS_PORT = "6379"
 
 
-def repo_root_from_script(script_file: str | Path | None = None) -> Path:
-    """Directory containing playbooks/refresh_hf_prefetch.yml (parent of scripts/)."""
-    base = Path(script_file or __file__).resolve()
-    for p in [base.parent, *base.parents]:
-        if (p / "playbooks" / "refresh_hf_prefetch.yml").is_file():
-            return p
-    return base.parent.parent
+CANONICAL_SPARK_PLAYBOOK = "provision_sparks.yml"
 
 
 def ansible_inventory_args(inventory: str | None) -> list[str]:
     inv = inventory or os.environ.get("SPARK_ANSIBLE_INVENTORY") or os.environ.get("ANSIBLE_INVENTORY")
     return ["-i", inv] if inv else []
+
+
+def repo_root_from_script(script_file: str | Path | None = None) -> Path:
+    """Directory containing playbooks/provision_sparks.yml (parent of scripts/)."""
+    base = Path(script_file or __file__).resolve()
+    for p in [base.parent, *base.parents]:
+        if (p / "playbooks" / CANONICAL_SPARK_PLAYBOOK).is_file():
+            return p
+    return base.parent.parent
+
+
+def _provision_sparks_cmd(
+    repo: Path,
+    *,
+    inventory: str | None,
+    extra_vars: list[str] | None = None,
+    tags: str | None = None,
+    check: bool = False,
+) -> list[str]:
+    """Build ansible-playbook for the single canonical Spark provision playbook."""
+    cmd: list[str] = [
+        "ansible-playbook",
+        str(repo / "playbooks" / CANONICAL_SPARK_PLAYBOOK),
+        "-l",
+        "sparks",
+        *ansible_inventory_args(inventory),
+    ]
+    if tags:
+        cmd.extend(["--tags", tags])
+    for raw in extra_vars or []:
+        cmd.extend(["-e", raw])
+    if check:
+        cmd.append("--check")
+    return cmd
 
 
 def cmd_ansible_prefetch(
@@ -74,14 +102,13 @@ def cmd_ansible_prefetch(
     inventory: str | None,
     check: bool,
 ) -> list[str]:
-    cmd: list[str] = [
-        "ansible-playbook",
-        str(repo / "playbooks" / "refresh_hf_prefetch.yml"),
-        *ansible_inventory_args(inventory),
-    ]
-    if check:
-        cmd.append("--check")
-    return cmd
+    """Deploy HF prefetch daemon config; assert gate included."""
+    return _provision_sparks_cmd(
+        repo,
+        inventory=inventory,
+        tags="hf_prefetch,spark_assert",
+        check=check,
+    )
 
 
 def cmd_ansible_vllm(
@@ -91,20 +118,13 @@ def cmd_ansible_vllm(
     extra_vars: list[str],
     check: bool,
 ) -> list[str]:
-    cmd: list[str] = [
-        "ansible-playbook",
-        str(repo / "playbooks" / "provision_sparks.yml"),
-        "-l",
-        "sparks",
-        "--tags",
-        "vllm_ngc_stack",
-        *ansible_inventory_args(inventory),
-    ]
-    for raw in extra_vars:
-        cmd.extend(["-e", raw])
-    if check:
-        cmd.append("--check")
-    return cmd
+    """Full end-to-end Spark reconcile + state assert (never partial vLLM-only tags)."""
+    return _provision_sparks_cmd(
+        repo,
+        inventory=inventory,
+        extra_vars=extra_vars,
+        check=check,
+    )
 
 
 def cmd_ansible_sync_hermes_ms02(
@@ -505,10 +525,10 @@ def print_cli_help() -> None:
 Commands (default: status):
   status              Probe vLLM /v1/models and optional hf-prefetch state (default).
   observe             SSH to leader: docker ps, ss ports, ray status, vllm-serve.log tail, /metrics.
-  ansible-prefetch    ansible-playbook playbooks/refresh_hf_prefetch.yml — deploy daemon config from inventory.
+  ansible-prefetch    ansible-playbook playbooks/provision_sparks.yml --tags hf_prefetch,spark_assert
   prefetch-once       SSH to leader: run hf_prefetch_service.py --once (download + peer rsync pass).
-  ansible-vllm        ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack
-  cutover             ansible-prefetch, then prefetch-once, then ansible-vllm (full local workflow).
+  ansible-vllm        Full playbooks/provision_sparks.yml reconcile + spark_assert (--recreate for cutover)
+  cutover             ansible-prefetch, then prefetch-once, then full ansible-vllm (model switch workflow).
   sync-hermes         ansible-playbook playbooks/sync_hermes_ms02.yml — patch Hermes .env on ms02.
 
 Environment:
@@ -639,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
         ap = argparse.ArgumentParser(parents=[p_common])
         ns = ap.parse_args(rest)
         repo = ns.repo or repo_root_from_script()
-        if not (repo / "playbooks" / "refresh_hf_prefetch.yml").is_file():
+        if not (repo / "playbooks" / CANONICAL_SPARK_PLAYBOOK).is_file():
             print(f"error: not a cylon-local-infra repo root: {repo}", file=sys.stderr)
             return 2
         c = cmd_ansible_prefetch(repo, inventory=ns.inventory, check=ns.check)
@@ -705,6 +725,7 @@ def main(argv: list[str] | None = None) -> int:
             ev.append(f"vllm_default_model={ns.model}")
         if ns.recreate:
             ev.append("vllm_stacked_container_recreate=true")
+            ev.append("vllm_torchrun_stacked_recreate=true")
         c = cmd_ansible_vllm(repo, inventory=ns.inventory, extra_vars=ev, check=ns.check)
         print("+", shlex.join(c), flush=True)
         return run_process(c, cwd=repo)
@@ -747,7 +768,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         ns = ap.parse_args(rest)
         repo = ns.repo or repo_root_from_script()
-        if not (repo / "playbooks" / "refresh_hf_prefetch.yml").is_file():
+        if not (repo / "playbooks" / CANONICAL_SPARK_PLAYBOOK).is_file():
             print(f"error: not a cylon-local-infra repo root: {repo}", file=sys.stderr)
             return 2
 
@@ -777,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
             ev.append(f"vllm_default_model={ns.model}")
         if ns.recreate:
             ev.append("vllm_stacked_container_recreate=true")
+            ev.append("vllm_torchrun_stacked_recreate=true")
         c3 = cmd_ansible_vllm(repo, inventory=ns.inventory, extra_vars=ev, check=ns.check)
         print("+", shlex.join(c3), flush=True)
         rc = run_process(c3, cwd=repo)

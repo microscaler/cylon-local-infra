@@ -1,0 +1,65 @@
+---
+# Lock host GPU graphics clocks (applies to NGC containers using --gpus all).
+
+- name: GPU clock — skip when locking disabled
+  ansible.builtin.debug:
+    msg: spark_gpu_lock_clocks_enabled=false — releasing any locked clocks and removing boot unit.
+  when: not (spark_gpu_lock_clocks_enabled | bool)
+
+- name: GPU clock — remove boot-time lock unit when disabled
+  ansible.builtin.file:
+    path: "{{ spark_gpu_clock_systemd_unit_path }}"
+    state: absent
+  register: spark_gpu_clock_unit_removed
+  notify: spark_gpu_clock systemd daemon-reload
+  when: not (spark_gpu_lock_clocks_enabled | bool)
+
+- name: GPU clock — disable boot-time lock unit when disabled
+  ansible.builtin.systemd:
+    name: "{{ spark_gpu_clock_systemd_unit_name }}"
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  failed_when: false
+  when: not (spark_gpu_lock_clocks_enabled | bool)
+
+- name: GPU clock — release locked clocks when disabled
+  ansible.builtin.command:
+    argv: [nvidia-smi, -rgc]
+  register: spark_gpu_clock_release
+  changed_when: "'All done' in (spark_gpu_clock_release.stdout | default(''))"
+  failed_when: false
+  when: not (spark_gpu_lock_clocks_enabled | bool)
+
+- name: GPU clock — install boot-time lock unit
+  ansible.builtin.template:
+    src: cylon-gpu-clock-lock.service.j2
+    dest: "{{ spark_gpu_clock_systemd_unit_path }}"
+    mode: "0644"
+  register: spark_gpu_clock_unit
+  notify: spark_gpu_clock systemd daemon-reload
+  when: spark_gpu_lock_clocks_enabled | bool
+
+- name: GPU clock — enable and run boot-time lock unit
+  ansible.builtin.systemd:
+    name: "{{ spark_gpu_clock_systemd_unit_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: spark_gpu_lock_clocks_enabled | bool
+
+- name: GPU clock — apply persistence mode + lock immediately
+  ansible.builtin.shell: |
+    set -euo pipefail
+    nvidia-smi -pm 1
+    nvidia-smi -lgc {{ spark_gpu_locked_graphics_clock_mhz }},{{ spark_gpu_locked_graphics_clock_mhz }}
+  args:
+    executable: /bin/bash
+  register: spark_gpu_clock_apply
+  changed_when: "'All done' in (spark_gpu_clock_apply.stdout | default(''))"
+  when: spark_gpu_lock_clocks_enabled | bool
+
+- name: GPU clock — verify driver responds after lock
+  ansible.builtin.command: nvidia-smi
+  changed_when: false
+  when: spark_gpu_lock_clocks_enabled | bool

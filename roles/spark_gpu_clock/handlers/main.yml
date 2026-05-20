@@ -1,0 +1,4 @@
+---
+- name: spark_gpu_clock systemd daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true

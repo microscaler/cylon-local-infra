@@ -1,12 +1,17 @@
 # Active Context
 
-**Last updated:** 2026-04-09 — single Spark entry playbook **`playbooks/provision_sparks.yml`** (role **`spark_provision`**); legacy per-task playbooks removed.
+**Last updated:** 2026-05-20 — torchrun stack role + Wi-Fi off on Sparks; Ray remains production default.
 
 **Recent implementation focus:**
+
+- **vLLM torchrun path:** `roles/vllm_torchrun_stacked/` — `torchrun` + `external_launcher`, flip via `vllm_stack_kind: torchrun`.
+- **Wi-Fi off:** `roles/spark_wifi/` — persistent `wifi.enabled=false` on Sparks (Ethernet-only).
 
 - **PRD `docs/PRD-spark-stacking-nvidia2.md`:** Ansible-driven two-node **Ray + distributed vLLM** via **`provision_sparks.yml`** (`spark_provision_vllm_stack`), templates under `roles/vllm/templates/` (`ray-head`, `ray-worker`, `run-vllm-api-stacked`, `vllm-stacked.service`), task files `stack_ray_head.yml`, `stack_ray_worker.yml`, `stack_vllm.yml`.
 - **Inventory:** `inventory/group_vars/sparks.yml` pins **`vllm_ray_package`** (e.g. `ray==2.54.0`); adjust cluster-wide and re-run **`provision_sparks.yml`** if the pin changes.
 - **Ansible stall fix:** `stack_vllm.yml` uses **`no_block: true`** on the `systemd` task for `vllm-stacked` so the play does not block on long `systemctl start` / `TimeoutStartSec` windows; see `docs/vllm-multi-node.md` troubleshooting section.
+
+- **vLLM provision hygiene:** `roles/vllm_stacked_container/tasks/drop_page_caches.yml` runs `sync && drop_caches` on **all Sparks** before `vllm serve` when `vllm_stacked_container_start_api` (default `vllm_stacked_container_drop_caches_on_provision: true`). Recreate-only Ray tmp purge remains in `recreate_host_cleanup.yml`.
 
 **Conventions:**
 

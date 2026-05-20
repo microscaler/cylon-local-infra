@@ -26,6 +26,13 @@
     - spark_observability_rasdaemon_textfile_enabled | bool
   tags: [spark_obs, spark_obs_rasdaemon]
 
+- name: Observability — interconnect probe textfile shipper
+  ansible.builtin.import_tasks: ic_probe_textfile.yml
+  when:
+    - spark_observability_enabled | bool
+    - spark_observability_ic_probe_enabled | bool
+  tags: [spark_obs, spark_obs_ic_probe]
+
 - name: Observability — dcgm-exporter (Docker container)
   ansible.builtin.import_tasks: dcgm_exporter.yml
   when:

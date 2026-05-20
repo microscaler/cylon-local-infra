@@ -20,6 +20,10 @@ per-Spark (host network, loopback bind):
   rasdaemon → /var/lib/node_exporter/textfile/rasdaemon.prom
               (read by node_exporter --collector.textfile, ships via above)
 
+  ic-probe timer → /var/lib/node_exporter/textfile/ic_probe.prom
+              (ICMP to QSFP + fabric2 peer, RoCE LINK_UP, netdev counters;
+               read by the same node_exporter textfile collector → Grafana)
+
   journald (kernel + systemd + dockerd + every container) ── promtail (systemd)
                                                               │
                                                               │ HTTP push
@@ -41,6 +45,9 @@ by default.
 | `spark_observability_otel_agent_enabled` | `true` | Install otelcol-contrib agent (the OTLP push). |
 | `spark_observability_promtail_enabled` | `true` | Install promtail (the Loki push). |
 | `spark_observability_rasdaemon_textfile_enabled` | `true` | Install the rasdaemon → node_exporter textfile shipper (60s timer). |
+| `spark_observability_ic_probe_enabled` | `true` | Install `ic-probe-textfile.timer` → `ic_probe.prom` (interconnect Grafana panels). |
+| `spark_observability_ic_probe_interval_sec` | `60` | How often ICMP / RDMA checks run (`OnUnitActiveSec` on Sparks only). |
+| `spark_observability_ic_probe_fabric2_peer` | `nvidia1→10.200.0.2`, `nvidia2→10.200.0.1` via `*_peer_map` | Override in inventory when >2-node or fabric-2 addressing changes (empty ⇒ skip ICMP on fabric2). |
 | `spark_observability_scrape_interval` | `15s` | Single setting controls all three Prometheus scrapes the agent does. Drop to `5s` for a focused crash-hunt window. |
 | `spark_observability_ms02_host` | `192.168.1.189` | ms02 LAN IP. |
 
@@ -56,6 +63,7 @@ download). Bump when needed.
 | otel-collector-contrib (0.96.0) | `/usr/local/bin/otelcol-contrib` + `otel-agent.service` + config in `/etc/spark-observability/otel-agent.config.yaml` | `otel_agent` system user | (no listener — outbound only) |
 | promtail (2.9.4) | `/usr/local/bin/promtail` + `promtail.service` + config in `/etc/spark-observability/promtail.config.yaml` | `promtail` system user (in `systemd-journal` + `docker` groups) | `127.0.0.1:9080` (HTTP debug; outbound is the real path) |
 | rasdaemon textfile shipper | `/usr/local/sbin/rasdaemon-textfile.sh` + systemd timer (60s) | root (oneshot) | (writes `.prom` file) |
+| ic-probe textfile shipper | `/usr/local/sbin/ic-probe-textfile.sh` + `ic-probe-textfile.timer` | root (oneshot) | ICMP + rdma netdev PHY counters → `ic_probe.prom` |
 
 ## Apply
 
@@ -67,7 +75,7 @@ ansible-playbook playbooks/provision_sparks.yml --tags spark_obs
 ansible-playbook playbooks/provision_sparks.yml --tags spark_obs_promtail
 
 # Operator surface:
-just spark-observability-status     # status of all 5 components on both Sparks
+just spark-observability-status     # systemd + listeners on both Sparks (incl. textfile timers)
 just spark-observability-apply      # apply role to both Sparks
 just spark-observability-probe      # confirm metrics + logs are landing on ms02
 ```
@@ -76,7 +84,8 @@ just spark-observability-probe      # confirm metrics + logs are landing on ms02
 
 ```bash
 # 1. Local exporters answer (on the Spark itself, via SSH):
-curl -s http://127.0.0.1:9100/metrics | head           # node_exporter
+curl -s http://127.0.0.1:9100/metrics | head           # node_exporter (+ textfile gauges)
+curl -s http://127.0.0.1:9100/metrics | grep -E '^spark_ic_' | head -50  # interconnect textfile gauges
 curl -s http://127.0.0.1:9400/metrics | head           # dcgm-exporter
 curl -s http://127.0.0.1:8000/metrics | head           # vLLM (when API is up)
 
@@ -93,6 +102,22 @@ curl -s 'http://192.168.1.189:9090/api/v1/query?query=up{cluster="cylon-sparks"}
 curl -s 'http://192.168.1.189:3100/loki/api/v1/labels'
 curl -sG 'http://192.168.1.189:3100/loki/api/v1/query' \
   --data-urlencode 'query={cluster="cylon-sparks"}' --data-urlencode 'limit=5' | jq
+```
+
+### Interconnect probes (Grafana)
+
+`ic_probe.prom` emits `spark_ic_*` gauges and counters (`spark_ic_netdev_*total`, `spark_ic_ethtool_stat` are cumulative counters refreshed each probe pass). They ship through the normal node_exporter scrape
+→ OTLP pipeline, so Grafana panels query Prometheus the same way as other
+Spark metrics — confirm exact label casing on ms02 (`job`, `exported_job`,
+prometheus-remote-write quirks) before wiring alerts.
+
+Starter PromQL sketches:
+
+```
+min by(host) (spark_ic_ping_ok{cluster="cylon-sparks"})
+avg by(host) (spark_ic_ping_rtt_ms{cluster="cylon-sparks", path="linklocal"} > -1)
+min by(host, device) (spark_ic_rdma_link_up{cluster="cylon-sparks"})
+irate(spark_ic_netdev_rx_errors_total{cluster="cylon-sparks"}[5m])
 ```
 
 ## Disable / uninstall

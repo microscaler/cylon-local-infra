@@ -1,0 +1,46 @@
+---
+# NGC stacked Sparks — torchrun + external_launcher (no Ray). Sibling to vllm_stacked_container.
+# Target: nvcr.io/nvidia/vllm 26.04+ or any image with `torchrun` + vLLM 0.19+ external_launcher.
+# A/B against Ray via inventory `vllm_stack_kind: torchrun`.
+
+vllm_torchrun_stacked_install_dir: /opt/vllm-ngc-torchrun
+vllm_torchrun_stacked_config_dir: /etc/vllm-ngc-torchrun
+
+# Defaults to the same NGC tag as the Ray stack unless overridden.
+vllm_torchrun_stacked_image: "{{ vllm_stacked_container_image | default('nvcr.io/nvidia/vllm:26.03-py3') }}"
+
+vllm_torchrun_stacked_hf_home: "{{ vllm_hf_home | default(spark_runtime_home ~ '/.cache/huggingface') }}"
+vllm_torchrun_stacked_shm_size: "{{ vllm_stacked_container_shm_size | default('10.24g') }}"
+
+vllm_torchrun_stacked_container_name: "vllm-ngc-torchrun-{{ inventory_hostname }}"
+
+vllm_torchrun_stacked_api_port: "{{ vllm_stacked_container_api_port | default(8000) }}"
+vllm_torchrun_stacked_api_host: "{{ vllm_stacked_container_api_host | default('0.0.0.0') }}"
+
+# torchrun rendezvous (Gloo control plane on interconnect).
+vllm_torchrun_stacked_rdzv_port: 29500
+vllm_torchrun_stacked_rdzv_id: vllm-spark-tp2
+
+vllm_torchrun_stacked_recreate: false
+vllm_torchrun_stacked_drop_caches_on_provision: true
+vllm_torchrun_stacked_triton_cache_invalidate: true
+
+# Stop legacy Ray NGC containers before starting torchrun stack.
+vllm_torchrun_stacked_stop_ray_containers: true
+vllm_torchrun_stacked_stop_bare_metal_systemd: "{{ vllm_stacked_container_stop_bare_metal_systemd | default(true) }}"
+
+vllm_torchrun_stacked_pull_image: true
+
+# Qwen3 MoE bolt-ons — same bind-mount path as Ray stack for shared patches dir.
+vllm_torchrun_stacked_qwen_moe_patches_enabled: "{{ vllm_stacked_container_qwen_moe_patches_enabled | default(true) }}"
+vllm_torchrun_stacked_qwen_moe_patches_host_dir: "{{ vllm_stacked_container_qwen_moe_patches_host_dir | default('/opt/vllm-stack/patches') }}"
+vllm_torchrun_stacked_qwen_moe_patches_container_dir: "{{ vllm_stacked_container_qwen_moe_patches_container_dir | default('/vllm-patches') }}"
+
+vllm_torchrun_stacked_rdma_enabled: "{{ vllm_stacked_container_rdma_enabled | default(true) }}"
+vllm_torchrun_stacked_rdma_device_path: "{{ vllm_stacked_container_rdma_device_path | default('/dev/infiniband') }}"
+
+# Required for deterministic scheduling under external_launcher (26.04 migration note).
+vllm_torchrun_stacked_v1_multiprocessing_disabled: true
+
+# Extra env merged into torchrun.env.j2 after vllm_distributed_extra_env.
+vllm_torchrun_stacked_extra_env: {}

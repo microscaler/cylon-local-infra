@@ -1,22 +1,20 @@
 ---
-# Canonical DGX Spark provisioning (single entry point).
+# Canonical DGX Spark provisioning — single entry point, end-to-end, with assert gate.
 #
-# Phases are toggled with spark_provision_* in inventory/group_vars/sparks.yml
-# (see roles/spark_provision/defaults/main.yml).
+#   just spark-provision              # full reconcile + state assert (preferred)
+#   just spark-provision-recreate     # full reconcile + force vLLM container recreate
 #
-#   ansible-playbook playbooks/provision_sparks.yml
-#   ansible-playbook playbooks/provision_sparks.yml --tags apt
-#   ansible-playbook playbooks/provision_sparks.yml --skip-tags vllm_test
-#   ansible-playbook playbooks/provision_sparks.yml --tags vllm_ngc_stack  # NGC Docker Ray + vLLM only (see sparks.yml toggles)
-#   ansible-playbook playbooks/provision_sparks.yml --tags hosts          # /etc/hosts QSFP aliases only
+# Advanced (escape hatch only — risks drift if used as daily driver):
+#   ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack,spark_assert
+#   ansible-playbook playbooks/provision_sparks.yml -l sparks -e spark_provision_assert=false
 #
-# Optional — NCCL build, SSH keys, all_gather test (multi-play, not merged):
+# Legacy one-shot playbooks (refresh_hf_prefetch.yml, cutover_roce.yml) are retired —
+# use this playbook with -e overrides instead.
+#
+# Optional — NCCL host build / bench (not part of production stack):
 #   ansible-playbook playbooks/nccl_sparks.yml
-#   ansible-playbook playbooks/nccl_sparks.yml --skip-tags nccl_test
-#
-# Non-Spark hosts (e.g. dev laptop): still use playbooks/dev_hosts.yml, docker_dev_engine.yml.
 
-- name: Spark cluster — provision
+- name: Spark cluster — provision and assert
   hosts: sparks
   gather_facts: true
   become: true

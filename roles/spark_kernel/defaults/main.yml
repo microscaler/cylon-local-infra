@@ -22,12 +22,19 @@
 # service without changing the bootloader default).
 #
 # Must match the trailing portion of `uname -r` for an installed kernel:
-#   - "6.17.0-1014-nvidia"    (current HWE default; effectively a no-op pin)
-#   - "6.17.0-1008-nvidia"    (one HWE step back — 2026-05-01 control kernel)
+#   - "6.17.0-1018-nvidia"    (fleet pin — 4K pages; NOT *-nvidia-64k)
+#   - "6.17.0-1008-nvidia"    (prior bisection control kernel)
 #   - "6.11.0-1014-nvidia"    (older line; bigger jump back, more module risk)
 #
 # Verify what's installed: `dpkg -l 'linux-image-*' | grep '^ii'`
 spark_kernel_pin: ""
+
+# When true and spark_kernel_pin is set, apt-install the pinned kernel
+# image + modules if missing (nvidia1 may lag OTA until this runs).
+spark_kernel_install_if_missing: true
+# Drop linux-modules-nvidia-580-open-* for non-pinned kernels before install
+# (stale 1008/1014 modules block apt when rolling forward to 1018).
+spark_kernel_purge_stale_nvidia_modules: true
 
 # --- Apt holds ------------------------------------------------------------
 # When true, apt-mark hold the pinned kernel + the HWE meta packages so

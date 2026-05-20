@@ -1,0 +1,11 @@
+[Unit]
+Description=Run ic-probe-textfile every {{ spark_observability_ic_probe_interval_sec }}s
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec={{ spark_observability_ic_probe_interval_sec }}s
+Unit=ic-probe-textfile.service
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

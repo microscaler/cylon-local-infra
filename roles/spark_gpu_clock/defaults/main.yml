@@ -1,0 +1,9 @@
+---
+# Lock GB10 graphics clocks on Sparks until passive cooling is in place.
+# Uses `nvidia-smi -lgc MIN,MAX` (requires persistence mode + driver loaded).
+
+spark_gpu_lock_clocks_enabled: true
+spark_gpu_locked_graphics_clock_mhz: 2000
+
+spark_gpu_clock_systemd_unit_name: cylon-gpu-clock-lock.service
+spark_gpu_clock_systemd_unit_path: "/etc/systemd/system/{{ spark_gpu_clock_systemd_unit_name }}"

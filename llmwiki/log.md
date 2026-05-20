@@ -1036,22 +1036,53 @@ ritual (`spark-vllm-api-kill` + `drop_caches` +
 `spark-vllm-provision-recreate`). Full timeline + diagnostic path:
 [runs/2026-04-27-ray-head-exited-postmortem.md](./runs/2026-04-27-ray-head-exited-postmortem.md).
 
-## [2026-05-19] run | nccl-gid-ray-carryover | shipped (infra + wiki sync)
+## [2026-05-19] infra | interconnect probe → Grafana (textfile)
+Added `roles/spark_observability` **ic-probe-textfile** timer + templated shipper →
+`/var/lib/node_exporter/textfile/ic_probe.prom` (metrics `spark_ic_*`: ICMP RTT/up to
+QSFP peer + `/30` fabric‑2 peers, RoCE LINK_UP checks for `nccl_ib_hca`,
+netdev error/dropped counters + selected `ethtool -S` PHY fields). Mirrors the existing
+rasdaemon textfile collector path (`node_exporter` → otel → ms02 Grafana). Wired
+`spark_obs_ic_probe` into `spark_provision` observability phase `apply.tags`, updated
+Just `spark-observability-status`, README + wiki `concepts/sparks-observability-pipeline.md`.
+Apply via `just spark-observability-apply` (full `spark_obs`), or playbook tag
+`spark_obs_ic_probe` once node_exporter dirs exist.
 
-Cross-node TP=2 failed at `ncclCommInitRank` (“unhandled system error”) even after
-per-host `show_gids` / `spark_nccl_ib_gid_index` landed in Ansible: vLLM's Ray executor
-still **copied `NCCL_IB_GID_INDEX` from the driver into followers**, overwriting
-follower-local env-file values. Fix: bind-mount `/etc/vllm-ngc-stacked/ray_non_carry_over_env_vars.json`
-→ `/root/.config/vllm/ray_non_carry_over_env_vars.json` on **both** NGC containers
-(listing `NCCL_IB_GID_INDEX`) + **recreate** to pick up the volume. Canonical page:
-[runs/2026-05-19-nccl-gid-ray-carryover.md](./runs/2026-05-19-nccl-gid-ray-carryover.md).
-Concept refresh (fixes historical drift vs dual PCIe path Cage A):
-[concepts/nccl-on-spark.md](./concepts/nccl-on-spark.md),
-[concepts/ngc-stacked-container-stack.md](./concepts/ngc-stacked-container-stack.md).
+## [2026-05-19] nccl | nvidia2 `spark_nccl_ib_gid_index` 4→3 (GID table drift)
+Live **`show_gids`** on **`gx10-47b5`** (`nvidia2`): IPv4 RoCE **v2** on **`rocep1s0f0`**
+is index **`3`** (same layout as **`nvidia1`**). Inventory **`"4"`** made **`NCCL_IB_GID_INDEX=4`**
+in the worker container → verbs **`ibv_modify_qp` EINVAL**, **`remote GID ::`** during TP=2.
+Corrected **`inventory/host_vars/nvidia2.yml`** to **`spark_nccl_ib_gid_index: "3"`**;
+updated **`llmwiki/concepts/nccl-on-spark.md`**, **`runs/2026-05-19-nccl-gid-ray-carryover.md`**, **`index.md`**,
+**`roles/vllm_stacked_container/README.md`**. Operator: re-run Ansible vLLM stack + **`spark-vllm-provision-recreate`**
+(or equivalent) so **`worker*.env`** refreshes / containers restart clean.
 
-## [2026-05-19] meta | bootstrap path | note for agents
+## [2026-05-20] vllm | `--max-model-len` 262144 → 225000 (GX10 stability margin)
+Lowered **`vllm_api_server_extra_args`** in **`inventory/group_vars/sparks.yml`** from native
+**262144** to **225000** (~14% context headroom) per fleet stability tuning vs abrupt-power-off
+reports at full native context. Apply: **`just spark-vllm-provision-recreate`** (or kill + relaunch
+**`vllm serve`** if argv is already reconciled).
 
-The repo's agent bootstrap markdown is **`llmwiki/AGENTS.md`** (see “Bootstrapping order”).
-There is **no top-level `./AGENTS.md`** in-tree today — start from **`llmwiki/AGENTS.md`**
-when an operator mentions “AGENTS.md” without a path.
+## [2026-05-20] infra | canonical spark-provision + spark_assert end-state gate
+One operator entry: **`just spark-provision`** → **`playbooks/provision_sparks.yml`** full
+end-to-end + **`roles/spark_assert`** (fail if Wi-Fi on, Docker down, vLLM/Ray/torchrun
+containers wrong, `/v1/models` bad, NCCL GID drift, HF prefetch not ready, obs timers down).
+**`just spark-provision-recreate`** for container recreate. Retired **`cutover_roce.yml`** +
+**`refresh_hf_prefetch.yml`** (fail with pointer). Partial **`spark-vllm-*` / `spark-wifi-disable`**
+recipes are deprecated aliases → **`spark-provision`** with tags.
 
+## [2026-05-20] infra | torchrun stack role + Wi-Fi off + Triton cache hygiene
+Added **`roles/vllm_torchrun_stacked/`** (torchrun + **`external_launcher`**, no Ray) as
+sibling to Ray stack; flip via **`vllm_stack_kind: torchrun`** + **`just spark-vllm-torchrun-provision[-recreate]`**.
+Production default stays **`vllm_stack_kind: ray`** on 26.03-py3. **`roles/spark_wifi/`** persistently
+disables Wi-Fi (**`wifi.enabled=false`**) on Sparks — Ethernet-only avoids multi-NIC duplicate IP
+(vllm#43095). Ray stack now invalidates **`~/.triton/cache`** before serve (**`triton_cache_invalidate.yml`**, vllm#41871).
+Apply Wi-Fi: **`just spark-wifi-disable`** or **`--tags spark_wifi`** on full provision.
+
+## [2026-05-20] vllm | drop page caches on every provision (not recreate-only)
+Moved **`sync && echo 3 > /proc/sys/vm/drop_caches`** from recreate-only
+**`recreate_host_cleanup.yml`** into **`tasks/drop_page_caches.yml`**, imported on **all Sparks**
+before **`vllm serve`** when **`vllm_stacked_container_start_api`** (default on
+**`just spark-vllm-provision`** / **`spark-vllm-provision-recreate`**). New default
+**`vllm_stacked_container_drop_caches_on_provision: true`**; old
+**`drop_caches_before_recreate`** is an alias. Recreate path still optionally purges
+**`/tmp/ray`**. Disable: **`-e vllm_stacked_container_drop_caches_on_provision=false`**.

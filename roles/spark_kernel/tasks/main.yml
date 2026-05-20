@@ -43,15 +43,130 @@
       show_grub_menu_flag: "{{ spark_kernel_show_grub_menu }}"
       currently_held: "{{ spark_kernel_current_holds.stdout_lines }}"
 
+# --- Install pinned kernel packages if missing ----------------------------
+# OTA may install a new image on one Spark before the other; pin apply must
+# not fail on the lagging host. Use the 4K *-nvidia image (never *-nvidia-64k).
+
+- name: Kernel — compute apt packages for pinned kernel install
+  ansible.builtin.set_fact:
+    spark_kernel_install_packages: >-
+      {{ ['linux-image-' ~ spark_kernel_pin,
+          'linux-modules-' ~ spark_kernel_pin,
+          'linux-modules-nvidia-580-open-' ~ spark_kernel_pin,
+          'linux-modules-nvidia-fs-' ~ spark_kernel_pin] }}
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_install_if_missing | bool
+
+- name: Kernel — list missing pinned kernel packages
+  ansible.builtin.shell: |
+    set -o pipefail
+    for p in {{ spark_kernel_install_packages | join(' ') }}; do
+      if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -qE '^(install|hold) ok installed$'; then
+        echo "$p"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: spark_kernel_missing_packages
+  changed_when: false
+  check_mode: false
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_install_if_missing | bool
+
+- name: Kernel — note pinned packages still missing before install
+  ansible.builtin.set_fact:
+    spark_kernel_need_install: "{{ (spark_kernel_missing_packages.stdout_lines | default([]) | length) > 0 }}"
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_install_if_missing | bool
+
+- name: Kernel — temporarily unhold kernel packages before pinned install
+  ansible.builtin.command:
+    argv: >-
+      {{ ['apt-mark', 'unhold']
+         + (spark_kernel_current_holds.stdout_lines
+            | select('match', '^(linux-image|linux-headers|linux-modules)')
+            | list) }}
+  register: spark_kernel_preinstall_unhold
+  changed_when: "'Canceled hold' in (spark_kernel_preinstall_unhold.stdout | default(''))"
+  check_mode: false
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_install_if_missing | bool
+    - spark_kernel_need_install | default(false) | bool
+    - (spark_kernel_current_holds.stdout_lines
+        | select('match', '^(linux-image|linux-headers|linux-modules)')
+        | list | length) > 0
+
+- name: Kernel — remove stale NVIDIA module packages for non-pinned kernels
+  ansible.builtin.shell: |
+    set -euo pipefail
+    stale="$(dpkg-query -W -f='${Package}\n' 'linux-modules-nvidia-580-open-[0-9]*-nvidia' 2>/dev/null \
+      | grep -v '^linux-modules-nvidia-580-open-{{ spark_kernel_pin }}$' || true)"
+    if [ -n "$stale" ]; then
+      apt-mark unhold $stale 2>/dev/null || true
+      DEBIAN_FRONTEND=noninteractive apt-get remove -y $stale
+    fi
+  args:
+    executable: /bin/bash
+  register: spark_kernel_purge_stale
+  changed_when: spark_kernel_purge_stale.stdout | length > 0
+  check_mode: false
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_install_if_missing | bool
+    - spark_kernel_need_install | default(false) | bool
+    - spark_kernel_purge_stale_nvidia_modules | bool
+
+- name: Kernel — apt install pinned kernel image + modules when missing
+  ansible.builtin.apt:
+    name: "{{ spark_kernel_install_packages }}"
+    state: present
+    update_cache: true
+    allow_change_held_packages: true
+  register: spark_kernel_install_result
+  check_mode: false
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_install_if_missing | bool
+    - spark_kernel_need_install | default(false) | bool
+
+- name: Kernel — refresh installed kernel list after apt install
+  ansible.builtin.shell: |
+    set -o pipefail
+    dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*-nvidia' 2>/dev/null \
+      | awk -F'\t' '$1 ~ /ok installed$/ && $2 ~ /^linux-image-[0-9]/ { sub(/^linux-image-/,"",$2); print $2 }'
+  args:
+    executable: /bin/bash
+  register: spark_kernel_installed_after_install
+  changed_when: false
+  check_mode: false
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_install_if_missing | bool
+    - spark_kernel_install_result is defined
+    - spark_kernel_install_result is changed
+
+- name: Kernel — merge installed kernel list after optional install
+  ansible.builtin.set_fact:
+    spark_kernel_installed_lines: >-
+      {{ (spark_kernel_installed_after_install.stdout_lines
+          if (spark_kernel_installed_after_install is defined
+              and (spark_kernel_installed_after_install.stdout_lines | default([]) | length) > 0)
+          else spark_kernel_installed.stdout_lines) }}
+  when: spark_kernel_pin | length > 0
+
 # --- GRUB default kernel (only when spark_kernel_pin is set) --------------
 
 - name: Kernel — validate spark_kernel_pin matches an installed kernel
   ansible.builtin.assert:
     that:
-      - spark_kernel_pin in spark_kernel_installed.stdout_lines
+      - spark_kernel_pin in spark_kernel_installed_lines
     fail_msg: >-
       spark_kernel_pin='{{ spark_kernel_pin }}' is NOT an installed kernel on
-      this host. Installed: {{ spark_kernel_installed.stdout_lines }}. Either
+      this host. Installed: {{ spark_kernel_installed_lines }}. Either
       `apt install linux-image-{{ spark_kernel_pin }}` first, or correct the
       version string in inventory.
   when: spark_kernel_pin | length > 0
@@ -209,6 +324,15 @@
     - "'nvidia-spark-run-apt-upgrade-once.service' in spark_kernel_ota_unit.stdout"
 
 # --- Reboot reminder ------------------------------------------------------
+
+- name: Kernel — verify NVIDIA driver loads on the running pinned kernel
+  ansible.builtin.command: nvidia-smi
+  register: spark_kernel_nvidia_smi
+  changed_when: false
+  failed_when: spark_kernel_nvidia_smi.rc != 0
+  when:
+    - spark_kernel_pin | length > 0
+    - spark_kernel_uname.stdout == spark_kernel_pin
 
 - name: Kernel — warn if running kernel != pinned (reboot required)
   ansible.builtin.debug:
