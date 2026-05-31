@@ -1,0 +1,41 @@
+---
+# Persistent reverse SSH tunnel: ms02 (casibbald) → Hostinger VPS.
+# Exposes ms02 SSH on the VPS at ms02_reverse_tunnel_remote_port so the
+# operator can reach the dev host while away from the home LAN.
+
+ms02_reverse_tunnel_enabled: true
+ms02_reverse_tunnel_user: casibbald
+ms02_reverse_tunnel_group: "{{ ms02_reverse_tunnel_user }}"
+
+# VPS endpoint (matches inventory tunnel_hubs group).
+ms02_reverse_tunnel_vps_host: "{{ hostvars['srv1719193'].ansible_host | default('76.13.1.95') }}"
+ms02_reverse_tunnel_vps_user: root
+ms02_reverse_tunnel_vps_ssh_alias: hostinger-tunnel
+
+# Remote bind on the VPS. Use 0.0.0.0 so `ssh -p <port> user@vps` works from
+# anywhere (requires GatewayPorts clientspecified on the VPS — tunnel_hub role).
+ms02_reverse_tunnel_remote_bind: "0.0.0.0"
+ms02_reverse_tunnel_remote_port: 22002
+ms02_reverse_tunnel_local_host: "127.0.0.1"
+ms02_reverse_tunnel_local_port: 22
+
+ms02_reverse_tunnel_service_name: ms02-reverse-tunnel
+ms02_reverse_tunnel_ssh_config_dir: "/home/{{ ms02_reverse_tunnel_user }}/.ssh/config.d"
+ms02_reverse_tunnel_ssh_config_fragment: hostinger-tunnel
+
+# Existing casibbald@ms02 key used for outbound auth to the VPS.
+ms02_reverse_tunnel_identity_file: "/home/{{ ms02_reverse_tunnel_user }}/.ssh/id_ed25519"
+
+# Packages
+ms02_reverse_tunnel_install_autossh: true
+
+# systemd
+ms02_reverse_tunnel_service_enabled: true
+ms02_reverse_tunnel_service_state: started
+
+# autossh -M 0 disables autossh's extra monitor port (use SSH ServerAlive instead).
+ms02_reverse_tunnel_autossh_gate_time: 0
+ms02_reverse_tunnel_connect_timeout_sec: 30
+ms02_reverse_tunnel_server_alive_interval: 30
+ms02_reverse_tunnel_server_alive_count_max: 3
+ms02_reverse_tunnel_restart_sec: 10

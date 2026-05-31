@@ -1,0 +1,32 @@
+---
+# Deploy ~/.ssh/config.d/ms02-via-hostinger (Host ms02-away).
+# Imported by playbooks/ms02_reverse_tunnel.yml and available via
+# `ansible-playbook playbooks/mac_workstation.yml --tags ms02_via_hostinger`.
+
+- name: Ensure ~/.ssh directory exists
+  ansible.builtin.file:
+    path: "{{ mac_workstation_user_home }}/.ssh"
+    state: directory
+    mode: "0700"
+
+- name: Ensure ~/.ssh/config.d exists
+  ansible.builtin.file:
+    path: "{{ mac_workstation_user_home }}/.ssh/config.d"
+    state: directory
+    mode: "0700"
+
+- name: Ensure top-level ~/.ssh/config includes config.d fragments
+  ansible.builtin.lineinfile:
+    path: "{{ mac_workstation_user_home }}/.ssh/config"
+    regexp: '(?i)^Include\s+~/.ssh/config\.d/\*'
+    line: "Include ~/.ssh/config.d/*"
+    insertbefore: BOF
+    create: true
+    mode: "0600"
+
+- name: Deploy ms02-via-hostinger SSH fragment
+  ansible.builtin.template:
+    src: ms02-via-hostinger.j2
+    dest: "{{ mac_workstation_user_home }}/.ssh/config.d/ms02-via-hostinger"
+    mode: "0600"
+  when: mac_workstation_manage_ms02_via_hostinger_ssh | default(true) | bool

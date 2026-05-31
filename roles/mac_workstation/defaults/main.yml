@@ -68,3 +68,8 @@ mac_workstation_etc_hosts_lines:
 # `ms02-dev-tunnel` fragment if present.
 mac_workstation_ssh_include_config_d: true
 mac_workstation_retired_ssh_tunnel_fragment: "{{ mac_workstation_user_home }}/.ssh/config.d/ms02-dev-tunnel"
+
+# ── ms02 via Hostinger reverse tunnel (away-from-LAN access) ───────────────
+mac_workstation_manage_ms02_via_hostinger_ssh: true
+mac_workstation_ms02_reverse_tunnel_host: "76.13.1.95"
+mac_workstation_ms02_reverse_tunnel_port: 22002

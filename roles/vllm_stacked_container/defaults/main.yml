@@ -43,7 +43,12 @@ vllm_stacked_container_drop_caches_on_provision: true
 # Deprecated alias — use drop_caches_on_provision above.
 vllm_stacked_container_drop_caches_before_recreate: "{{ vllm_stacked_container_drop_caches_on_provision }}"
 # GB10 sm_121 — wipe stale Triton JIT cache before vLLM serve (vllm#41871).
-vllm_stacked_container_triton_cache_invalidate: true
+# Default disabled after the 2026-05-27 cold-start audit: Triton cache reuse
+# saves ~30–90s per `vllm serve` on the 35B FP8 MoE warmup, and we no longer
+# observe stale-cache garble with NGC 25.11+ / vLLM 0.17.1+. Flip to `true`
+# if you suspect kernel mis-compilation after an image, driver, or GPU arch
+# bump (look for nonsense logits or silent NaNs during model warmup).
+vllm_stacked_container_triton_cache_invalidate: false
 # Optional: purge Ray session/socket dir on host (`docker rm` does not delete /tmp/ray).
 vllm_stacked_container_clear_ray_tmp_before_recreate: false
 vllm_stacked_container_ray_tmp_dir: /tmp/ray

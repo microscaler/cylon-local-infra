@@ -1,9 +1,9 @@
 # Follower (gx10-47b5). LAN IPv6-off default lives in inventory/group_vars/sparks.yml.
 
 # RoCE v2 + IPv4 GID index for NCCL (`show_gids` → rocep1s0f0).
-# Live check 2026-05-20: IPv4 RoCE **v2** on `rocep1s0f0` is index **4** (169.254.37.109).
-# nvidia1 uses index 3 — indices differ per GX10 unit; re-verify after FW/mlx5 churn.
-spark_nccl_ib_gid_index: "4"
+# Live check 2026-05-27: IPv4 RoCE **v2** on `rocep1s0f0` is index **3** (169.254.37.109).
+# GID indices move after FW/mlx5 churn — re-verify with `show_gids` on both hosts.
+spark_nccl_ib_gid_index: "3"
 
 # QSFP link-local + stable names for Ray/GCS, NCCL OOB, and operator SSH (roles/spark_hosts).
 spark_hosts_local_ip: "169.254.37.109"

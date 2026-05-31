@@ -1,0 +1,7 @@
+---
+- name: Restart ms02 reverse tunnel
+  ansible.builtin.systemd:
+    name: "{{ ms02_reverse_tunnel_service_name }}"
+    state: restarted
+    daemon_reload: true
+  when: ms02_reverse_tunnel_enabled | bool

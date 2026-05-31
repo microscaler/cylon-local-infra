@@ -1,0 +1,28 @@
+[Unit]
+# Managed by cylon-local-infra :: roles/ms02_reverse_tunnel
+# Outbound reverse SSH tunnel so ms02 remains reachable via the Hostinger VPS
+# while the operator is away from the home LAN.
+Description=Reverse SSH tunnel ms02 → Hostinger ({{ ms02_reverse_tunnel_vps_host }}:{{ ms02_reverse_tunnel_remote_port }})
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User={{ ms02_reverse_tunnel_user }}
+Group={{ ms02_reverse_tunnel_group }}
+Environment=AUTOSSH_GATETIME={{ ms02_reverse_tunnel_autossh_gate_time }}
+ExecStart=/usr/bin/autossh -M 0 -N \
+    -F /home/{{ ms02_reverse_tunnel_user }}/.ssh/config \
+    -o ExitOnForwardFailure=yes \
+    -o ConnectTimeout={{ ms02_reverse_tunnel_connect_timeout_sec }} \
+    -o ServerAliveInterval={{ ms02_reverse_tunnel_server_alive_interval }} \
+    -o ServerAliveCountMax={{ ms02_reverse_tunnel_server_alive_count_max }} \
+    -R {{ ms02_reverse_tunnel_remote_bind }}:{{ ms02_reverse_tunnel_remote_port }}:{{ ms02_reverse_tunnel_local_host }}:{{ ms02_reverse_tunnel_local_port }} \
+    {{ ms02_reverse_tunnel_vps_ssh_alias }}
+# Restart forever on any exit — internet/VPS blips, autossh child death, reboot recovery.
+Restart=always
+RestartSec={{ ms02_reverse_tunnel_restart_sec }}
+
+[Install]
+WantedBy=multi-user.target

@@ -21,6 +21,26 @@ nfs_mac_probe_mount := "/private/tmp/cylon-nfs-ms02-probe"
 default:
     @just --list
 
+# ── ms02 reverse tunnel (Hostinger VPS — reach ms02 while away) ────────────
+# See docs/ms02-reverse-tunnel.md
+
+ms02-reverse-tunnel-up:
+    ansible-playbook playbooks/ms02_reverse_tunnel.yml
+
+ms02-reverse-tunnel-status:
+    #!/usr/bin/env bash
+    set -u
+    VPS="76.13.1.95"
+    PORT="22002"
+    echo "=== ms02 systemd (on LAN) ==="
+    ssh ms02-root 'systemctl is-active ms02-reverse-tunnel 2>/dev/null || echo inactive; systemctl --no-pager -l status ms02-reverse-tunnel 2>/dev/null | head -12' || true
+    echo
+    echo "=== VPS listener ==="
+    ssh root@"${VPS}" "ss -tlnp | grep ${PORT} || echo 'port ${PORT} not listening'" || true
+    echo
+    echo "=== end-to-end SSH probe ==="
+    ssh -o ConnectTimeout=8 -o BatchMode=yes -p "${PORT}" casibbald@"${VPS}" 'hostname; whoami' 2>&1 || echo "probe failed (tunnel down or ms02 unreachable)"
+
 # ── ms02 LAN reachability (HTTP probes; no SSH tunnel) ─────────────────────
 
 # HTTP-probe common ms02 services on the LAN. Green (2xx/3xx) = reachable; '000' = blocked or down.

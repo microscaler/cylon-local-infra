@@ -1,0 +1,8 @@
+# Managed by cylon-local-infra :: roles/ms02_reverse_tunnel
+Host {{ ms02_reverse_tunnel_vps_ssh_alias }} hostinger hostinger-tunnel
+    HostName {{ ms02_reverse_tunnel_vps_host }}
+    User {{ ms02_reverse_tunnel_vps_user }}
+    IdentityFile {{ ms02_reverse_tunnel_identity_file }}
+    ServerAliveInterval {{ ms02_reverse_tunnel_server_alive_interval }}
+    ServerAliveCountMax {{ ms02_reverse_tunnel_server_alive_count_max }}
+    StrictHostKeyChecking accept-new

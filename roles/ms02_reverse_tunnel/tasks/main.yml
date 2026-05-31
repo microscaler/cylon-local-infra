@@ -1,0 +1,118 @@
+---
+# ms02 outbound reverse SSH tunnel to the public VPS (autossh + systemd).
+
+- name: Install autossh
+  ansible.builtin.apt:
+    name: autossh
+    state: present
+    update_cache: true
+  when: ms02_reverse_tunnel_install_autossh | bool
+
+- name: Ensure tunnel user .ssh directory
+  ansible.builtin.file:
+    path: "/home/{{ ms02_reverse_tunnel_user }}/.ssh"
+    state: directory
+    owner: "{{ ms02_reverse_tunnel_user }}"
+    group: "{{ ms02_reverse_tunnel_group }}"
+    mode: "0700"
+
+- name: Ensure tunnel identity key exists
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -t
+      - ed25519
+      - -f
+      - "{{ ms02_reverse_tunnel_identity_file }}"
+      - -N
+      - ""
+      - -C
+      - "{{ ms02_reverse_tunnel_user }}@{{ ansible_hostname }}"
+  args:
+    creates: "{{ ms02_reverse_tunnel_identity_file }}"
+  become: true
+  become_user: "{{ ms02_reverse_tunnel_user }}"
+
+- name: Read tunnel user public key
+  ansible.builtin.slurp:
+    src: "{{ ms02_reverse_tunnel_identity_file }}.pub"
+  register: ms02_reverse_tunnel_pubkey_slurp
+
+- name: Publish tunnel user public key on the VPS
+  ansible.builtin.authorized_key:
+    user: "{{ ms02_reverse_tunnel_vps_user }}"
+    key: "{{ ms02_reverse_tunnel_pubkey_slurp.content | b64decode }}"
+    state: present
+  delegate_to: srv1719193
+  when: ms02_reverse_tunnel_enabled | bool
+
+- name: Ensure SSH config.d directory for tunnel user
+  ansible.builtin.file:
+    path: "{{ ms02_reverse_tunnel_ssh_config_dir }}"
+    state: directory
+    owner: "{{ ms02_reverse_tunnel_user }}"
+    group: "{{ ms02_reverse_tunnel_group }}"
+    mode: "0700"
+
+- name: Deploy VPS SSH config fragment for autossh
+  ansible.builtin.template:
+    src: ssh-config-hostinger.j2
+    dest: "{{ ms02_reverse_tunnel_ssh_config_dir }}/{{ ms02_reverse_tunnel_ssh_config_fragment }}"
+    owner: "{{ ms02_reverse_tunnel_user }}"
+    group: "{{ ms02_reverse_tunnel_group }}"
+    mode: "0600"
+
+- name: Ensure top-level SSH config includes config.d fragments
+  ansible.builtin.lineinfile:
+    path: "/home/{{ ms02_reverse_tunnel_user }}/.ssh/config"
+    regexp: '(?i)^Include\s+~/.ssh/config\.d/\*'
+    line: "Include ~/.ssh/config.d/*"
+    insertbefore: BOF
+    create: true
+    owner: "{{ ms02_reverse_tunnel_user }}"
+    group: "{{ ms02_reverse_tunnel_group }}"
+    mode: "0600"
+
+- name: Seed VPS host key in tunnel user known_hosts
+  ansible.builtin.shell: |
+    set -euo pipefail
+    kh="/home/{{ ms02_reverse_tunnel_user }}/.ssh/known_hosts"
+    touch "$kh"
+    chown {{ ms02_reverse_tunnel_user }}:{{ ms02_reverse_tunnel_group }} "$kh"
+    chmod 600 "$kh"
+    ssh-keyscan -H "{{ ms02_reverse_tunnel_vps_host }}" >> "$kh" 2>/dev/null || true
+    sort -u "$kh" -o "$kh"
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Deploy reverse-tunnel systemd unit
+  ansible.builtin.template:
+    src: ms02-reverse-tunnel.service.j2
+    dest: "/etc/systemd/system/{{ ms02_reverse_tunnel_service_name }}.service"
+    mode: "0644"
+  notify: Restart ms02 reverse tunnel
+
+- name: Enable and start reverse-tunnel service
+  ansible.builtin.systemd:
+    name: "{{ ms02_reverse_tunnel_service_name }}"
+    enabled: "{{ ms02_reverse_tunnel_service_enabled | bool }}"
+    state: "{{ ms02_reverse_tunnel_service_state }}"
+    daemon_reload: true
+  when: ms02_reverse_tunnel_enabled | bool
+
+- name: Stop and disable reverse-tunnel service when disabled
+  ansible.builtin.systemd:
+    name: "{{ ms02_reverse_tunnel_service_name }}"
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when: not (ms02_reverse_tunnel_enabled | bool)
+
+- name: Summarize reverse tunnel
+  ansible.builtin.debug:
+    msg:
+      - "ms02 SSH exposed on VPS: {{ ms02_reverse_tunnel_vps_host }}:{{ ms02_reverse_tunnel_remote_port }}"
+      - "From away: ssh -p {{ ms02_reverse_tunnel_remote_port }} {{ ms02_reverse_tunnel_user }}@{{ ms02_reverse_tunnel_vps_host }}"
+      - "Mac alias (after mac-provision): Host ms02-away"
+      - "Service: systemctl status {{ ms02_reverse_tunnel_service_name }}"

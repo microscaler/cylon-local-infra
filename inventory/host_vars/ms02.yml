@@ -62,3 +62,8 @@ nfs_server_exports:
       # without this, direct LAN mounts fail with "RPC prog not available" / access denied.
       - cidr: 192.168.1.0/24
         options: "rw,sync,no_subtree_check,sec=sys,insecure,all_squash,anonuid=1000,anongid=1000"
+
+# ── Reverse SSH tunnel → Hostinger VPS (away-from-LAN access) ─────────────
+# See docs/ms02-reverse-tunnel.md and playbooks/ms02_reverse_tunnel.yml.
+ms02_reverse_tunnel_enabled: true
+ms02_reverse_tunnel_remote_port: 22002

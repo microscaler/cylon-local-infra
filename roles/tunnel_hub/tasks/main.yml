@@ -1,0 +1,29 @@
+---
+# Public VPS — allow reverse SSH tunnels from ms02 (GatewayPorts + authorized_keys).
+
+- name: Ensure sshd drop-in directory exists
+  ansible.builtin.file:
+    path: "{{ tunnel_hub_sshd_drop_in_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Deploy sshd reverse-tunnel drop-in
+  ansible.builtin.template:
+    src: sshd-reverse-tunnel.conf.j2
+    dest: "{{ tunnel_hub_sshd_drop_in_dir }}/{{ tunnel_hub_sshd_drop_in_file }}"
+    mode: "0644"
+  notify: Reload sshd
+
+- name: Ensure /root/.ssh exists
+  ansible.builtin.file:
+    path: /root/.ssh
+    state: directory
+    mode: "0700"
+
+- name: Install authorized keys for reverse-tunnel clients
+  ansible.builtin.authorized_key:
+    user: root
+    key: "{{ item }}"
+    state: present
+  loop: "{{ tunnel_hub_authorized_keys }}"
+  when: tunnel_hub_authorized_keys | length > 0

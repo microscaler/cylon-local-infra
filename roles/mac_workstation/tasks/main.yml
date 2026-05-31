@@ -199,6 +199,14 @@
     state: absent
   tags: [mac, ssh, ssh_tunnel, tunnel]
 
+- name: Deploy ms02-via-hostinger SSH fragment (reverse-tunnel alias)
+  ansible.builtin.template:
+    src: ms02-via-hostinger.j2
+    dest: "{{ mac_workstation_user_home }}/.ssh/config.d/ms02-via-hostinger"
+    mode: "0600"
+  when: mac_workstation_manage_ms02_via_hostinger_ssh | default(true) | bool
+  tags: [mac, ssh, ssh_tunnel, tunnel, ms02_via_hostinger]
+
 # ── Diagnostic summary ───────────────────────────────────────────────────
 - name: Summarize managed Mac-side state
   ansible.builtin.debug:
@@ -209,5 +217,5 @@
       - "Spotlight excl.:  {{ mac_workstation_spotlight_excluded_paths | join(', ') }}"
       - "/etc/hosts:       {{ 'managed block (' ~ (mac_workstation_etc_hosts_lines | length | string) ~ ' lines)' if mac_workstation_manage_etc_hosts | default(false) else 'not managed by this role' }}"
       - "Hermes Web UI:    http://ms02:9119 on LAN (kubectl API https://ms02:38839 — see docs/dev_hosts.md)"
-      - "SSH:              ~/.ssh/config.d/* for Host ms02 (operator-owned); retired ms02-dev-tunnel fragment removed if present"
+      - "SSH:              ~/.ssh/config.d/* — Host ms02 (operator); ms02-away via Hostinger tunnel when provisioned"
   tags: [mac, summary]

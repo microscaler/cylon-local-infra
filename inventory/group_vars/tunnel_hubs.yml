@@ -1,0 +1,10 @@
+---
+# Hostinger VPS — reverse-tunnel hub for ms02 while the operator is away.
+# Keys listed here are idempotently merged into root@VPS authorized_keys.
+# The ms02 casibbald key is also published by roles/ms02_reverse_tunnel.
+
+tunnel_hub_authorized_keys:
+  # Mac (picolino) — operator laptop
+  - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPzU40zSgqveoDdpoxWvctgA94r/y0lGWNA3026bqk+9 casibbald@picolino.local"
+  # ms02 casibbald — outbound tunnel client (also ensured by ms02_reverse_tunnel role)
+  - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDHCsZMIMsRqzLfx5IhMqmh7qq/08CiI/RCkraqP69jZ casibbald@casibbald-MS-02-Ultra"

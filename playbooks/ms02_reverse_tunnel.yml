@@ -1,0 +1,31 @@
+---
+# Reverse SSH tunnel: ms02 → Hostinger VPS (reach ms02 while away from LAN).
+#
+# Run (from repo root, Mac on home LAN or already connected):
+#   ansible-playbook playbooks/ms02_reverse_tunnel.yml
+#   just ms02-reverse-tunnel-up          # same, via justfile
+#   just ms02-reverse-tunnel-status      # service + port probe
+#
+# From away (after tunnel is up):
+#   ssh ms02-away                        # Mac alias (mac_workstation role)
+#   ssh -p 22002 casibbald@76.13.1.95    # explicit
+
+- name: Configure VPS sshd for reverse tunnels
+  hosts: tunnel_hubs
+  roles:
+    - tunnel_hub
+
+- name: Configure ms02 outbound reverse tunnel
+  hosts: dev_hosts
+  roles:
+    - ms02_reverse_tunnel
+
+- name: Install Mac SSH alias for ms02 via Hostinger
+  hosts: macs
+  gather_facts: false
+  tasks:
+    - name: Deploy ms02-away SSH config
+      ansible.builtin.import_role:
+        name: mac_workstation
+        tasks_from: ms02_via_hostinger.yml
+      tags: [mac, ssh, ms02_via_hostinger]

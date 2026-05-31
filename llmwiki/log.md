@@ -1086,3 +1086,15 @@ before **`vllm serve`** when **`vllm_stacked_container_start_api`** (default on
 **`vllm_stacked_container_drop_caches_on_provision: true`**; old
 **`drop_caches_before_recreate`** is an alias. Recreate path still optionally purges
 **`/tmp/ray`**. Disable: **`-e vllm_stacked_container_drop_caches_on_provision=false`**.
+
+## [2026-05-31] run | ms02-hostinger-reverse-tunnel | shipped
+Outbound reverse SSH tunnel so ms02 stays reachable while the operator is away
+from the home LAN. **ms02** runs **`ms02-reverse-tunnel.service`** (autossh,
+systemd **`Restart=always`**, **`StartLimitIntervalSec=0`**, enabled) →
+**srv1719193** (`76.13.1.95`) port **22002** → ms02 `:22`. Mac alias
+**`ms02-away`**. Ansible: **`playbooks/ms02_reverse_tunnel.yml`**, roles
+**`tunnel_hub/`** + **`ms02_reverse_tunnel/`**, **`just ms02-reverse-tunnel-{up,status}`**.
+Also: **`vllm_stacked_container_triton_cache_invalidate`** default **off** (warmup
+win); **nvidia2** **`spark_nccl_ib_gid_index` 4→3** per live **`show_gids`**.
+Full write-up: [runs/2026-05-31-ms02-hostinger-reverse-tunnel.md](./runs/2026-05-31-ms02-hostinger-reverse-tunnel.md).
+New entity: [entities/srv1719193.md](./entities/srv1719193.md).

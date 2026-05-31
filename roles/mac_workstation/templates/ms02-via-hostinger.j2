@@ -1,0 +1,17 @@
+# Managed by cylon-local-infra :: mac_workstation / ms02_reverse_tunnel playbook
+# Reach ms02 SSH via the Hostinger reverse tunnel while away from the home LAN.
+#
+# Requires ms02-reverse-tunnel.service running on ms02 (playbooks/ms02_reverse_tunnel.yml).
+
+Host ms02-away ms02-via-hostinger
+    HostName {{ mac_workstation_ms02_reverse_tunnel_host }}
+    Port {{ mac_workstation_ms02_reverse_tunnel_port }}
+    User casibbald
+    AddressFamily inet
+    ServerAliveInterval 30
+    ServerAliveCountMax 6
+    TCPKeepAlive yes
+    ForwardAgent yes
+    ControlMaster auto
+    ControlPath {{ mac_workstation_user_home }}/.ssh/cm/%r@%h:%p
+    ControlPersist 10m

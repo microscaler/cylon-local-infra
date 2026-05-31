@@ -1,0 +1,13 @@
+---
+# SSH server settings on the public VPS that receives reverse tunnels from ms02.
+# Only `GatewayPorts clientspecified` is required so ms02 can bind
+# `-R 0.0.0.0:<port>:127.0.0.1:22` and the operator can reach ms02 from the
+# internet via `ssh -p <port> casibbald@<vps>`.
+
+tunnel_hub_sshd_drop_in_dir: /etc/ssh/sshd_config.d
+tunnel_hub_sshd_drop_in_file: 99-reverse-tunnel.conf
+tunnel_hub_gateway_ports: clientspecified
+
+# Public keys allowed to open reverse tunnels as root (ms02 casibbald key, Mac, …).
+# Override in inventory/host_vars/<host>.yml or group_vars/tunnel_hubs.yml.
+tunnel_hub_authorized_keys: []
