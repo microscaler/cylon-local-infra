@@ -1,0 +1,23 @@
+# Managed by cylon-local-infra role dev_dns — do not edit on the host.
+# Zones: {{ dev_dns_lan_zone }} (LAN → {{ dev_dns_lan_ip }}), {{ dev_dns_metallb_zone }} (MetalLB IPs)
+no-hosts
+no-poll
+bind-interfaces
+local=/{{ dev_dns_lan_zone }}/
+local=/{{ dev_dns_metallb_zone }}/
+
+{% for addr in dev_dns_listen_addresses %}
+listen-address={{ addr }}
+{% endfor %}
+
+# LAN wildcard (Mac /etc/resolver → this nameserver → haproxy on ms02)
+address=/{{ dev_dns_lan_zone }}/{{ dev_dns_lan_ip }}
+{% for name in dev_dns_extra_lan_hostnames | default([]) %}
+address=/{{ name }}.{{ dev_dns_lan_zone }}/{{ dev_dns_lan_ip }}
+{% endfor %}
+
+# MetalLB fixed IPs (native reach after metallb_lan_route + Mac static route)
+{% for name, ip in dev_dns_metallb_records | dictsort %}
+address=/{{ name }}.{{ dev_dns_metallb_zone }}/{{ ip }}
+{% endfor %}
+address=/{{ dev_dns_metallb_zone }}/{{ dev_dns_lan_ip }}

@@ -1,0 +1,9 @@
+---
+- name: Configure Sunshine and its WireGuard-only firewall policy on ms02
+  hosts: ms02
+  become: true
+  roles:
+    - role: firewall
+      tags: [firewall]
+    - role: sunshine_remote_desktop
+      tags: [sunshine_remote_desktop, sunshine, remote_desktop]

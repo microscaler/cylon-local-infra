@@ -17,6 +17,18 @@ models:
 {%     if m.revision is defined %}
     revision: {{ m.revision | to_json }}
 {%     endif %}
+{%     if m.cache_dir is defined %}
+    cache_dir: {{ m.cache_dir | to_json }}
+{%     endif %}
+{%     if m.sync_targets is defined %}
+    sync_targets:
+{%       for t in m.sync_targets %}
+      - host: {{ t.host | to_json }}
+        user: {{ t.user | default('nvidia') | to_json }}
+        cache_dir: {{ t.cache_dir | default('/home/nvidia/.cache/huggingface/hub') | to_json }}
+        name: {{ t.name | default(t.host) | to_json }}
+{%       endfor %}
+{%     endif %}
 {%   endif %}
 {% endfor %}
 
@@ -36,6 +48,25 @@ sync_targets:
 {%     endif %}
 {%   endif %}
 {% endfor %}
+{% if hf_prefetch_archive_enabled | default(false) | bool %}
+{%   if hf_prefetch_archive_targets | length > 0 %}
+{%     for t in hf_prefetch_archive_targets %}
+  - host: {{ t.host | to_json }}
+    user: {{ t.user | to_json }}
+    cache_dir: {{ t.cache_dir | to_json }}
+    name: {{ t.name | default(t.host) | to_json }}
+{%     endfor %}
+{%   elif 'ms02' in groups.get('dev_hosts', []) %}
+{%     set _ms02 = hostvars['ms02'] %}
+{%     set _archive_ip = _ms02.hf_archive_lan_ip | default(_ms02.ansible_host | default('ms02')) %}
+{%     set _archive_user = _ms02.hf_archive_ssh_user | default('casibbald') %}
+{%     set _archive_cache = _ms02.hf_archive_cache_dir | default('/home/casibbald/.cache/huggingface/hub') %}
+  - host: {{ _archive_ip | to_json }}
+    user: {{ _archive_user | to_json }}
+    cache_dir: {{ _archive_cache | to_json }}
+    name: "ms02"
+{%   endif %}
+{% endif %}
 
 {% if hf_prefetch_env | length > 0 %}
 hf_env:

@@ -25,6 +25,7 @@
 #   ansible-playbook playbooks/mac_workstation.yml --tags nfs_client           # just /etc/nfs.conf
 #   ansible-playbook playbooks/mac_workstation.yml --tags etc_hosts            # just /etc/hosts LAN block
 #   ansible-playbook playbooks/mac_workstation.yml --tags ssh_tunnel           # SSH include + remove retired fragment
+#   ansible-playbook playbooks/mac_workstation.yml --tags metallb_route        # static route to MetalLB bridge
 #   ansible-playbook playbooks/mac_workstation.yml --tags dirs                 # just dirs + README
 
 - name: Configure Mac dev workstation(s)

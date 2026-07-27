@@ -21,6 +21,25 @@
         state: present
         update_cache: true
 
+    - name: Ensure export path directories exist
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default('casibbald') }}"
+        group: "{{ item.group | default('casibbald') }}"
+        mode: "{{ item.mode | default('0755') }}"
+      loop: "{{ nfs_server_export_paths | default([]) }}"
+
+    - name: Ensure hub subdirectories for HF archive exports
+      ansible.builtin.file:
+        path: "{{ item.path }}/hub"
+        state: directory
+        owner: "{{ item.owner | default('casibbald') }}"
+        group: "{{ item.group | default('casibbald') }}"
+        mode: "{{ item.mode | default('0755') }}"
+      loop: "{{ nfs_server_export_paths | default([]) }}"
+      when: item.hf_hub | default(false) | bool
+
     # idmapd maps NFSv4 ownership strings ↔ local UIDs. Domain must match
     # client side or every file appears owned by `nobody:nogroup`.
     - name: Configure NFSv4 idmap domain

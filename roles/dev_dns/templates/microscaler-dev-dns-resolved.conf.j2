@@ -1,0 +1,5 @@
+# Managed by cylon-local-infra role dev_dns
+# Route dev zones to local dnsmasq (127.0.0.1); Mac uses /etc/resolver instead.
+[Resolve]
+DNS=127.0.0.1
+Domains=~{{ dev_dns_lan_zone }} ~{{ dev_dns_metallb_zone }}

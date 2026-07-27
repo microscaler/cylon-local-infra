@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ mac_workstation_metallb_route_launchd_label }}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>/sbin/route -n add -net {{ mac_workstation_metallb_route_cidr }} {{ mac_workstation_metallb_route_gateway }} 2>/dev/null || /sbin/route -n change -net {{ mac_workstation_metallb_route_cidr }} {{ mac_workstation_metallb_route_gateway }}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardErrorPath</key>
+  <string>/var/log/{{ mac_workstation_metallb_route_launchd_label }}.err.log</string>
+  <key>StandardOutPath</key>
+  <string>/var/log/{{ mac_workstation_metallb_route_launchd_label }}.out.log</string>
+</dict>
+</plist>

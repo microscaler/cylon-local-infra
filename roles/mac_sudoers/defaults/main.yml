@@ -70,3 +70,21 @@ mac_sudoers_rules:
 
   - comment: "Spotlight: nudge mds to reload its Exclusions list (narrow: mds only, not the whole system)"
     command: "/usr/bin/killall mds"
+
+  - comment: "MetalLB bridge static route add — Mac → 10.177.76.0/24 via ms02"
+    command: "/sbin/route -n add -net *"
+
+  - comment: "MetalLB bridge static route change — refresh gateway after sleep/wake"
+    command: "/sbin/route -n change -net *"
+
+  - comment: "MetalLB bridge static route delete — teardown / just metallb-lan-route-mac-down"
+    command: "/sbin/route -n delete -net *"
+
+  - comment: "Activate the root-owned Microscaler WireGuard route toggle"
+    command: "/usr/local/bin/microscaler-wireguard up"
+
+  - comment: "Deactivate the root-owned Microscaler WireGuard route toggle"
+    command: "/usr/local/bin/microscaler-wireguard down"
+
+  - comment: "Inspect the root-owned Microscaler WireGuard route toggle"
+    command: "/usr/local/bin/microscaler-wireguard status"

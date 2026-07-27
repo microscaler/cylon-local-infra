@@ -303,6 +303,7 @@ vllm_api_server_extra_args:
   - "gpt-4o-mini"
   - "qwen3"
   - "Qwen/Qwen3.6-35B-A3B-FP8"
+  - "Qwen/Qwen3-Coder-Next-FP8"
   - "--max-model-len"
   - "225000"
   - "--gpu-memory-utilization"
@@ -333,9 +334,7 @@ vllm_api_server_extra_args:
   - "--attention-backend"
   - "flashinfer"
   - "--enable-prefix-caching"
-  # --- Tool calling + Unsloth chat template ---
-  # The jinja lives inside the Ray containers at /vllm-patches/unsloth.jinja
-  # courtesy of the qwen_moe_patches bind-mount (roles/vllm_stacked_container).
+  # --- Tool calling + Unsloth chat template (Qwen3.6 production) ---
   - "--chat-template"
   - "/vllm-patches/unsloth.jinja"
   - "--enable-auto-tool-choice"
@@ -544,10 +543,26 @@ spark_provision_hf: true
 hf_prefetch_models:
   - TinyLlama/TinyLlama-1.1B-Chat-v1.0            # keep, smoke model
   - Qwen/Qwen3.6-35B-A3B-FP8                    # production default (vllm_default_model)
-  - Qwen/Qwen3.5-35B-A3B-FP8                    # prior stack; keep warm for rollback / A-B
+  - Qwen/Qwen3-Coder-30B-A3B-Instruct           # MoE coder; local NVMe + QSFP sync
+  - Qwen/Qwen3-Coder-Next-FP8                      # 80B/3B MoE hybrid; compare vs 30B-A3B
+  # Paused (re-enable when ready):
+  # - repo: moonshotai/Kimi-K2.7-Code             # ~554 GiB local + QSFP
+  # - repo: MiniMaxAI/MiniMax-M3
+  #   cache_dir: "{{ spark_hf_nfs_mount }}/hub"
+  #   sync_targets: []
 # Flip this to true in CI / blocking workflows to have Ansible wait for
 # every model to land (default: false, returns immediately).
 hf_prefetch_wait_for_ready: false
+
+# ms02 NFS cold-store — Sparks mount /srv/hf-archive for models routed above.
+spark_hf_nfs_enabled: true
+spark_hf_nfs_server: "192.168.1.189"
+spark_hf_nfs_export: /srv/hf-archive
+spark_hf_nfs_mount: /mnt/ms02-hf-archive
+
+# Retired: LAN rsync of every model to ~/.cache/huggingface on ms02.
+# MiniMax (and future cold models) use NFS direct download instead.
+hf_prefetch_archive_enabled: false
 
 # --- Firewall (ufw) ---
 firewall_default_incoming: deny

@@ -71,7 +71,7 @@ cursor_agent_worker_dir: "/home/casibbald/Workspace/microscaler"
 # inventory/group_vars/sparks.yml (`vllm_api_server_extra_args`) so Hermes requests
 # resolve to the same advertised id as Cursor / other clients.
 hermes_agent_openai_base_url: "http://nvidia1:8000/v1"
-hermes_agent_openai_model_id: "gpt-4o-mini"
+hermes_agent_openai_model_id: "Qwen/Qwen3.6-35B-A3B-FP8"
 
 # roles/firewall: stop/disable firewalld when both are installed (UFW + firewalld
 # causes confusing drops). Default true in role defaults; set

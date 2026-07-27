@@ -1,0 +1,22 @@
+---
+# Route home LAN ↔ Multipass/MetalLB bridge so Macs can reach 10.177.76.0/24
+# via ms02 (192.168.1.189) without host haproxy TCP maps.
+#
+# Enable on ms02 via host_vars (metallb_lan_route_enabled: true).
+
+metallb_lan_route_enabled: false
+
+# Home LAN (Mac / picolino)
+metallb_lan_route_lan_cidr: "192.168.1.0/24"
+
+# Multipass bridge + MetalLB L2 pool (shared-k8s-cluster)
+metallb_lan_route_bridge_cidr: "10.177.76.0/24"
+
+# Additional routed sources, such as the on-demand Mac WireGuard /32.
+metallb_lan_route_additional_source_cidrs: []
+
+# sysctl drop-in
+metallb_lan_route_sysctl_file: /etc/sysctl.d/99-microscaler-metallb-lan-route.conf
+
+# Loose rp_filter avoids blackholing asymmetric forward paths
+metallb_lan_route_rp_filter: "2"

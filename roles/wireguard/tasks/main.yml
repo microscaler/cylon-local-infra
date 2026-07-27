@@ -1,0 +1,28 @@
+---
+- name: Validate WireGuard target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Linux"
+    fail_msg: "The wireguard role currently supports Linux targets only."
+    quiet: true
+
+- name: Install WireGuard packages
+  ansible.builtin.apt:
+    name: "{{ wireguard_packages }}"
+    state: present
+    update_cache: true
+
+- name: Ensure WireGuard configuration directory
+  ansible.builtin.file:
+    path: "{{ wireguard_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Generate and publish host WireGuard key
+  ansible.builtin.import_tasks: key.yml
+
+- name: Configure WireGuard interface and health repair
+  ansible.builtin.import_tasks: configure.yml
+  when: wireguard_configure | bool

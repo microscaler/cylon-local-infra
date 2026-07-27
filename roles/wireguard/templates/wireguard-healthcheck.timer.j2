@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically verify WireGuard peer on {{ wireguard_interface }}
+
+[Timer]
+OnBootSec={{ wireguard_healthcheck_initial_delay }}
+OnUnitActiveSec={{ wireguard_healthcheck_interval }}
+RandomizedDelaySec={{ wireguard_healthcheck_randomized_delay }}
+Persistent=true
+Unit={{ wireguard_healthcheck_service_name }}.service
+
+[Install]
+WantedBy=timers.target

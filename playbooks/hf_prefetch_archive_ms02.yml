@@ -1,0 +1,135 @@
+---
+# Wire hf-prefetch on the Spark leader to rsync model weights to ms02 (LAN archive).
+#
+# Prerequisites:
+#   - spark_provision_hf: true and hf_prefetch_archive_enabled: true in sparks.yml
+#   - hf_archive_* vars in inventory/host_vars/ms02.yml
+#
+#   just hf-prefetch-archive-up
+#   just hf-prefetch-archive-up -- --check
+#
+# After SSH + cache dir are in place, refreshes leader hf-prefetch config and
+# optionally bootstraps a one-shot rsync pass for models already cached on nvidia1.
+
+- name: Leader — slurp nvidia SSH public key for archive rsync
+  hosts: "{{ (groups['sparks'] | sort | first) }}"
+  gather_facts: false
+  become: true
+  vars:
+    _archive_user: "{{ hf_prefetch_run_user | default('nvidia') }}"
+  tasks:
+    - name: Stat nvidia ed25519 public key
+      ansible.builtin.stat:
+        path: "/home/{{ _archive_user }}/.ssh/id_ed25519.pub"
+      register: hf_archive_pubkey_st
+
+    - name: Fail when leader nvidia has no ed25519 key
+      ansible.builtin.fail:
+        msg: >-
+          Missing /home/{{ _archive_user }}/.ssh/id_ed25519.pub on the leader.
+          Run playbooks/nccl_sparks.yml or generate keys for {{ _archive_user }} first.
+      when: not hf_archive_pubkey_st.stat.exists
+
+    - name: Slurp nvidia public key
+      ansible.builtin.slurp:
+        src: "/home/{{ _archive_user }}/.ssh/id_ed25519.pub"
+      register: hf_archive_pubkey_slurp
+
+    - name: Publish pubkey line for ms02 play
+      ansible.builtin.set_fact:
+        hf_archive_nvidia_pubkey_line: "{{ hf_archive_pubkey_slurp.content | b64decode | trim }}"
+
+- name: ms02 — HF archive cache + authorize leader nvidia for rsync
+  hosts: ms02
+  gather_facts: false
+  become: true
+  vars:
+    _ssh_user: "{{ hf_archive_ssh_user | default('casibbald') }}"
+    _cache_hub: "{{ hf_archive_cache_dir | default('/home/casibbald/.cache/huggingface/hub') }}"
+    _cache_root: "{{ _cache_hub | regex_replace('/hub/?$', '') }}"
+  tasks:
+    - name: Skip ms02 archive when disabled in host_vars
+      ansible.builtin.meta: end_host
+      when: not (hf_archive_enabled | default(false) | bool)
+
+    - name: Ensure HF cache root and hub directory exist
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ _ssh_user }}"
+        group: "{{ _ssh_user }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ _cache_root }}", mode: "0755" }
+        - { path: "{{ _cache_hub }}", mode: "0755" }
+
+    - name: Ensure casibbald .ssh directory
+      ansible.builtin.file:
+        path: "/home/{{ _ssh_user }}/.ssh"
+        state: directory
+        owner: "{{ _ssh_user }}"
+        group: "{{ _ssh_user }}"
+        mode: "0700"
+
+    - name: Install leader nvidia SSH key for archive rsync (managed block)
+      ansible.builtin.blockinfile:
+        path: "/home/{{ _ssh_user }}/.ssh/authorized_keys"
+        create: true
+        owner: "{{ _ssh_user }}"
+        group: "{{ _ssh_user }}"
+        mode: "0600"
+        marker: "# {mark} ANSIBLE MANAGED — hf-prefetch archive from Spark leader"
+        block: |
+          {% if hf_archive_ssh_from | default('') | length > 0 %}from="{{ hf_archive_ssh_from }}" {% endif %}{{ hostvars[(groups['sparks'] | sort | first)].hf_archive_nvidia_pubkey_line }}
+
+- name: Leader — refresh hf-prefetch config (includes ms02 sync target)
+  hosts: sparks
+  gather_facts: true
+  become: true
+  vars:
+    spark_provision_hf: true
+    hf_prefetch_archive_enabled: true
+  roles:
+    - role: hf_prefetch_service
+      when: spark_provision_hf | default(false) | bool
+
+- name: Leader — bootstrap rsync to ms02 for models already cached
+  hosts: "{{ (groups['sparks'] | sort | first) }}"
+  gather_facts: false
+  become: true
+  vars:
+    _run_user: "{{ hf_prefetch_run_user | default('nvidia') }}"
+    _state: "{{ hf_prefetch_state_file | default('/var/lib/hf-prefetch/state.json') }}"
+    _script: "{{ hf_prefetch_install_dir | default('/opt/hf-prefetch') }}/hf_prefetch_service.py"
+  tasks:
+    - name: Skip bootstrap sync unless requested
+      ansible.builtin.meta: end_host
+      when: not (hf_prefetch_archive_bootstrap_sync | default(true) | bool)
+
+    - name: Stop hf-prefetch during bootstrap one-shot
+      ansible.builtin.systemd:
+        name: "{{ hf_prefetch_unit_name | default('hf-prefetch.service') }}"
+        state: stopped
+      failed_when: false
+
+    - name: Remove state file so cached models re-sync to new archive target
+      ansible.builtin.file:
+        path: "{{ _state }}"
+        state: absent
+
+    - name: Run one-shot hf-prefetch (rsync only when cache already complete)
+      ansible.builtin.command:
+        cmd: python3 {{ _script }} --once -v
+      become_user: "{{ _run_user }}"
+      environment:
+        HOME: "{{ hf_prefetch_runtime_home | default('/home/nvidia') }}"
+      register: hf_archive_bootstrap_once
+      async: 86400
+      poll: 30
+      changed_when: hf_archive_bootstrap_once.rc == 0
+
+    - name: Ensure hf-prefetch service is running after bootstrap
+      ansible.builtin.systemd:
+        name: "{{ hf_prefetch_unit_name | default('hf-prefetch.service') }}"
+        state: started
+        enabled: true

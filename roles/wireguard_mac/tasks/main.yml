@@ -1,0 +1,215 @@
+---
+- name: Validate WireGuard Mac target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "The wireguard_mac role supports macOS targets only."
+    quiet: true
+
+- name: Check Homebrew executable
+  ansible.builtin.stat:
+    path: "{{ wireguard_mac_brew }}"
+  register: wireguard_mac_brew_stat
+
+- name: Require Homebrew for WireGuard tools
+  ansible.builtin.assert:
+    that:
+      - wireguard_mac_brew_stat.stat.exists
+    fail_msg: "Homebrew is required at {{ wireguard_mac_brew }}."
+    quiet: true
+
+- name: Install WireGuard tools with Homebrew
+  ansible.builtin.command:
+    argv:
+      - "{{ wireguard_mac_brew }}"
+      - install
+      - wireguard-tools
+    creates: "{{ wireguard_mac_wg }}"
+
+- name: Ensure Mac WireGuard configuration directory
+  become: true
+  ansible.builtin.file:
+    path: "{{ wireguard_mac_config_dir }}"
+    state: directory
+    owner: root
+    group: wheel
+    mode: "0700"
+
+- name: Check for existing Mac WireGuard private key
+  become: true
+  ansible.builtin.stat:
+    path: "{{ wireguard_mac_private_key_path }}"
+  register: wireguard_mac_private_key_stat
+
+- name: Generate Mac WireGuard private key
+  ansible.builtin.command:
+    argv:
+      - "{{ wireguard_mac_wg }}"
+      - genkey
+  register: wireguard_mac_generated_private_key
+  changed_when: true
+  no_log: true
+  when:
+    - not wireguard_mac_private_key_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Store generated Mac WireGuard private key
+  become: true
+  ansible.builtin.copy:
+    content: "{{ wireguard_mac_generated_private_key.stdout | trim }}\n"
+    dest: "{{ wireguard_mac_private_key_path }}"
+    owner: root
+    group: wheel
+    mode: "0600"
+  no_log: true
+  when:
+    - wireguard_mac_generated_private_key is defined
+    - wireguard_mac_generated_private_key.stdout | default('') | length > 0
+
+- name: Recheck Mac WireGuard private key
+  become: true
+  ansible.builtin.stat:
+    path: "{{ wireguard_mac_private_key_path }}"
+  register: wireguard_mac_private_key_ready
+
+- name: Check for stored Mac WireGuard public key
+  become: true
+  ansible.builtin.stat:
+    path: "{{ wireguard_mac_public_key_path }}"
+  register: wireguard_mac_public_key_stat
+
+- name: Read stored Mac WireGuard public key
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ wireguard_mac_public_key_path }}"
+  register: wireguard_mac_public_key_slurp
+  when: wireguard_mac_public_key_stat.stat.exists
+
+- name: Publish stored Mac WireGuard public-key fact
+  ansible.builtin.set_fact:
+    wireguard_mac_public_key: >-
+      {{ wireguard_mac_public_key_slurp.content | b64decode | trim }}
+  when: wireguard_mac_public_key_stat.stat.exists
+
+- name: Require Mac key before rendering configuration
+  ansible.builtin.assert:
+    that:
+      - wireguard_mac_private_key_ready.stat.exists
+    fail_msg: >-
+      {{ wireguard_mac_private_key_path }} does not exist. Run once without
+      --check to bootstrap the host-local key.
+    quiet: true
+  when:
+    - wireguard_mac_configure | bool
+    - not ansible_check_mode
+
+- name: Read Mac WireGuard private key
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ wireguard_mac_private_key_path }}"
+  register: wireguard_mac_private_key_slurp
+  no_log: true
+  when: wireguard_mac_private_key_ready.stat.exists
+
+- name: Derive Mac WireGuard public key
+  ansible.builtin.command:
+    argv:
+      - "{{ wireguard_mac_wg }}"
+      - pubkey
+    stdin: "{{ wireguard_mac_private_key_slurp.content | b64decode | trim }}"
+  register: wireguard_mac_derived_public_key
+  changed_when: false
+  no_log: true
+  when:
+    - wireguard_mac_private_key_ready.stat.exists
+    - not ansible_check_mode
+
+- name: Publish Mac WireGuard public-key fact
+  ansible.builtin.set_fact:
+    wireguard_mac_public_key: >-
+      {{ wireguard_mac_derived_public_key.stdout | trim }}
+  when: >-
+    (wireguard_mac_derived_public_key | default({})).get('stdout', '') |
+    length > 0
+
+- name: Use placeholder Mac public key during first check-mode run
+  ansible.builtin.set_fact:
+    wireguard_mac_public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  when:
+    - ansible_check_mode
+    - not wireguard_mac_public_key_stat.stat.exists
+
+- name: Store Mac WireGuard public key
+  become: true
+  ansible.builtin.copy:
+    content: "{{ wireguard_mac_public_key }}\n"
+    dest: "{{ wireguard_mac_public_key_path }}"
+    owner: root
+    group: wheel
+    mode: "0644"
+  when: wireguard_mac_public_key | default('') | length > 0
+
+- name: Set Mac private-key template fact
+  ansible.builtin.set_fact:
+    wireguard_mac_private_key: >-
+      {{ wireguard_mac_private_key_slurp.content | b64decode | trim }}
+  no_log: true
+  when: wireguard_mac_private_key_ready.stat.exists
+
+- name: Use placeholder Mac private key during first check-mode run
+  ansible.builtin.set_fact:
+    wireguard_mac_private_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  no_log: true
+  when:
+    - ansible_check_mode
+    - not wireguard_mac_private_key_ready.stat.exists
+
+- name: Validate Mac peer configuration
+  ansible.builtin.assert:
+    that:
+      - wireguard_mac_hub_public_key | default('') | length > 0
+      - wireguard_mac_endpoint | length > 0
+    fail_msg: "Mac configuration requires the Hostinger public key and endpoint."
+    quiet: true
+  when: wireguard_mac_configure | bool
+
+- name: Render on-demand Mac WireGuard configuration
+  become: true
+  ansible.builtin.template:
+    src: ms02-away.conf.j2
+    dest: "{{ wireguard_mac_config_path }}"
+    owner: root
+    group: wheel
+    mode: "0600"
+  no_log: true
+  when: wireguard_mac_configure | bool
+
+- name: Install Mac LAN route LaunchDaemon
+  become: true
+  ansible.builtin.template:
+    src: com.microscaler.metallb-lan-route.plist.j2
+    dest: "{{ wireguard_mac_lan_route_plist }}"
+    owner: root
+    group: wheel
+    mode: "0644"
+  when: wireguard_mac_configure | bool
+
+- name: Install Mac WireGuard route toggle
+  become: true
+  ansible.builtin.copy:
+    src: microscaler_wireguard.py
+    dest: "{{ wireguard_mac_toggle_path }}"
+    owner: root
+    group: wheel
+    mode: "0755"
+  when: wireguard_mac_configure | bool
+
+- name: Summarize on-demand Mac WireGuard peer
+  ansible.builtin.debug:
+    msg:
+      - "address: {{ wireguard_mac_address }}"
+      - "endpoint: {{ wireguard_mac_endpoint }}"
+      - "routes: {{ wireguard_mac_allowed_ips | join(', ') }}"
+      - "activate: sudo {{ wireguard_mac_toggle_path }} up"
+      - "deactivate: sudo {{ wireguard_mac_toggle_path }} down"
+  when: wireguard_mac_configure | bool

@@ -1,0 +1,84 @@
+---
+# Split-horizon DNS for *.dev.microscaler.local + *.metallb.dev
+# Tags: dev_dns, dns, network
+
+- name: Dev DNS (dnsmasq + systemd-resolved)
+  when: dev_dns_enabled | default(false) | bool
+  tags: [dev_dns, dns, network]
+  block:
+    - name: Ensure dnsmasq package is installed
+      ansible.builtin.apt:
+        name: dnsmasq
+        state: present
+        update_cache: true
+
+    - name: Stop and disable distro dnsmasq.service (Conflicts with microscaler-dev-dns)
+      ansible.builtin.systemd:
+        name: dnsmasq
+        state: stopped
+        enabled: false
+      when: dev_dns_disable_system_dnsmasq | default(true) | bool
+      failed_when: false
+
+    - name: Ensure /etc/microscaler exists
+      ansible.builtin.file:
+        path: /etc/microscaler
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install dnsmasq split-horizon config
+      ansible.builtin.template:
+        src: dnsmasq-dev.conf.j2
+        dest: "{{ dev_dns_conf_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart microscaler-dev-dns
+
+    - name: Install microscaler-dev-dns systemd unit
+      ansible.builtin.template:
+        src: microscaler-dev-dns.service.j2
+        dest: "/etc/systemd/system/{{ dev_dns_unit_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - reload systemd
+        - restart microscaler-dev-dns
+
+    - name: Ensure systemd-resolved drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install systemd-resolved routing for dev zones
+      ansible.builtin.template:
+        src: microscaler-dev-dns-resolved.conf.j2
+        dest: "{{ dev_dns_resolved_dropin }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart systemd-resolved
+
+    - name: Flush handlers before enabling service
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start microscaler-dev-dns
+      ansible.builtin.systemd:
+        name: "{{ dev_dns_unit_name }}"
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Summarize dev DNS
+      ansible.builtin.debug:
+        msg:
+          - "dnsmasq unit: {{ dev_dns_unit_name }} (conf {{ dev_dns_conf_path }})"
+          - "LAN zone {{ dev_dns_lan_zone }} → {{ dev_dns_lan_ip }} (wildcard)"
+          - "MetalLB zone {{ dev_dns_metallb_zone }}: {{ dev_dns_metallb_records | length }} records"
+          - "Mac: just metallb-lan-route-mac / just mac-dev-dns ( /etc/resolver/{{ dev_dns_lan_zone }} )"

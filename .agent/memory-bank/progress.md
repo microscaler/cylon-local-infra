@@ -26,6 +26,55 @@
 
 ## Session notes
 
+- **2026-07-27 (Kimi K3 storage-only ingestion assessment):** The official
+  `moonshotai` Hugging Face organization did not yet expose a Kimi K3 repository
+  when checked; wait for the verified repo and pin its commit rather than using
+  a mirror. Third-party estimates put the MXFP4 release near 594 GB. ms02's
+  existing empty `/srv/hf-archive` shares a pool with 654 GiB free, while
+  nvidia1/nvidia2 have 454/429 GiB free, so none is a safe local staging target.
+  Cloud Storage FUSE v3 can stream writes without equivalent local disk. Best
+  path is a transient GCE VM in the bucket region, avoiding the home WAN;
+  ms02-mounted GCS is the fallback. Disable HF Xet for sequential HTTP writes,
+  dry-run for exact size, use a dedicated prefix, and pin the release commit.
+  ms02 gcloud targets `cf-sam-pp-9e`, but the active user credential needs
+  reauthentication before the bucket name/location can be inspected.
+- **2026-07-27 (Sunshine/Moonlight remote desktop):** Pivoted away from GNOME
+  RDP and deployed `sunshine_remote_desktop` on ms02. It provides a dedicated
+  2560x1440 Xorg/XFCE desktop without GDM autologin or a physical display,
+  captures through X11, and hardware-encodes through Intel VA-API. The official
+  `v2026.516.143833` Debian Trixie package is checksum-pinned; Ubuntu 24.04
+  failed safely on missing ICU 74 and Ubuntu 26.04 requires glibc 2.43 / ICU
+  78, while Trixie matches Ubuntu 25.10's glibc 2.42 / ICU 76. Three systemd
+  services are enabled/active and restart on failure. UFW allows Sunshine only
+  from picolino's WireGuard `10.77.0.3/32`; UPnP is disabled. Verified Web UI
+  HTTP 307 over `10.77.0.2:47990`, connected DUMMY0 at 2560x1440/59.95 Hz, and
+  H.264/HEVC/AV1 VA-API encoders. Seven tests, syntax, dry run, and idempotence
+  (`changed=0`) pass. Pairing remains manual: install Moonlight, create Web UI
+  credentials, add `10.77.0.2`, approve PIN, and launch Cursor.
+- **2026-07-25 (on-demand Mac WireGuard peer):** Deployed picolino
+  `10.77.0.3/32` through the Hostinger hub. Added split routes only for the
+  mesh, ms02 `/32`, and MetalLB bridge; a root-owned toggle swaps the LAN
+  LaunchDaemon route and WireGuard route safely. Added ms02 UFW, routed
+  forwarding, and NFS `/32` policy. Docker's VPS FORWARD drop was fixed with a
+  persistent `wg0→wg0` rule. Final down/up test passed: LAN route restoration,
+  `10.77.0.2`, Kubernetes API `10.177.76.137:6443`, ingress
+  `10.177.76.234:443`, DNS, and NFS. 25 tests pass at 94% total coverage.
+  Tunnel left active; NFS unmounted before away-network switch; reverse SSH
+  fallback active. **Away test on A1 Wi-Fi passed:** WireGuard re-handshook
+  automatically, split routes stayed on utun6, K8s API returned 401 as
+  expected without credentials, Hauliage ingress returned 200, DNS resolved
+  through ms02, NFS mounted/read successfully, and reverse SSH remained usable.
+- **2026-07-25 (always-on WireGuard Linux leg):** Added and deployed
+  `playbooks/wireguard_mesh.yml` plus role `wireguard` for Hostinger
+  (`10.77.0.1/24`, public UDP 51820) and ms02 (`10.77.0.2/32`, 25-second
+  keepalive). Private keys are generated and retained on each host. Both
+  `wg-quick@wg0` and `wireguard-healthcheck-wg0.timer` are boot-enabled; the
+  two-minute healthcheck restarts a missing/stale interface. Verified current
+  bidirectional handshakes/pings, recovery after stopping each interface,
+  reverse-SSH fallback, check mode, 98% healthcheck coverage, and idempotence
+  (`changed=0`). Mac peer is intentionally deferred as a separate toggle.
+- **2026-07-16 (LAN edge → Ansible):** Audited ad-hoc ms02/Mac state (dnsmasq, `/etc/resolver`, UFW DNS/haproxy/k8s, MetalLB L3). Captured: roles `metallb_lan_route` + `dev_dns`, firewall LAN rules, Mac resolver/route tasks. Applied ms02 (`just metallb-lan-route-ms02`, `just dev-dns-ms02`). Mac still needs interactive `just mac-dev-dns` + `just metallb-lan-route-mac`. HAProxy `lan-proxy` remains shared-k8s. Prefer Ansible over `shared-k8s just dev-dns-*` (overwrite risk). Audit: `llmwiki/concepts/ms02-lan-edge-ansible.md`.
+- **2026-06-14 (HF prefetch):** Paused Kimi (~554 GiB) and MiniMax (~796 GiB NFS) prefetches. Switched queue to **Qwen/Qwen3-Coder-30B-A3B-Instruct** (~57 GiB MoE). All three configured models **ready** on nvidia1+nvidia2. Partial Kimi cache removed. Inventory updated in `sparks.yml`; config pushed via `spark_hf_nfs.yml --tags hf_prefetch --skip-tags nfs_client`.
 - **2026-05-20 (torchrun migration):** Ray API root cause = `pgrep -af 'vllm serve'` self-match in `vllm_stacked_container` (fixed `[v]llm serve`, commit `41bfabc`). Torchrun role hardened: leader-first, headless follower, master-addr, /v1/models wait, defensive docker rm + run_once pause (`156c30c`). Qwen patch no longer aborts provision on pip SIGKILL (`0c51b68`). **Cluster:** inventory `vllm_stack_kind: torchrun`, image `26.03-py3`; torchrun containers crash-loop (~2 min), `/v1/models` down. Parallel provision runs caused Ray↔torchrun flips and mid-playbook container deletion — operator must run one reconcile at a time. **Before 8-Spark add:** green `/v1/models` on 2-Spark torchrun (or validated Ray rollback), 26.04-py3 bump, spark_assert green, HF cache parity nvidia2.
 - **2026-05-20:** **GPU clock cap 2000 MHz** — `roles/spark_gpu_clock` locks GB10 graphics clocks via `nvidia-smi -lgc 2000,2000` + systemd `cylon-gpu-clock-lock.service` on boot. Inventory: `spark_gpu_lock_clocks_enabled: true`, `spark_gpu_locked_graphics_clock_mhz: 2000`. `just spark-gpu-clock-apply` / `--tags spark_gpu_clock`. nvidia2 rebooted onto `6.17.0-1018-nvidia` without `linux-modules-nvidia-580-open-6.17.0-1018-nvidia` (stale 1008 modules blocked apt). Fixed on host; `spark_kernel` now detects missing module packages, purges stale nvidia module debs, and runs `nvidia-smi` when pin==running kernel. `spark_assert` uses `ray list nodes` (not `ray status` for IP grep); fixed NCCL container-name Jinja ternary; added `nvidia-smi` gate. in `inventory/group_vars/sparks.yml`. `roles/spark_kernel` now apt-installs the pinned image when missing (temp unhold + `allow_change_held_packages`). Apply: `just spark-kernel-apply` then `just spark-reboot`. `apt changelog linux-image-unsigned-6.17.0-1018-nvidia-64k` on gx10-47b5. **Running:** `6.17.0-1008-nvidia` (4K); **installed but not booted:** `1014`, `1018-nvidia`, `1018-nvidia-64k`. The **64k** image is a **64K page-size** build (`CONFIG_ARM64_64K_PAGES=y`), not interchangeable with fleet pin `1008` (4K). **1018-only fixes:** DGX Spark iGPU IOMMU quirk (LP #2150487), SMT asym-capacity scheduler (LP #2150671), Olympus perf PMU skip (LP #2149758), BMC IOMMU identity domain (LP #2150470), MPAM bandwidth hard-limit (LP #2150290), CXL/NPEM/fwctl (LP #2149918), CVE-2026-31431. **Cumulative since 1008 (high-signal):** RoCE stale GIDs on netdev events (1017, LP #2148311), r8169 vs r8127 Spark Ethernet contention (1017/1016, LP #2144345), ucsi/TBT5 power-plug boot hang (1016), NVFS SGL pool overrun (1016), CXL Type-2 + large CXL stack (1017). **1014** was AppArmor-only — no Spark platform fixes; aligns with prior crash bisection. **No explicit GX10 abrupt power-off fix** in 1008→1018 changelog. Hold pin at 1008 until symmetric A/B on `1018-nvidia` (4K, not 64k).
 - **2026-05-20:** **Canonical provision:** `just spark-provision` = full `provision_sparks.yml` + `spark_assert` gate. Retired `cutover_roce.yml`, `refresh_hf_prefetch.yml`.

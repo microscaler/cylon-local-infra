@@ -1098,3 +1098,27 @@ Also: **`vllm_stacked_container_triton_cache_invalidate`** default **off** (warm
 win); **nvidia2** **`spark_nccl_ib_gid_index` 4→3** per live **`show_gids`**.
 Full write-up: [runs/2026-05-31-ms02-hostinger-reverse-tunnel.md](./runs/2026-05-31-ms02-hostinger-reverse-tunnel.md).
 New entity: [entities/srv1719193.md](./entities/srv1719193.md).
+
+## [2026-06-12] feat | far-multipass cluster on ms02
+Added **`roles/far_multipass/`** + **`playbooks/far_multipass.yml`**: three Multipass
+guests (`far-node-1..3`, 16 GiB / 6 vCPU / 40 GiB disk) with nested KVM, Firecracker
+v1.10.1 x86_64, Rust, and virtiofs mounts of `tiffany`→`/opt` + `mayfly`. Operator
+surface: **`just far-multipass-{up,down,status,shell,build,bridge}`**;
+docs: [docs/far-multipass.md](../docs/far-multipass.md). RAM gate ~56 GiB MemAvailable
+(override: `-e far_multipass_skip_ram_check=true`). Validated **far-node-1** on ms02
+( nested `/dev/kvm`, Firecracker v1.10.1, tiffany+mayfly mounts). Full 3-node launch
+blocked while Kind control-plane holds ~150 GiB — free RAM before `far-multipass-up`.
+
+## [2026-07-05] update | ms02 workspace-layout section
+
+Documented the 2026-07 workspace topology on
+[entities/ms02.md](./entities/ms02.md): all microscaler code now lives
+on ms02 (`~/Workspace/microscaler/<repo>`), NFS-mounted on the Mac at
+`~/Workspace/remote/microscaler/<repo>`; only this repo
+(`cylon-local-infra`) remains Mac-local at
+`~/Workspace/local/cylon-local-infra`. The fleetingdns llmwiki (on ms02)
+cross-cites this wiki by Mac-local path in prose, since relative links
+across machines are impossible.
+
+## [2026-07-16] ops | lan-edge-captured-in-ansible
+Audited ad-hoc ms02/Mac LAN edge (dnsmasq, /etc/resolver, UFW DNS/haproxy/k8s, MetalLB L3 forward). Captured into cylon-local-infra: roles `dev_dns`, `metallb_lan_route`, firewall LAN rules, mac_workstation resolver + route. Docs: [concepts/ms02-lan-edge-ansible.md](./concepts/ms02-lan-edge-ansible.md). Still shared-k8s: `microscaler-lan-proxy` haproxy render. Mac needs interactive `just metallb-lan-route-mac` + `just mac-dev-dns`.

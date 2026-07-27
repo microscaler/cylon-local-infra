@@ -122,3 +122,34 @@
         - dev_workstation_git_user_email | length > 0
         - (dev_workstation_git_email_current.stdout | default('')) != dev_workstation_git_user_email
       changed_when: true
+
+    - name: Ensure operator ~/bin exists for CLI tools
+      ansible.builtin.file:
+        path: "{{ dev_workstation_user_home }}/bin"
+        state: directory
+        owner: "{{ dev_workstation_user }}"
+        group: "{{ dev_workstation_user }}"
+        mode: "0755"
+
+    - name: Install cargo-cleanup helper on PATH (~/bin)
+      when: dev_workstation_cargo_cleanup_enabled | default(true) | bool
+      block:
+        - name: Deliver cargo_cleanup.py
+          ansible.builtin.copy:
+            src: cargo_cleanup.py
+            dest: "{{ dev_workstation_user_home }}/bin/{{ dev_workstation_cargo_cleanup_name }}"
+            owner: "{{ dev_workstation_user }}"
+            group: "{{ dev_workstation_user }}"
+            mode: "0755"
+
+        - name: Default cargo path hint for non-login shells
+          ansible.builtin.copy:
+            dest: "{{ dev_workstation_user_home }}/.config/cargo-cleanup.env"
+            owner: "{{ dev_workstation_user }}"
+            group: "{{ dev_workstation_user }}"
+            mode: "0644"
+            content: |
+              # Managed by cylon-local-infra :: roles/dev_workstation
+              # Source in scripts/cron if needed: . ~/.config/cargo-cleanup.env
+              CARGO_CLEANUP_CARGO={{ dev_workstation_cargo_bin }}
+              CARGO_CLEANUP_ROOT={{ dev_workstation_cargo_cleanup_root }}

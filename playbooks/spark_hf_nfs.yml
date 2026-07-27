@@ -1,0 +1,27 @@
+---
+# Wire ms02 NFS HF cold-store + Spark mounts + hf-prefetch model routing.
+#
+#   just spark-hf-nfs-up
+#   ansible-playbook playbooks/spark_hf_nfs.yml
+#
+# MiniMax-M3 downloads to ms02:/srv/hf-archive via NFS mount on nvidia1.
+# Kimi-K2.7-Code uses local GB10 cache + QSFP peer sync.
+
+- name: ms02 — NFS export /srv/hf-archive
+  hosts: ms02
+  roles:
+    - role: nfs_server
+      tags: [nfs, nfs_server, hf_nfs]
+
+- name: Sparks — mount ms02 HF archive + refresh hf-prefetch config
+  hosts: sparks
+  gather_facts: true
+  become: true
+  vars:
+    spark_provision_hf: true
+    spark_hf_nfs_enabled: true
+  roles:
+    - role: spark_nfs_client
+      tags: [spark, hf, hf_nfs, nfs_client]
+    - role: hf_prefetch_service
+      tags: [spark, hf, hf_prefetch]

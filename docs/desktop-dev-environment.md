@@ -62,13 +62,51 @@ If you need to "run a command on ms02", you **SSH to ms02**. Editing a file in `
          │ See llmwiki/concepts/starlink-wifi-lan-port-filter.md
 ```
 
-**Three distinct network paths, don't conflate them:**
+**Four distinct network paths, don't conflate them:**
 
 | Edge | Link | Carries |
 |---|---|---|
 | `nvidia1 ↔ nvidia2` | ConnectX-7 QSFP, RoCE v2, MTU 9000, link-local `169.254.0.0/16` | NCCL tensor-parallel collectives, GPUDirect RDMA. **Not routable** — you cannot reach it from ms02 or the Mac. |
 | `{ms02, picolino} ↔ {nvidia1, nvidia2}` | 100 Mbit switch port on LAN (`192.168.1.0/24`) | HTTP / OpenAI API to vLLM, Ray dashboard, SSH. Shared, modest bandwidth, **no RDMA**. |
-| `picolino ↔ ms02` | Wi-Fi → Starlink → ms02 wired, multiplexed over SSH `:22` | NFS, Tilt UI, Postgres, kubeconfig, Ray dashboard forward (all via SSH LocalForward until direct LAN lands). |
+| `picolino ↔ ms02` | Home LAN (`192.168.1.0/24`) when wired/Wi‑Fi reaches ms02; else Starlink + SSH LocalForward | NFS, Tilt UI, Postgres, kubeconfig (prefer direct LAN; tunnels remain for away-from-LAN). |
+| `picolino → MetalLB / Multipass` | L3 route `10.177.76.0/24` via `192.168.1.189` (ms02) | Native reachability to Kind MetalLB VIPs (e.g. Postgres, Redis, future HAProxy Unified Gateway). **Not** host haproxy TCP maps. |
+
+### MetalLB LAN route (Ansible-managed)
+
+Kind MetalLB advertises on the Multipass bridge (`mpqemubr0`, `10.177.76.0/24`). Macs on `192.168.1.0/24` cannot reach that subnet unless ms02 forwards and the Mac has a static route.
+
+| Side | Role / recipe | What it does |
+|---|---|---|
+| ms02 | `roles/metallb_lan_route` via `just metallb-lan-route-ms02` | `net.ipv4.ip_forward=1`, UFW `DEFAULT_FORWARD_POLICY=ACCEPT`, route allow LAN ↔ `10.177.76.0/24` |
+| Mac | `mac_workstation` `--tags metallb_route` via `just metallb-lan-route-mac` | LaunchDaemon + `route add -net 10.177.76.0/24 192.168.1.189` |
+
+```bash
+cd ~/Workspace/local/cylon-local-infra
+just metallb-lan-route          # ms02 then Mac
+# smoke: ping a MetalLB VIP, e.g. curl http://10.177.76.xxx:…
+```
+
+Host haproxy on ms02 remains only for Tilt localhost fronts; TCP service maps should be retired once this route is green.
+
+### Dev DNS / LAN edge (Ansible-managed)
+
+Split-horizon names for the Mac:
+
+| Zone | Resolves to | Purpose |
+|---|---|---|
+| `*.dev.microscaler.local` | `192.168.1.189` (ms02 haproxy) | Browser / curl hostnames (`tilt-sesame.dev.microscaler.local`, …) |
+| `*.metallb.dev` | fixed `10.177.76.x` | Direct MetalLB IPs (after L3 route) |
+
+| Side | Recipe | State |
+|---|---|---|
+| ms02 | `just dev-dns-ms02` | `microscaler-dev-dns.service` + systemd-resolved + UFW :53 |
+| Mac | `just mac-dev-dns` | `/etc/resolver/dev.microscaler.local` → `192.168.1.189` |
+
+Audit of previous ad-hoc installs:
+[`llmwiki/concepts/ms02-lan-edge-ansible.md`](../llmwiki/concepts/ms02-lan-edge-ansible.md).
+
+**Still in shared-k8s-cluster (not Ansible yet):** `just lan-proxy-up` /
+`microscaler-lan-proxy.service` (haproxy config render + TLS sync).
 
 **Why this shape.** ms02 owns the canonical filesystem for two reasons: (a) disk space — the Mac's SSD is too small for the full Microscaler tree + build caches + container images; (b) Tilt needs the code where the Kind cluster runs, to skip rsync round-trips on every file save.
 

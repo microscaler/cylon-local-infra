@@ -2,15 +2,19 @@
 # Configure dev host(s) — ms02: remote IDE dev, Kind, act/buildx (see docs/dev_hosts.md).
 # 1) Sudoers for dev user (e.g. casibbald)
 # 2) Docker: daemon, groups (no docker.io — install CE first: playbooks/docker_dev_engine.yml)
-# 3) Firewall: ufw with dev-port allows
-# 4) Kind binary in /usr/local/bin
-# 5) dev_workstation: inotify limits for Cursor/VS Code Remote-SSH
-# 6) cursor_agent_worker: self-hosted Cloud Agents worker so cloud-driven
+# 3) Firewall: ufw with dev-port allows (+ LAN DNS/haproxy/k8s API)
+# 4) MetalLB LAN route: ip_forward + UFW FORWARD LAN ↔ mpqemubr0 (10.177.76.0/24)
+# 5) Dev DNS: microscaler-dev-dns (dnsmasq) + systemd-resolved split horizon
+# 6) Kind binary in /usr/local/bin
+# 7) dev_workstation: inotify limits for Cursor/VS Code Remote-SSH
+# 8) cursor_agent_worker: self-hosted Cloud Agents worker so cloud-driven
 #    agents execute builds/clones on ms02 (keeps the Mac thin).
 #
 # Run (after Docker CE is installed on ms02):
 #   ansible-playbook playbooks/dev_hosts.yml
 #   ansible-playbook playbooks/dev_hosts.yml -l ms02
+#   ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags metallb_lan_route
+#   ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags dev_dns
 #   ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags dev_workstation  # sysctls only
 #   ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags cursor_agent_worker
 
@@ -20,8 +24,14 @@
     - sudoers
     - docker
     - firewall
+    - role: metallb_lan_route
+      tags: [metallb_lan_route, network, firewall]
+    - role: dev_dns
+      tags: [dev_dns, dns, network]
     - kind
     - dev_workstation
+    - role: sunshine_remote_desktop
+      tags: [sunshine_remote_desktop, sunshine, remote_desktop]
     - role: cursor_agent_worker
       tags: [cursor_agent_worker, cursor, agent, worker]
       when: cursor_agent_worker_provision | default(true) | bool

@@ -207,6 +207,89 @@
   when: mac_workstation_manage_ms02_via_hostinger_ssh | default(true) | bool
   tags: [mac, ssh, ssh_tunnel, tunnel, ms02_via_hostinger]
 
+# ── Split DNS: *.dev.microscaler.local → ms02 dnsmasq ─────────────────────
+# Captures ad-hoc `just dev-dns-mac-install` from shared-k8s-cluster.
+- name: Ensure /etc/resolver directory exists
+  become: true
+  ansible.builtin.file:
+    path: /etc/resolver
+    state: directory
+    owner: root
+    group: wheel
+    mode: "0755"
+  when: mac_workstation_dev_dns_resolver_enabled | default(false) | bool
+  tags: [mac, mac_dev_dns, resolver, dns, network]
+
+- name: Install Mac resolver for dev.microscaler.local (→ ms02 dnsmasq)
+  become: true
+  ansible.builtin.copy:
+    dest: "{{ mac_workstation_dev_dns_resolver_path }}"
+    owner: root
+    group: wheel
+    mode: "0644"
+    content: |
+      nameserver {{ mac_workstation_dev_dns_nameserver }}
+  when: mac_workstation_dev_dns_resolver_enabled | default(false) | bool
+  tags: [mac, mac_dev_dns, resolver, dns, network]
+
+# ── MetalLB bridge static route (Mac → Multipass via ms02) ────────────────
+- name: Install LaunchDaemon for MetalLB LAN route (boot persistence)
+  become: true
+  ansible.builtin.template:
+    src: com.microscaler.metallb-lan-route.plist.j2
+    dest: "{{ mac_workstation_metallb_route_plist }}"
+    owner: root
+    group: wheel
+    mode: "0644"
+  register: mac_metallb_route_plist
+  when: mac_workstation_metallb_route_enabled | default(false) | bool
+  tags: [mac, metallb_route, network]
+
+- name: Load MetalLB LAN route LaunchDaemon
+  become: true
+  ansible.builtin.command:
+    argv:
+      - /bin/launchctl
+      - bootstrap
+      - system
+      - "{{ mac_workstation_metallb_route_plist }}"
+  when:
+    - mac_workstation_metallb_route_enabled | default(false) | bool
+    - mac_metallb_route_plist is changed
+  register: mac_metallb_route_bootstrap
+  changed_when: mac_metallb_route_bootstrap.rc == 0
+  failed_when: false
+  tags: [mac, metallb_route, network]
+
+- name: Kickstart MetalLB LAN route LaunchDaemon (apply route now)
+  become: true
+  ansible.builtin.command:
+    argv:
+      - /bin/launchctl
+      - kickstart
+      - -k
+      - "system/{{ mac_workstation_metallb_route_launchd_label }}"
+  when: mac_workstation_metallb_route_enabled | default(false) | bool
+  changed_when: true
+  failed_when: false
+  tags: [mac, metallb_route, network]
+
+- name: Ensure MetalLB LAN route is present in routing table
+  become: true
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if netstat -rn -f inet | awk '{print $1}' | grep -qx '{{ mac_workstation_metallb_route_cidr }}' \
+      || netstat -rn -f inet | awk '{print $1}' | grep -qx '10.177.76/24'; then
+      /sbin/route -n change -net {{ mac_workstation_metallb_route_cidr }} {{ mac_workstation_metallb_route_gateway }}
+    else
+      /sbin/route -n add -net {{ mac_workstation_metallb_route_cidr }} {{ mac_workstation_metallb_route_gateway }}
+    fi
+  args:
+    executable: /bin/bash
+  when: mac_workstation_metallb_route_enabled | default(false) | bool
+  changed_when: true
+  tags: [mac, metallb_route, network]
+
 # ── Diagnostic summary ───────────────────────────────────────────────────
 - name: Summarize managed Mac-side state
   ansible.builtin.debug:
@@ -216,6 +299,8 @@
       - "NFSv4 domain:     {{ mac_workstation_nfs4_domain }}"
       - "Spotlight excl.:  {{ mac_workstation_spotlight_excluded_paths | join(', ') }}"
       - "/etc/hosts:       {{ 'managed block (' ~ (mac_workstation_etc_hosts_lines | length | string) ~ ' lines)' if mac_workstation_manage_etc_hosts | default(false) else 'not managed by this role' }}"
+      - "MetalLB route:    {{ mac_workstation_metallb_route_cidr }} via {{ mac_workstation_metallb_route_gateway }} ({{ 'enabled' if mac_workstation_metallb_route_enabled | default(false) else 'disabled' }})"
+      - "Dev DNS resolver: {{ mac_workstation_dev_dns_resolver_path }} → {{ mac_workstation_dev_dns_nameserver }} ({{ 'enabled' if mac_workstation_dev_dns_resolver_enabled | default(false) else 'disabled' }})"
       - "Hermes Web UI:    http://ms02:9119 on LAN (kubectl API https://ms02:38839 — see docs/dev_hosts.md)"
       - "SSH:              ~/.ssh/config.d/* — Host ms02 (operator); ms02-away via Hostinger tunnel when provisioned"
   tags: [mac, summary]

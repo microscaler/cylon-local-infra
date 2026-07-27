@@ -86,6 +86,9 @@ just spark-model-cutover --recreate   # or: just spark-provision-recreate
 
 Hermes on ms02: `just spark-hermes-sync` (separate playbook — not Spark provision).
 
+HF model archive on ms02 (rsync from leader): `just hf-prefetch-archive-up` — see
+[`docs/hf-cache-ms02-archive.md`](docs/hf-cache-ms02-archive.md).
+
 **While Ray or vLLM is starting** (before `/v1/models` responds), use
 `python3 scripts/spark_model_status.py observe --ssh-host nvidia1` or
 `just spark-stack-observe` — see **Observability** in
@@ -111,6 +114,29 @@ ansible-playbook playbooks/nccl_sparks.yml --skip-tags nccl_test
 ansible-playbook playbooks/docker_dev_engine.yml -l ms02
 ansible-playbook playbooks/dev_hosts.yml -l ms02
 ```
+
+### Routed WireGuard mesh
+
+```bash
+just wireguard-mesh-check
+just wireguard-mesh-up
+just wireguard-linux-status
+just wireguard-mac-up
+```
+
+Hostinger and ms02 remain always on; the Mac peer is an explicit split-tunnel
+toggle. The existing reverse SSH tunnel remains the independent break-glass
+path. See [`docs/wireguard-mesh.md`](docs/wireguard-mesh.md).
+
+**FAR Multipass cluster** (3 × nested-KVM guests for Firecracker on ms02):
+
+```bash
+just far-multipass-up              # needs ~56 GiB MemAvailable — run `just kind-stop` in shared-kind-cluster first
+just far-multipass-up SKIP_RAM=1   # override RAM gate (operator accepts risk)
+just far-multipass-status
+```
+
+See [`docs/far-multipass.md`](docs/far-multipass.md).
 
 ### Sync `~/Workspace` from the Mac to `ms02` (additive, preserves remote-only files)
 

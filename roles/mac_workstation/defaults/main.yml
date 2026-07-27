@@ -13,6 +13,7 @@
 #   3. /etc/nfs.conf for NFSv4 idmap domain (client side of idmap)
 #   4. /etc/hosts — short LAN names (ms02, Sparks) so tools work without mDNS/DNS
 #   5. ~/.ssh/config — optional `Include ~/.ssh/config.d/*` (operator Host stanzas only; no managed tunnel)
+#   6. MetalLB bridge static route (10.177.76.0/24 via ms02) + LaunchDaemon
 #
 # Out of scope for this role:
 #   - ~/.zshrc edits (blast radius: all shell sessions)
@@ -73,3 +74,19 @@ mac_workstation_retired_ssh_tunnel_fragment: "{{ mac_workstation_user_home }}/.s
 mac_workstation_manage_ms02_via_hostinger_ssh: true
 mac_workstation_ms02_reverse_tunnel_host: "76.13.1.95"
 mac_workstation_ms02_reverse_tunnel_port: 22002
+
+# ── MetalLB / Multipass bridge static route (Mac → 10.177.76.0/24 via ms02) ─
+# Pair with ms02 role metallb_lan_route (ip_forward + UFW FORWARD).
+# Tags: metallb_route
+mac_workstation_metallb_route_enabled: true
+mac_workstation_metallb_route_cidr: "10.177.76.0/24"
+mac_workstation_metallb_route_gateway: "192.168.1.189"
+mac_workstation_metallb_route_launchd_label: "com.microscaler.metallb-lan-route"
+mac_workstation_metallb_route_plist: "/Library/LaunchDaemons/{{ mac_workstation_metallb_route_launchd_label }}.plist"
+
+# ── Split DNS for *.dev.microscaler.local (was shared-k8s just dev-dns-mac-install) ─
+# Tags: mac_dev_dns, resolver, dns
+mac_workstation_dev_dns_resolver_enabled: true
+mac_workstation_dev_dns_zone: "dev.microscaler.local"
+mac_workstation_dev_dns_nameserver: "192.168.1.189"
+mac_workstation_dev_dns_resolver_path: "/etc/resolver/{{ mac_workstation_dev_dns_zone }}"

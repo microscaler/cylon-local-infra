@@ -27,6 +27,63 @@ firewall_trusted_lan_tcp_ports:
   - 4317           # OTLP gRPC (otel-agent-on-Spark → otel-collector in kind)
   - 4318           # OTLP HTTP (alternative; same path)
 
+# Captured from ad-hoc shared-k8s lan_firewall.py / just dev-dns-up (was not in Ansible).
+firewall_trusted_lan_udp_ports:
+  - 53             # microscaler-dev-dns (dnsmasq)
+firewall_trusted_lan_rules:
+  - {port: 53, proto: udp, comment: "Microscaler dev DNS (dnsmasq)"}
+  - {port: 53, proto: tcp, comment: "Microscaler dev DNS (dnsmasq TCP)"}
+  - {port: 80, proto: tcp, comment: "Microscaler dev haproxy HTTP"}
+  - {port: 443, proto: tcp, comment: "Microscaler dev haproxy HTTPS"}
+  - {port: 6443, proto: tcp, comment: "Microscaler dev Kubernetes API (kubectl from Mac)"}
+
+# Remote picolino arrives through WireGuard as 10.77.0.3. Keep this /32 policy
+# separate from the broad home-LAN rules.
+firewall_trusted_vpn_cidr: "10.77.0.3/32"
+firewall_trusted_vpn_tcp_ports:
+  - 22
+  - 2049
+  - "7000:12000"
+firewall_trusted_vpn_udp_ports:
+  - 53
+firewall_trusted_vpn_rules:
+  - {port: 53, proto: tcp, comment: "WireGuard dev DNS"}
+  - {port: 80, proto: tcp, comment: "WireGuard dev HTTP"}
+  - {port: 443, proto: tcp, comment: "WireGuard dev HTTPS"}
+  - {port: 6443, proto: tcp, comment: "WireGuard Kubernetes API"}
+  - {port: 38839, proto: tcp, comment: "WireGuard shared Kind API"}
+  - {port: 47984, proto: tcp, comment: "WireGuard Sunshine HTTPS"}
+  - {port: 47989, proto: tcp, comment: "WireGuard Sunshine control"}
+  - {port: 47990, proto: tcp, comment: "WireGuard Sunshine Web UI"}
+  - {port: 48010, proto: tcp, comment: "WireGuard Sunshine RTSP"}
+  - {port: "47998:48000", proto: udp, comment: "WireGuard Sunshine media"}
+  - {port: 48002, proto: udp, comment: "WireGuard Sunshine microphone"}
+  - {port: 48010, proto: udp, comment: "WireGuard Sunshine video"}
+
+# ── Sunshine/Moonlight remote desktop over WireGuard ─────────────────────
+# A dedicated Xorg/XFCE session avoids console autologin and works without a
+# physical display or dummy plug. Sunshine is not exposed to the home LAN or
+# public internet; only picolino's WireGuard address is allowed above.
+sunshine_remote_desktop_enabled: true
+sunshine_remote_desktop_user: casibbald
+sunshine_remote_desktop_uid: 1000
+sunshine_remote_desktop_width: 2560
+sunshine_remote_desktop_height: 1440
+sunshine_remote_desktop_refresh_rate: 60
+
+# ── MetalLB / Multipass bridge L3 route (Mac → 10.177.76.0/24 via ms02) ───
+# Role: metallb_lan_route. Macs add a matching static route (mac_workstation).
+# Exposes the whole MetalLB pool to the home LAN — intentional for desktop-dev.
+metallb_lan_route_enabled: true
+metallb_lan_route_lan_cidr: "192.168.1.0/24"
+metallb_lan_route_bridge_cidr: "10.177.76.0/24"
+metallb_lan_route_additional_source_cidrs:
+  - "10.77.0.3/32"
+
+# ── Split-horizon dev DNS (was shared-k8s just dev-dns-* / configure_dev_dns.py) ─
+dev_dns_enabled: true
+dev_dns_lan_ip: "192.168.1.189"
+
 # --- Hermes agent — optional dotenv patch (playbooks/sync_hermes_ms02.yml; cutover --sync-hermes)
 # Set `hermes_agent_dotenv_path` to the env file Hermes loads on ms02 (must exist).
 # Example (adjust to your checkout):
@@ -36,7 +93,24 @@ firewall_trusted_lan_tcp_ports:
 hermes_agent_dotenv_path: ""
 hermes_agent_post_sync_command: ""
 
-# ── NFSv4 server — exports /home/casibbald/Workspace ──────────────────────
+# ── HF model cold-store (NFS export at /srv/hf-archive) ────────────────────
+# Sparks mount ms02:/srv/hf-archive at /mnt/ms02-hf-archive and hf-prefetch
+# downloads NFS-routed models (e.g. MiniMax-M3) straight to ms02 disk.
+# Kimi-K2.7-Code stays on GB10 local NVMe + QSFP peer sync.
+hf_archive_enabled: true
+hf_archive_lan_ip: "192.168.1.189"
+hf_archive_ssh_user: casibbald
+hf_archive_cache_dir: "/srv/hf-archive/hub"
+hf_archive_ssh_from: "192.168.1.104"
+
+nfs_server_export_paths:
+  - path: /srv/hf-archive
+    owner: casibbald
+    group: casibbald
+    mode: "0755"
+    hf_hub: true
+
+# ── NFSv4 server — exports ────────────────────────────────────────────────
 #   192.168.1.0/24  — the home LAN (picolino, etc.). Uses `insecure` so macOS
 #                     `noresvport` clients work; export still rw + all_squash.
 #                     (SSH-tunneled NFS / 127.0.0.1 export retired — LAN + firewall.)
@@ -62,8 +136,24 @@ nfs_server_exports:
       # without this, direct LAN mounts fail with "RPC prog not available" / access denied.
       - cidr: 192.168.1.0/24
         options: "rw,sync,no_subtree_check,sec=sys,insecure,all_squash,anonuid=1000,anongid=1000"
+      - cidr: 10.77.0.3/32
+        options: "rw,sync,no_subtree_check,sec=sys,insecure,all_squash,anonuid=1000,anongid=1000"
+  - path: /srv/hf-archive
+    clients:
+      # GB10 Sparks — hf-prefetch writes cold models here over NFS (MiniMax-M3, …).
+      - cidr: 192.168.1.104/32
+        options: "rw,sync,no_subtree_check,sec=sys,all_squash,anonuid=1000,anongid=1000"
+      - cidr: 192.168.1.229/32
+        options: "rw,sync,no_subtree_check,sec=sys,all_squash,anonuid=1000,anongid=1000"
 
 # ── Reverse SSH tunnel → Hostinger VPS (away-from-LAN access) ─────────────
 # See docs/ms02-reverse-tunnel.md and playbooks/ms02_reverse_tunnel.yml.
 ms02_reverse_tunnel_enabled: true
 ms02_reverse_tunnel_remote_port: 22002
+
+# ── FAR Multipass cluster (3 × nested-KVM guests for Firecracker) ───────────
+# See docs/far-multipass.md and `just far-multipass-up`.
+far_multipass_vm_count: 3
+far_multipass_vm_memory: 16G
+far_multipass_vm_cpus: 6
+far_multipass_vm_disk: 40G

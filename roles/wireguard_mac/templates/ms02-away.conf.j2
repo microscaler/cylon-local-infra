@@ -1,0 +1,11 @@
+[Interface]
+Address = {{ wireguard_mac_address }}
+PrivateKey = {{ wireguard_mac_private_key }}
+MTU = {{ wireguard_mac_mtu }}
+
+[Peer]
+# Hostinger rendezvous hub
+PublicKey = {{ wireguard_mac_hub_public_key }}
+Endpoint = {{ wireguard_mac_endpoint }}
+AllowedIPs = 10.77.0.0/24, 192.168.1.189/32, 10.177.76.0/24
+PersistentKeepalive = {{ wireguard_mac_persistent_keepalive }}

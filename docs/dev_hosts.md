@@ -8,7 +8,7 @@ Authoritative doc for the non-Spark developer workstation, currently **`ms02`**.
 | Ansible user | `root` |
 | Primary playbook | `playbooks/dev_hosts.yml` |
 | Secondary | `playbooks/docker_dev_engine.yml` |
-| Roles | `sudoers`, `docker`, `firewall`, `kind`, `dev_workstation` |
+| Roles | `sudoers`, `docker`, `firewall`, `metallb_lan_route`, `dev_dns`, `kind`, `dev_workstation`, `cursor_agent_worker` |
 
 ## Layout at a glance
 
@@ -110,6 +110,25 @@ Re-apply if it ever drifts:
 ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags dev_workstation
 ```
 
+### Reclaim Rust `target/` disk (`cargo-cleanup`)
+
+Large monorepos accumulate hundreds of GiB under `target/`. The
+`cargo-cleanup` helper (Python, installed to `~/bin` by `dev_workstation`)
+runs `cargo clean` once per top-level workspace using the full path to
+`~/.cargo/bin/cargo` so non-login shells work:
+
+```bash
+cargo-cleanup --dry-run              # preview (~202 GiB typical on ms02)
+cargo-cleanup                        # apply
+cargo-cleanup --root ~/Workspace/microscaler/cylon
+```
+
+Re-install after editing the script in this repo:
+
+```bash
+ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags dev_workstation
+```
+
 Agent forwarding (`ForwardAgent yes`) in your personal `Host ms02` stanza
 means `git push` from Cursor's remote terminal can use the Mac's SSH keys — no
 secrets copied to ms02 unless you choose otherwise.
@@ -183,6 +202,39 @@ firewall_trusted_lan_tcp_ports:
 ```
 
 On **ms02**, **`22`**, **`2049`**, and **`7000:12000`** are allowed from **`192.168.1.0/24`** (includes picolino on the home LAN). Re-apply after inventory edits: `ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags firewall`.
+
+### MetalLB / Multipass L3 forward
+
+Kind MetalLB VIPs live on `10.177.76.0/24` (Multipass `mpqemubr0`). Role
+`metallb_lan_route` (enabled in `inventory/host_vars/ms02.yml`) turns ms02 into
+the gateway for that subnet:
+
+- sysctl: `net.ipv4.ip_forward=1` + loose `rp_filter`
+- UFW: `DEFAULT_FORWARD_POLICY=ACCEPT` + route allow LAN ↔ bridge
+
+```bash
+# From ~/Workspace/local/cylon-local-infra on the Mac:
+just metallb-lan-route-ms02
+# Mac static route (LaunchDaemon):
+just metallb-lan-route-mac
+```
+
+See [`docs/desktop-dev-environment.md`](./desktop-dev-environment.md) § MetalLB LAN route.
+
+### Dev DNS (dnsmasq split-horizon)
+
+Role `dev_dns` (enabled on ms02) replaces ad-hoc
+`shared-k8s-cluster` `just dev-dns-*`:
+
+```bash
+just dev-dns-ms02    # unit + conf + resolved + firewall tags
+just mac-dev-dns     # Mac /etc/resolver/dev.microscaler.local
+```
+
+MetalLB A records live in `roles/dev_dns/defaults/main.yml`
+(`dev_dns_metallb_records`). LAN zone is a wildcard to `dev_dns_lan_ip`.
+
+Full audit: [`llmwiki/concepts/ms02-lan-edge-ansible.md`](../llmwiki/concepts/ms02-lan-edge-ansible.md).
 
 ### UFW vs firewalld (dual stack)
 

@@ -1,0 +1,20 @@
+---
+sunshine_remote_desktop_enabled: false
+sunshine_remote_desktop_user: casibbald
+sunshine_remote_desktop_uid: 1000
+
+# Pinned official release asset for reproducible installs.
+sunshine_remote_desktop_version: "v2026.516.143833"
+sunshine_remote_desktop_package_name: "sunshine-debian-trixie-amd64.deb"
+sunshine_remote_desktop_package_url: >-
+  https://github.com/LizardByte/Sunshine/releases/download/{{
+  sunshine_remote_desktop_version }}/{{ sunshine_remote_desktop_package_name }}
+sunshine_remote_desktop_package_checksum: >-
+  sha256:b9b65f2be93b3e30be0710a940a616b1381da5bc6d858dce33bc0094d7fd4131
+
+sunshine_remote_desktop_display: 10
+sunshine_remote_desktop_width: 2560
+sunshine_remote_desktop_height: 1440
+sunshine_remote_desktop_refresh_rate: 60
+sunshine_remote_desktop_dri_device: /dev/dri/renderD128
+sunshine_remote_desktop_mouse_accel_speed: -0.5

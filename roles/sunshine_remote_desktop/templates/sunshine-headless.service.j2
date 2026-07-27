@@ -1,0 +1,22 @@
+[Unit]
+Description=Sunshine host for the headless XFCE desktop
+Requires=sunshine-virtual-desktop.service
+After=sunshine-virtual-desktop.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ sunshine_remote_desktop_user }}
+Environment=HOME=/home/{{ sunshine_remote_desktop_user }}
+Environment=DISPLAY=:{{ sunshine_remote_desktop_display }}
+Environment=XDG_SESSION_TYPE=x11
+Environment=XDG_RUNTIME_DIR=/run/user/{{ sunshine_remote_desktop_uid }}
+Environment=PULSE_SERVER=unix:/run/user/{{ sunshine_remote_desktop_uid }}/pulse/native
+WorkingDirectory=/home/{{ sunshine_remote_desktop_user }}
+ExecStartPre=/usr/bin/sleep 5
+ExecStart=/usr/bin/sunshine /home/{{ sunshine_remote_desktop_user }}/.config/sunshine/sunshine.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

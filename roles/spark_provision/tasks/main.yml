@@ -92,6 +92,20 @@
   tags: [spark, cuda]
   when: spark_provision_cuda_toolkit | default(false) | bool
 
+- name: Phase — NFS client for ms02 HF cold-store (MiniMax archive, etc.)
+  ansible.builtin.include_role:
+    name: spark_nfs_client
+    apply:
+      tags:
+        - spark
+        - hf
+        - hf_nfs
+        - nfs_client
+  tags: [spark, hf, hf_nfs, nfs_client]
+  when:
+    - spark_provision_hf | default(false) | bool
+    - spark_hf_nfs_enabled | default(false) | bool
+
 - name: Phase — Hugging Face prefetch daemon (leader-only; downloads once, rsyncs to peers)
   ansible.builtin.include_role:
     name: hf_prefetch_service

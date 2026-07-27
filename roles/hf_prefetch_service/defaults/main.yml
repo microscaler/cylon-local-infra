@@ -46,3 +46,12 @@ hf_prefetch_start: true
 # daemon simply runs in the background as the user requested.
 hf_prefetch_wait_for_ready: false
 hf_prefetch_wait_timeout_sec: 7200
+
+# Optional LAN archive targets (e.g. ms02). The leader rsyncs each model to
+# these after download, same as Spark peer sync but over the home LAN.
+# Enable with hf_prefetch_archive_enabled: true in inventory/group_vars/sparks.yml
+# and host vars on ms02 (see playbooks/hf_prefetch_archive_ms02.yml).
+hf_prefetch_archive_enabled: false
+# Extra sync_targets entries appended after Spark peers. Usually leave empty and
+# let the template derive ms02 from hostvars when archive is enabled.
+hf_prefetch_archive_targets: []

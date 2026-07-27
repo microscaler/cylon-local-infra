@@ -1,0 +1,11 @@
+---
+- name: Restart Sunshine remote desktop
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: restarted
+    daemon_reload: true
+  loop:
+    - sunshine-virtual-xorg.service
+    - sunshine-virtual-desktop.service
+    - sunshine-headless.service
+  when: not ansible_check_mode

@@ -14,6 +14,17 @@ firewall_allow_tcp_ports: [22, 80, 8080, 5000, 5001, 10350]
 firewall_trusted_lan_cidr: ""
 # Ports to open to trusted LAN only (used when firewall_trusted_lan_cidr is set). Integers or Jinja ints.
 firewall_trusted_lan_tcp_ports: []
+# UDP ports from trusted LAN (e.g. DNS :53 for microscaler-dev-dns).
+firewall_trusted_lan_udp_ports: []
+# Optional richer LAN rules: {port, proto, comment}. Applied after the simple lists.
+# Example: {port: 53, proto: udp, comment: "Microscaler dev DNS (dnsmasq)"}
+firewall_trusted_lan_rules: []
+# Optional routed WireGuard peer access. Kept separate from the LAN policy so
+# the remote Mac can be narrowed to a single mesh /32.
+firewall_trusted_vpn_cidr: ""
+firewall_trusted_vpn_tcp_ports: []
+firewall_trusted_vpn_udp_ports: []
+firewall_trusted_vpn_rules: []
 # Spark QSFP interconnect (link-local): allow inbound from this CIDR for Ray/vLLM node-to-node traffic.
 # Ray uses many dynamic TCP ports (not only 6379 / worker range). Empty = skip.
 firewall_spark_interconnect_cidr: ""

@@ -119,14 +119,42 @@ def require_tool(name: str) -> None:
 class ModelEntry:
     repo: str
     revision: str | None = None
+    cache_dir: Path | None = None
+    sync_targets: list[SyncTarget] | None = None
 
     @classmethod
     def parse(cls, raw: Any) -> "ModelEntry":
         if isinstance(raw, str):
             return cls(repo=raw)
         if isinstance(raw, dict) and "repo" in raw:
-            return cls(repo=str(raw["repo"]), revision=raw.get("revision"))
+            cache_dir = Path(raw["cache_dir"]) if raw.get("cache_dir") else None
+            sync_targets: list[SyncTarget] | None = None
+            if "sync_targets" in raw:
+                sync_targets = [
+                    SyncTarget(
+                        host=str(t["host"]),
+                        user=str(t.get("user", "nvidia")),
+                        cache_dir=str(t.get("cache_dir", "/home/nvidia/.cache/huggingface/hub")),
+                        name=t.get("name"),
+                    )
+                    for t in (raw.get("sync_targets") or [])
+                    if isinstance(t, dict) and t.get("host")
+                ]
+            return cls(
+                repo=str(raw["repo"]),
+                revision=raw.get("revision"),
+                cache_dir=cache_dir,
+                sync_targets=sync_targets,
+            )
         raise ValueError(f"invalid model entry: {raw!r}")
+
+    def effective_cache_dir(self, default: Path) -> Path:
+        return self.cache_dir or default
+
+    def effective_sync_targets(self, default: list[SyncTarget]) -> list[SyncTarget]:
+        if self.sync_targets is not None:
+            return self.sync_targets
+        return default
 
 
 @dataclass
@@ -378,7 +406,8 @@ def _container_name(repo: str) -> str:
 
 
 def hf_download(runner: Runner, cfg: Config, entry: ModelEntry,
-                state: StateStore | None = None) -> int:
+                state: StateStore | None = None,
+                cache_dir: Path | None = None) -> int:
     """Launch `hf download <repo>` inside the NGC image. Resumes on partials.
     Any leftover container from a prior crashed run is removed first so the
     fixed --name doesn't collide.
@@ -387,9 +416,10 @@ def hf_download(runner: Runner, cfg: Config, entry: ModelEntry,
     ``state.models[repo].cache_bytes`` every ``PROGRESS_INTERVAL_SEC`` seconds
     so operators polling ``state.json`` see live progress instead of a number
     frozen at ``0`` until the process exits."""
-    # cache_dir is the `hub` dir; mount its parent so the container sees
+    hub_dir = cache_dir or cfg.cache_dir
+    # hub_dir is the `hub` dir; mount its parent so the container sees
     # /root/.cache/huggingface{hub,xet,...} and hf-xet can use its staging area.
-    host_hf_home = cfg.cache_dir.parent
+    host_hf_home = hub_dir.parent
     name = _container_name(entry.repo)
 
     # Idempotent pre-clean. Swallow exit code — absence-of-container is fine.
@@ -418,7 +448,7 @@ def hf_download(runner: Runner, cfg: Config, entry: ModelEntry,
         last_bytes = -1
         while not stop_heartbeat.is_set():
             try:
-                cur = cache_size_bytes(cfg.cache_dir, entry.repo)
+                cur = cache_size_bytes(hub_dir, entry.repo)
             except Exception as exc:
                 log.debug("progress heartbeat stat failed: %s", exc)
                 cur = last_bytes
@@ -448,15 +478,15 @@ def hf_download(runner: Runner, cfg: Config, entry: ModelEntry,
         # Final on-disk size reading after the process has exited.
         if state is not None:
             try:
-                state.set(entry.repo, cache_bytes=cache_size_bytes(cfg.cache_dir, entry.repo))
+                state.set(entry.repo, cache_bytes=cache_size_bytes(hub_dir, entry.repo))
             except Exception:
                 pass
 
 
-def rsync_to_peer(runner: Runner, cfg: Config, repo: str, target: SyncTarget) -> int:
+def rsync_to_peer(runner: Runner, cache_dir: Path, repo: str, target: SyncTarget) -> int:
     """rsync the repo's hub subtree from this host to a peer. ``-a`` preserves
     the HF cache layout (symlinks inside ``snapshots/`` → ``blobs/``)."""
-    src = str(cfg.cache_dir / repo_to_cache_dirname(repo)) + "/"
+    src = str(cache_dir / repo_to_cache_dirname(repo)) + "/"
     dest = f"{target.user}@{target.host}:{target.cache_dir}/{repo_to_cache_dirname(repo)}/"
     ssh_opts = (
         "ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
@@ -519,8 +549,10 @@ def reconcile_once(
 
         repo = entry.repo
         now = time.time()
+        hub_dir = entry.effective_cache_dir(cfg.cache_dir)
+        sync_targets = entry.effective_sync_targets(cfg.sync_targets)
 
-        ok, reason = cache_status(cfg.cache_dir, repo)
+        ok, reason = cache_status(hub_dir, repo)
         cur_state = state.get(repo).get("status")
 
         if ok and cur_state == STATE_READY:
@@ -533,7 +565,7 @@ def reconcile_once(
             # Cache missing or incomplete → download (or resume).
             if not backoff.ready(repo, now):
                 continue
-            size_before = cache_size_bytes(cfg.cache_dir, repo)
+            size_before = cache_size_bytes(hub_dir, repo)
             state.set(
                 repo,
                 status=STATE_DOWNLOADING,
@@ -541,7 +573,7 @@ def reconcile_once(
                 cache_bytes=size_before,
                 image=cfg.image,
             )
-            rc = hf_download(runner, cfg, entry, state=state)
+            rc = hf_download(runner, cfg, entry, state=state, cache_dir=hub_dir)
             if stop_event.is_set():
                 return
             if rc != 0:
@@ -553,7 +585,7 @@ def reconcile_once(
                     failures=backoff.failures.get(repo, 0),
                 )
                 continue
-            ok, reason = cache_status(cfg.cache_dir, repo)
+            ok, reason = cache_status(hub_dir, repo)
             if not ok:
                 backoff.fail(repo, now)
                 state.set(
@@ -566,16 +598,28 @@ def reconcile_once(
 
         # --- sync phase --------------------------------------------------- #
         sync_ok = True
-        for target in cfg.sync_targets:
+        if not sync_targets:
+            backoff.succeed(repo)
+            state.set(
+                repo,
+                status=STATE_READY,
+                reason="cached (no sync targets)" if hub_dir != cfg.cache_dir else "cached + synced",
+                cache_bytes=cache_size_bytes(hub_dir, repo),
+                failures=0,
+            )
+            log.info("%s READY (%s on disk)", repo, human_size(cache_size_bytes(hub_dir, repo)))
+            continue
+
+        for target in sync_targets:
             if stop_event.is_set():
                 return
             state.set(
                 repo,
                 status=STATE_SYNCING,
                 reason=f"rsync → {target.label}",
-                cache_bytes=cache_size_bytes(cfg.cache_dir, repo),
+                cache_bytes=cache_size_bytes(hub_dir, repo),
             )
-            rc = rsync_to_peer(runner, cfg, repo, target)
+            rc = rsync_to_peer(runner, hub_dir, repo, target)
             if stop_event.is_set():
                 return
             if rc != 0:
@@ -594,11 +638,11 @@ def reconcile_once(
             state.set(
                 repo,
                 status=STATE_READY,
-                reason="cached + synced" if cfg.sync_targets else "cached (no peers configured)",
-                cache_bytes=cache_size_bytes(cfg.cache_dir, repo),
+                reason="cached + synced" if sync_targets else "cached (no peers configured)",
+                cache_bytes=cache_size_bytes(hub_dir, repo),
                 failures=0,
             )
-            log.info("%s READY (%s on disk)", repo, human_size(cache_size_bytes(cfg.cache_dir, repo)))
+            log.info("%s READY (%s on disk)", repo, human_size(cache_size_bytes(hub_dir, repo)))
 
 
 # --------------------------------------------------------------------------- #

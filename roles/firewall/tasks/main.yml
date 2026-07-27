@@ -45,6 +45,110 @@
       changed_when: false
       failed_when: false
 
+    - name: Allow inbound UDP from trusted LAN CIDR
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - allow
+          - from
+          - "{{ firewall_trusted_lan_cidr }}"
+          - to
+          - any
+          - port
+          - "{{ item | string }}"
+          - proto
+          - udp
+      loop: "{{ firewall_trusted_lan_udp_ports }}"
+      when:
+        - firewall_trusted_lan_cidr | default('') | length > 0
+        - firewall_trusted_lan_udp_ports | default([]) | length > 0
+      changed_when: false
+      failed_when: false
+
+    - name: Allow inbound from trusted LAN with comments (DNS / haproxy / k8s API)
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - allow
+          - from
+          - "{{ firewall_trusted_lan_cidr }}"
+          - to
+          - any
+          - port
+          - "{{ item.port | string }}"
+          - proto
+          - "{{ item.proto }}"
+          - comment
+          - "{{ item.comment }}"
+      loop: "{{ firewall_trusted_lan_rules }}"
+      when:
+        - firewall_trusted_lan_cidr | default('') | length > 0
+        - firewall_trusted_lan_rules | default([]) | length > 0
+      changed_when: false
+      failed_when: false
+
+    - name: Allow inbound TCP from trusted WireGuard peer
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - allow
+          - from
+          - "{{ firewall_trusted_vpn_cidr }}"
+          - to
+          - any
+          - port
+          - "{{ item | string }}"
+          - proto
+          - tcp
+      loop: "{{ firewall_trusted_vpn_tcp_ports }}"
+      when:
+        - firewall_trusted_vpn_cidr | default('') | length > 0
+        - firewall_trusted_vpn_tcp_ports | default([]) | length > 0
+      changed_when: false
+      failed_when: false
+
+    - name: Allow inbound UDP from trusted WireGuard peer
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - allow
+          - from
+          - "{{ firewall_trusted_vpn_cidr }}"
+          - to
+          - any
+          - port
+          - "{{ item | string }}"
+          - proto
+          - udp
+      loop: "{{ firewall_trusted_vpn_udp_ports }}"
+      when:
+        - firewall_trusted_vpn_cidr | default('') | length > 0
+        - firewall_trusted_vpn_udp_ports | default([]) | length > 0
+      changed_when: false
+      failed_when: false
+
+    - name: Allow named services from trusted WireGuard peer
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - allow
+          - from
+          - "{{ firewall_trusted_vpn_cidr }}"
+          - to
+          - any
+          - port
+          - "{{ item.port | string }}"
+          - proto
+          - "{{ item.proto }}"
+          - comment
+          - "{{ item.comment }}"
+      loop: "{{ firewall_trusted_vpn_rules }}"
+      when:
+        - firewall_trusted_vpn_cidr | default('') | length > 0
+        - firewall_trusted_vpn_rules | default([]) | length > 0
+      changed_when: false
+      failed_when: false
+
     # Superseded rule from earlier iterations (narrow TCP range); full interconnect allow below replaces it.
     - name: Remove legacy ufw rule (interconnect TCP 10000:61000) if present
       ansible.builtin.command:

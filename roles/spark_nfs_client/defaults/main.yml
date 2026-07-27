@@ -1,0 +1,14 @@
+---
+# NFS client on Sparks — mount ms02 HF cold-store for models too large to
+# replicate on every GB10's local NVMe.
+
+spark_hf_nfs_enabled: true
+spark_hf_nfs_server: "{{ hostvars['ms02'].hf_archive_lan_ip | default('192.168.1.189') }}"
+spark_hf_nfs_export: /srv/hf-archive
+spark_hf_nfs_mount: /mnt/ms02-hf-archive
+spark_hf_nfs_mount_options: "rw,nfsvers=4.1,hard,timeo=600,retrans=2,_netdev"
+spark_hf_nfs_run_user: "{{ spark_runtime_user | default('nvidia') }}"
+spark_hf_nfs_run_group: "{{ spark_runtime_user | default('nvidia') }}"
+
+spark_hf_nfs_apt_packages:
+  - nfs-common

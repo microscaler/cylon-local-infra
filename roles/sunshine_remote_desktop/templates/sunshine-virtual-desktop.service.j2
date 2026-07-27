@@ -1,0 +1,19 @@
+[Unit]
+Description=Headless XFCE desktop for Sunshine
+Requires=sunshine-virtual-xorg.service
+After=sunshine-virtual-xorg.service
+
+[Service]
+Type=simple
+User={{ sunshine_remote_desktop_user }}
+PAMName=login
+Environment=HOME=/home/{{ sunshine_remote_desktop_user }}
+Environment=DISPLAY=:{{ sunshine_remote_desktop_display }}
+Environment=XDG_SESSION_TYPE=x11
+Environment=XDG_RUNTIME_DIR=/run/user/{{ sunshine_remote_desktop_uid }}
+ExecStart=/usr/bin/dbus-run-session -- /usr/bin/xfce4-session
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

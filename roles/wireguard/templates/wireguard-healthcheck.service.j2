@@ -1,0 +1,12 @@
+[Unit]
+Description=Repair stale WireGuard peer on {{ wireguard_interface }}
+After=network-online.target wg-quick@{{ wireguard_interface }}.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ wireguard_healthcheck_executable }} \
+  --interface {{ wireguard_interface }} \
+  --peer-key {{ wireguard_healthcheck_peer_public_key }} \
+  --max-age {{ wireguard_healthcheck_max_age_seconds }} \
+  --unit wg-quick@{{ wireguard_interface }}.service

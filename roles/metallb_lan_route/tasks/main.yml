@@ -1,0 +1,117 @@
+---
+# Enable L3 forwarding between home LAN and Multipass/MetalLB bridge.
+# Tags: metallb_lan_route, network, firewall (subset)
+
+- name: MetalLB LAN route (ms02 as gateway)
+  when: metallb_lan_route_enabled | default(false) | bool
+  tags: [metallb_lan_route, network, firewall]
+  block:
+    - name: Persist IPv4 forwarding + loose rp_filter for bridge routing
+      ansible.builtin.copy:
+        dest: "{{ metallb_lan_route_sysctl_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by cylon-local-infra role metallb_lan_route
+          # Mac → 10.177.76.0/24 via ms02 LAN IP; return via Multipass default gw (.1)
+          net.ipv4.ip_forward = 1
+          net.ipv4.conf.all.forwarding = 1
+          net.ipv4.conf.default.forwarding = 1
+          net.ipv4.conf.all.rp_filter = {{ metallb_lan_route_rp_filter }}
+          net.ipv4.conf.default.rp_filter = {{ metallb_lan_route_rp_filter }}
+
+    - name: Apply metallb LAN route sysctl immediately
+      ansible.builtin.command:
+        argv:
+          - sysctl
+          - --system
+      changed_when: true
+
+    - name: Ensure UFW DEFAULT_FORWARD_POLICY is ACCEPT
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: "^DEFAULT_FORWARD_POLICY="
+        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+        backup: true
+
+    - name: Ensure ufw is installed
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: true
+
+    - name: Allow UFW routed traffic LAN → MetalLB bridge
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - route
+          - allow
+          - from
+          - "{{ metallb_lan_route_lan_cidr }}"
+          - to
+          - "{{ metallb_lan_route_bridge_cidr }}"
+          - comment
+          - "Microscaler Mac→MetalLB bridge"
+      changed_when: false
+      failed_when: false
+
+    - name: Allow UFW routed traffic MetalLB bridge → LAN (return path)
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - route
+          - allow
+          - from
+          - "{{ metallb_lan_route_bridge_cidr }}"
+          - to
+          - "{{ metallb_lan_route_lan_cidr }}"
+          - comment
+          - "Microscaler MetalLB→Mac return"
+      changed_when: false
+      failed_when: false
+
+    - name: Allow additional routed sources to MetalLB bridge
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - route
+          - allow
+          - from
+          - "{{ item }}"
+          - to
+          - "{{ metallb_lan_route_bridge_cidr }}"
+          - comment
+          - "Microscaler VPN→MetalLB bridge"
+      loop: "{{ metallb_lan_route_additional_source_cidrs }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Allow MetalLB bridge return traffic to additional routed sources
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - route
+          - allow
+          - from
+          - "{{ metallb_lan_route_bridge_cidr }}"
+          - to
+          - "{{ item }}"
+          - comment
+          - "Microscaler MetalLB→VPN return"
+      loop: "{{ metallb_lan_route_additional_source_cidrs }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Reload UFW to pick up forward policy
+      ansible.builtin.command: ufw reload
+      changed_when: false
+      failed_when: false
+
+    - name: Summarize MetalLB LAN route
+      ansible.builtin.debug:
+        msg:
+          - "ip_forward enabled via {{ metallb_lan_route_sysctl_file }}"
+          - "UFW route {{ metallb_lan_route_lan_cidr }} ↔ {{ metallb_lan_route_bridge_cidr }}"
+          - "Macs need: route add -net {{ metallb_lan_route_bridge_cidr }} <ms02_lan_ip>"
+          - "Apply Mac side: ansible-playbook playbooks/mac_workstation.yml --tags metallb_route"

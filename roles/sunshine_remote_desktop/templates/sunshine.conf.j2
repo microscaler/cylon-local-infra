@@ -1,0 +1,11 @@
+# Managed by Ansible. Credentials and paired clients remain in Sunshine's
+# separate state files under this directory.
+capture = x11
+encoder = vaapi
+adapter_name = {{ sunshine_remote_desktop_dri_device }}
+output_name = 0
+
+address_family = ipv4
+upnp = disabled
+origin_web_ui_allowed = lan
+csrf_allowed_origins = https://10.77.0.2:47990

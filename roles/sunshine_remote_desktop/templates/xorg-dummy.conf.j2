@@ -1,0 +1,44 @@
+Section "ServerFlags"
+    Option "AutoAddDevices" "true"
+    Option "DontVTSwitch" "true"
+EndSection
+
+Section "Device"
+    Identifier "SunshineDummyDevice"
+    Driver "dummy"
+    VideoRam 256000
+EndSection
+
+Section "Monitor"
+    Identifier "SunshineDummyMonitor"
+    HorizSync 5.0-1000.0
+    VertRefresh 5.0-200.0
+    Option "ReducedBlanking" "true"
+    Modeline "{{ sunshine_remote_desktop_width }}x{{ sunshine_remote_desktop_height }}_{{ sunshine_remote_desktop_refresh_rate }}.00" 241.50 2560 2608 2640 2720 1440 1443 1448 1481 +HSync -VSync
+    Option "PreferredMode" "{{ sunshine_remote_desktop_width }}x{{ sunshine_remote_desktop_height }}_{{ sunshine_remote_desktop_refresh_rate }}.00"
+EndSection
+
+Section "Screen"
+    Identifier "SunshineDummyScreen"
+    Device "SunshineDummyDevice"
+    Monitor "SunshineDummyMonitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Modes "{{ sunshine_remote_desktop_width }}x{{ sunshine_remote_desktop_height }}_{{ sunshine_remote_desktop_refresh_rate }}.00"
+        Virtual {{ sunshine_remote_desktop_width }} {{ sunshine_remote_desktop_height }}
+    EndSubSection
+EndSection
+
+Section "ServerLayout"
+    Identifier "SunshineDummyLayout"
+    Screen "SunshineDummyScreen"
+EndSection
+
+Section "InputClass"
+    Identifier "SunshineMouseSpeed"
+    MatchProduct "Mouse passthrough"
+    MatchDriver "libinput"
+    MatchIsPointer "on"
+    Option "AccelSpeed" "{{ sunshine_remote_desktop_mouse_accel_speed }}"
+EndSection

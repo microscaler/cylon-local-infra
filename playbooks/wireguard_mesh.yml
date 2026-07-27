@@ -1,0 +1,94 @@
+---
+# Self-hosted routed VPN:
+#   picolino (10.77.0.3, on demand)
+#       ↕
+#   Hostinger VPS (10.77.0.1, always on)
+#       ↕
+#   ms02 (10.77.0.2, always on)
+#
+# Reverse SSH remains enabled independently as the break-glass path.
+
+- name: Bootstrap Mac WireGuard key
+  hosts: macs
+  gather_facts: true
+  roles:
+    - role: mac_sudoers
+      tags: [wireguard, wireguard_mac, sudoers]
+    - role: wireguard_mac
+      wireguard_mac_configure: false
+  tags: [wireguard, wireguard_keys, wireguard_mac]
+
+- name: Bootstrap WireGuard keys
+  hosts: wireguard_linux_nodes
+  gather_facts: true
+  roles:
+    - role: wireguard
+      wireguard_configure: false
+  tags: [wireguard, wireguard_keys]
+
+- name: Configure Hostinger WireGuard hub
+  hosts: tunnel_hubs
+  gather_facts: true
+  vars:
+    wireguard_address: "{{ wireguard_hub_address }}"
+    wireguard_enable_ip_forward: true
+    wireguard_forward_between_peers: true
+    wireguard_manage_ufw_rule: true
+    wireguard_healthcheck_peer_public_key: >-
+      {{ hostvars['ms02']['wireguard_public_key'] }}
+    wireguard_peers:
+      - name: ms02
+        public_key: "{{ hostvars['ms02']['wireguard_public_key'] }}"
+        allowed_ips: "{{ wireguard_ms02_advertised_routes }}"
+      - name: picolino
+        public_key: "{{ hostvars['picolino']['wireguard_mac_public_key'] }}"
+        allowed_ips:
+          - "{{ wireguard_mac_address }}"
+  roles:
+    - role: wireguard
+  tags: [wireguard, wireguard_hub]
+
+- name: Configure ms02 WireGuard peer
+  hosts: dev_hosts
+  gather_facts: true
+  vars:
+    wireguard_address: "{{ wireguard_ms02_address }}"
+    wireguard_enable_ip_forward: true
+    wireguard_manage_ufw_rule: false
+    wireguard_healthcheck_peer_public_key: >-
+      {{ hostvars['srv1719193']['wireguard_public_key'] }}
+    wireguard_peers:
+      - name: hostinger-hub
+        public_key: "{{ hostvars['srv1719193']['wireguard_public_key'] }}"
+        endpoint: >-
+          {{ wireguard_hub_endpoint }}:{{ wireguard_listen_port }}
+        allowed_ips:
+          - "{{ wireguard_mesh_cidr }}"
+        persistent_keepalive: "{{ wireguard_persistent_keepalive }}"
+  roles:
+    - role: wireguard
+  tags: [wireguard, wireguard_ms02]
+
+- name: Permit Mac VPN access to ms02 services and MetalLB
+  hosts: dev_hosts
+  gather_facts: true
+  roles:
+    - role: firewall
+      tags: [wireguard, wireguard_policy, firewall]
+    - role: metallb_lan_route
+      tags: [wireguard, wireguard_policy, metallb_lan_route]
+    - role: nfs_server
+      tags: [wireguard, wireguard_policy, nfs, nfs_server]
+  tags: [wireguard, wireguard_policy]
+
+- name: Configure on-demand Mac WireGuard peer
+  hosts: macs
+  gather_facts: true
+  vars:
+    wireguard_mac_hub_public_key: >-
+      {{ hostvars['srv1719193']['wireguard_public_key'] }}
+    wireguard_mac_endpoint: >-
+      {{ wireguard_hub_endpoint }}:{{ wireguard_listen_port }}
+  roles:
+    - role: wireguard_mac
+  tags: [wireguard, wireguard_mac]

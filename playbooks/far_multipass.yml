@@ -1,0 +1,19 @@
+---
+# Launch / reconcile the FAR Multipass cluster on ms02 (3 × 16 GiB nested-KVM guests).
+#
+# Usage (from cylon-local-infra on the Mac — Ansible targets ms02 as root):
+#
+#   ansible-playbook playbooks/far_multipass.yml
+#   ansible-playbook playbooks/far_multipass.yml -l ms02
+#
+#   # Skip RAM gate when ms02 is tight but operator accepts the risk:
+#   ansible-playbook playbooks/far_multipass.yml -e far_multipass_skip_ram_check=true
+#
+# Operator surface: `just far-multipass-up` (wraps this playbook + status).
+# See docs/far-multipass.md.
+
+- name: FAR Multipass cluster on dev hosts
+  hosts: dev_hosts
+  roles:
+    - role: far_multipass
+      tags: [far_multipass, far, multipass, cylon]

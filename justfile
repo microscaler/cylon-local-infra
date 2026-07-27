@@ -41,6 +41,53 @@ ms02-reverse-tunnel-status:
     echo "=== end-to-end SSH probe ==="
     ssh -o ConnectTimeout=8 -o BatchMode=yes -p "${PORT}" casibbald@"${VPS}" 'hostname; whoami' 2>&1 || echo "probe failed (tunnel down or ms02 unreachable)"
 
+# ── Routed WireGuard mesh (Hostinger ↔ ms02 + on-demand Mac) ─────────────
+# Reverse SSH remains the independent break-glass path.
+
+wireguard-linux-up:
+    ansible-playbook playbooks/wireguard_mesh.yml --ask-become-pass
+
+wireguard-linux-check:
+    ansible-playbook playbooks/wireguard_mesh.yml --check --diff --ask-become-pass
+
+wireguard-linux-status:
+    ansible wireguard_linux_nodes -b -m command -a "wg show wg0"
+    ansible wireguard_linux_nodes -b -m command -a "systemctl is-active wg-quick@wg0.service"
+    ansible wireguard_linux_nodes -b -m command -a "systemctl is-active wireguard-healthcheck-wg0.timer"
+
+wireguard-mesh-up:
+    ansible-playbook playbooks/wireguard_mesh.yml --ask-become-pass
+
+wireguard-mesh-check:
+    ansible-playbook playbooks/wireguard_mesh.yml --check --diff --ask-become-pass
+
+wireguard-mac-up:
+    sudo /usr/local/bin/microscaler-wireguard up
+
+wireguard-mac-down:
+    sudo /usr/local/bin/microscaler-wireguard down
+
+wireguard-mac-status:
+    sudo /usr/local/bin/microscaler-wireguard status
+
+# ── Sunshine/Moonlight desktop (WireGuard-only → ms02) ────────────────────
+
+sunshine-up:
+    ansible-playbook playbooks/sunshine_remote_desktop.yml
+
+sunshine-check:
+    ansible-playbook playbooks/sunshine_remote_desktop.yml --check --diff
+
+sunshine-status:
+    ssh ms02 'systemctl is-active sunshine-virtual-xorg sunshine-virtual-desktop sunshine-headless'
+    ssh ms02 'systemctl --no-pager -l status sunshine-headless'
+
+sunshine-logs:
+    ssh ms02 'journalctl -u sunshine-virtual-xorg -u sunshine-virtual-desktop -u sunshine-headless --no-pager -n 100'
+
+sunshine-web:
+    open https://10.77.0.2:47990
+
 # ── ms02 LAN reachability (HTTP probes; no SSH tunnel) ─────────────────────
 
 # HTTP-probe common ms02 services on the LAN. Green (2xx/3xx) = reachable; '000' = blocked or down.
@@ -474,6 +521,39 @@ mac-sudoers:
 mac-sudoers-check:
     ansible-playbook playbooks/mac_workstation.yml --tags sudoers --check --diff --ask-become-pass
 
+# ── MetalLB / Multipass L3 route (Mac ↔ 10.177.76.0/24 via ms02) ───────────
+#
+# ms02 forwards between home LAN (192.168.1.0/24) and Multipass bridge
+# (mpqemubr0 / MetalLB pool). Mac installs a persistent static route.
+# Pair: role metallb_lan_route (dev_hosts) + mac_workstation --tags metallb_route.
+# Docs: docs/desktop-dev-environment.md § MetalLB LAN route
+
+# Apply ip_forward + UFW FORWARD on ms02 only.
+metallb-lan-route-ms02:
+    ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags metallb_lan_route
+
+# Apply Mac static route + LaunchDaemon (needs sudo once).
+metallb-lan-route-mac:
+    ansible-playbook playbooks/mac_workstation.yml --tags metallb_route,sudoers --ask-become-pass
+
+# Both sides (ms02 then Mac).
+metallb-lan-route: metallb-lan-route-ms02 metallb-lan-route-mac
+
+# ── Dev DNS (*.dev.microscaler.local → ms02 dnsmasq; was shared-k8s just) ───
+#
+# ms02: role dev_dns (microscaler-dev-dns.service + resolved drop-in).
+# Mac:  /etc/resolver/dev.microscaler.local → 192.168.1.189
+# Docs: docs/desktop-dev-environment.md § Dev DNS / LAN edge
+
+dev-dns-ms02:
+    ansible-playbook playbooks/dev_hosts.yml -l ms02 --tags dev_dns,firewall
+
+mac-dev-dns:
+    ansible-playbook playbooks/mac_workstation.yml --tags mac_dev_dns --ask-become-pass
+
+# ms02 DNS + Mac resolver (Mac still needs sudo password).
+dev-dns: dev-dns-ms02 mac-dev-dns
+
 # Provision the NFS server on ms02. Safe to re-run.
 nfs-server-provision:
     ansible-playbook playbooks/nfs_server.yml -l ms02
@@ -657,6 +737,22 @@ spark-hermes-sync *args:
     set -euo pipefail
     cd '{{ justfile_directory() }}'
     python3 scripts/spark_model_status.py sync-hermes "$@"
+
+# Wire hf-prefetch leader → ms02 LAN archive (SSH, cache dir, config, bootstrap rsync).
+# See docs/hf-cache-ms02-archive.md and playbooks/hf_prefetch_archive_ms02.yml.
+hf-prefetch-archive-up *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/hf_prefetch_archive_ms02.yml "$@"
+
+# ms02 NFS cold-store + Spark mounts + hf-prefetch routing (Kimi local, MiniMax NFS).
+# See docs/hf-cache-split-storage.md and playbooks/spark_hf_nfs.yml.
+spark-hf-nfs-up *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/spark_hf_nfs.yml "$@"
 
 # SSH to leader: docker, ports, ray status, vllm-serve.log, /v1/models, /metrics (see docs/provision_sparks.md).
 spark-stack-observe *args:
@@ -1183,4 +1279,67 @@ spark-vllm-logs-serve:
          else
            echo 'No ${log} yet (created when stack starts via provision)';
          fi
-       \""
+       }\""
+
+# ── Resurrection nodes (Multipass — cylon-daemon + nested Firecracker) ───────
+# See docs/far-multipass.md · image source: cylon-images/multipass/
+
+resurrection_nodes := "resurrection-node-1 resurrection-node-2 resurrection-node-3"
+
+# Launch or reconcile resurrection-node-{1,2,3} on ms02 (clone from resurrection-node-base).
+resurrection-nodes-up SKIP_RAM="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    extra=()
+    if [[ "${SKIP_RAM}" == "1" ]]; then
+      extra+=(-e far_multipass_skip_ram_check=true)
+    fi
+    ansible-playbook playbooks/far_multipass.yml -l ms02 "${extra[@]}"
+    just resurrection-nodes-status
+
+# Destroy worker nodes + base on ms02.
+resurrection-nodes-down:
+    ssh ms02 'for n in resurrection-node-base resurrection-node-1 resurrection-node-2 resurrection-node-3 far-node-1 far-node-2 far-node-3; do multipass delete "$n" --purge 2>/dev/null || true; done'
+    @echo "Resurrection Multipass cluster removed."
+
+resurrection-nodes-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== ms02 host memory ==="
+    ssh ms02 'free -h | head -2'
+    echo
+    echo "=== Multipass instances ==="
+    ssh ms02 'multipass list'
+    echo
+    for n in {{resurrection_nodes}}; do
+      if ssh ms02 "multipass info ${n} &>/dev/null"; then
+        ip=$(ssh ms02 "multipass info ${n} | awk '/IPv4/ {print \$2; exit}'")
+        echo "--- ${n} (${ip}) ---"
+        ssh ms02 "multipass exec ${n} -- bash -lc 'test -c /dev/kvm && echo kvm:ok; firecracker --version 2>/dev/null | head -1 || echo firecracker:missing'"
+      else
+        echo "--- ${n} (not provisioned) ---"
+      fi
+    done
+
+resurrection-nodes-shell N:
+    ssh ms02 "multipass shell resurrection-node-{{N}}"
+
+resurrection-nodes-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for n in {{resurrection_nodes}}; do
+      echo "=== building cylon in ${n} ==="
+      ssh ms02 "multipass exec ${n} -- sudo -i -u cylon bash -lc 'source ~/.cargo/env && cd /opt && CARGO_TARGET_DIR=\$HOME/target cargo build --release -p cylon'"
+    done
+
+resurrection-nodes-bridge:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    declare -A ports=( [resurrection-node-1]=50052 [resurrection-node-2]=50053 [resurrection-node-3]=50054 )
+    for vm in {{resurrection_nodes}}; do
+      host_port="${ports[$vm]}"
+      ip=$(ssh ms02 "multipass info ${vm} | awk '/IPv4/ {print \$2; exit}'")
+      ssh ms02 "docker rm -f cylon-bridge-${host_port} 2>/dev/null || true"
+      ssh ms02 "docker run --rm -d --name cylon-bridge-${host_port} -p ${host_port}:50051 alpine/socat tcp-listen:50051,fork,reuseaddr tcp:${ip}:50051"
+      echo "ms02:${host_port} → ${vm} (${ip}:50051)"
+    done

@@ -1,0 +1,29 @@
+---
+# On-demand macOS peer for the self-hosted WireGuard mesh.
+
+wireguard_mac_configure: true
+wireguard_mac_homebrew_bin: /opt/homebrew/bin
+wireguard_mac_brew: /opt/homebrew/bin/brew
+wireguard_mac_wg: "{{ wireguard_mac_homebrew_bin }}/wg"
+wireguard_mac_wg_quick: "{{ wireguard_mac_homebrew_bin }}/wg-quick"
+
+wireguard_mac_config_dir: /usr/local/etc/wireguard
+wireguard_mac_private_key_path: "{{ wireguard_mac_config_dir }}/privatekey"
+wireguard_mac_public_key_path: "{{ wireguard_mac_config_dir }}/publickey"
+wireguard_mac_config_path: "{{ wireguard_mac_config_dir }}/ms02-away.conf"
+wireguard_mac_toggle_path: /usr/local/bin/microscaler-wireguard
+
+wireguard_mac_address: "10.77.0.3/32"
+wireguard_mac_endpoint: "76.13.1.95:51820"
+wireguard_mac_allowed_ips:
+  - "10.77.0.0/24"
+  - "192.168.1.189/32"
+  - "10.177.76.0/24"
+wireguard_mac_persistent_keepalive: 25
+wireguard_mac_mtu: 1380
+
+wireguard_mac_lan_route_plist: >-
+  /Library/LaunchDaemons/com.microscaler.metallb-lan-route.plist
+wireguard_mac_lan_route_label: com.microscaler.metallb-lan-route
+wireguard_mac_metallb_cidr: "10.177.76.0/24"
+wireguard_mac_lan_gateway: "192.168.1.189"

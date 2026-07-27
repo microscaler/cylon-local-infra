@@ -1,0 +1,27 @@
+---
+# Self-hosted routed WireGuard mesh. The Linux backbone is always on; the Mac
+# peer is configured persistently but activated only through the route toggle.
+
+wireguard_interface: wg0
+wireguard_mesh_cidr: "10.77.0.0/24"
+wireguard_hub_address: "10.77.0.1/24"
+wireguard_ms02_address: "10.77.0.2/32"
+wireguard_mac_address: "10.77.0.3/32"
+wireguard_hub_endpoint: "76.13.1.95"
+wireguard_listen_port: 51820
+wireguard_mtu: 1380
+wireguard_persistent_keepalive: 25
+
+# The Mac uses only routes needed for ms02 services and the Kubernetes
+# MetalLB bridge. Never route the default internet connection through the VPS.
+wireguard_mac_allowed_ips:
+  - "10.77.0.0/24"
+  - "192.168.1.189/32"
+  - "10.177.76.0/24"
+
+# Routes the hub must associate with the ms02 peer. The /32 deliberately
+# avoids importing common hotel/home 192.168.1.0/24 networks.
+wireguard_ms02_advertised_routes:
+  - "10.77.0.2/32"
+  - "10.177.76.0/24"
+  - "192.168.1.189/32"

@@ -1,0 +1,105 @@
+---
+- name: Check for existing WireGuard private key
+  ansible.builtin.stat:
+    path: "{{ wireguard_private_key_path }}"
+  register: wireguard_private_key_stat
+
+- name: Generate WireGuard private key
+  ansible.builtin.command:
+    argv:
+      - wg
+      - genkey
+  register: wireguard_generated_private_key
+  changed_when: true
+  no_log: true
+  when:
+    - not wireguard_private_key_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Store generated WireGuard private key
+  ansible.builtin.copy:
+    content: "{{ wireguard_generated_private_key.stdout | trim }}\n"
+    dest: "{{ wireguard_private_key_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - wireguard_generated_private_key is defined
+    - wireguard_generated_private_key.stdout | default('') | length > 0
+
+- name: Recheck WireGuard private key
+  ansible.builtin.stat:
+    path: "{{ wireguard_private_key_path }}"
+  register: wireguard_private_key_ready
+
+- name: Check for stored WireGuard public key
+  ansible.builtin.stat:
+    path: "{{ wireguard_public_key_path }}"
+  register: wireguard_public_key_stat
+
+- name: Read stored WireGuard public key
+  ansible.builtin.slurp:
+    src: "{{ wireguard_public_key_path }}"
+  register: wireguard_public_key_slurp
+  when: wireguard_public_key_stat.stat.exists
+
+- name: Publish stored WireGuard public-key fact
+  ansible.builtin.set_fact:
+    wireguard_public_key: >-
+      {{ wireguard_public_key_slurp.content | b64decode | trim }}
+  when: wireguard_public_key_stat.stat.exists
+
+- name: Require a key before configuring WireGuard
+  ansible.builtin.assert:
+    that:
+      - wireguard_private_key_ready.stat.exists
+    fail_msg: >-
+      {{ wireguard_private_key_path }} does not exist. Run the WireGuard
+      playbook once without --check to bootstrap host-local keys.
+    quiet: true
+  when:
+    - wireguard_configure | bool
+    - not ansible_check_mode
+
+- name: Read WireGuard private key for public-key derivation
+  ansible.builtin.slurp:
+    src: "{{ wireguard_private_key_path }}"
+  register: wireguard_private_key_slurp
+  no_log: true
+  when: wireguard_private_key_ready.stat.exists
+
+- name: Derive WireGuard public key
+  ansible.builtin.command:
+    argv:
+      - wg
+      - pubkey
+    stdin: "{{ wireguard_private_key_slurp.content | b64decode | trim }}"
+  register: wireguard_derived_public_key
+  changed_when: false
+  no_log: true
+  when:
+    - wireguard_private_key_ready.stat.exists
+    - not ansible_check_mode
+
+- name: Publish WireGuard public-key fact
+  ansible.builtin.set_fact:
+    wireguard_public_key: "{{ wireguard_derived_public_key.stdout | trim }}"
+  when: >-
+    (wireguard_derived_public_key | default({})).get('stdout', '') | length > 0
+
+- name: Use non-secret placeholder public key during first check-mode run
+  ansible.builtin.set_fact:
+    wireguard_public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  when:
+    - ansible_check_mode
+    - not wireguard_public_key_stat.stat.exists
+
+- name: Store WireGuard public key
+  ansible.builtin.copy:
+    content: "{{ wireguard_public_key }}\n"
+    dest: "{{ wireguard_public_key_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: wireguard_public_key | default('') | length > 0

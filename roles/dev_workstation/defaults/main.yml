@@ -51,3 +51,9 @@ dev_workstation_apt_packages:
   - libssl-dev
   - unzip
   - ca-certificates
+
+# cargo-cleanup CLI — reclaims Rust target/ disk under the workspace root.
+dev_workstation_cargo_cleanup_enabled: true
+dev_workstation_cargo_cleanup_name: cargo-cleanup
+dev_workstation_cargo_bin: "{{ dev_workstation_user_home }}/.cargo/bin/cargo"
+dev_workstation_cargo_cleanup_root: "{{ dev_workstation_workspace_root }}"

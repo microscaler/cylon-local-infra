@@ -1,0 +1,57 @@
+---
+# Split-horizon dev DNS on ms02 (dnsmasq) + systemd-resolved routing.
+# Mac clients use /etc/resolver/<lan_zone> (mac_workstation role).
+#
+# Previously installed ad-hoc via shared-k8s-cluster:
+#   just dev-dns-install / tools/configure_dev_dns.py
+# This role is the Ansible home for the same host state.
+
+dev_dns_enabled: false
+
+dev_dns_lan_zone: "dev.microscaler.local"
+dev_dns_metallb_zone: "metallb.dev"
+dev_dns_lan_ip: "192.168.1.189"
+
+# dnsmasq listen addresses (bind-interfaces)
+dev_dns_listen_addresses:
+  - "{{ dev_dns_lan_ip }}"
+  - "127.0.0.1"
+
+dev_dns_conf_path: /etc/microscaler/dnsmasq-dev.conf
+dev_dns_unit_name: microscaler-dev-dns.service
+dev_dns_resolved_dropin: /etc/systemd/resolved.conf.d/microscaler-dev-dns.conf
+
+# Wildcard LAN zone → ms02 LAN IP (haproxy / host edge). Subdomains inherit.
+# Extra explicit LAN A records are optional (same IP); keep empty unless needed.
+dev_dns_extra_lan_hostnames: []
+
+# MetalLB zone: short name → LoadBalancer IP (bridge 10.177.76.0/24).
+# Keep aligned with shared-k8s-cluster/config/loadbalancer-ips.env + inventory.
+dev_dns_metallb_records:
+  grafana: "10.177.76.227"
+  loki: "10.177.76.229"
+  prometheus: "10.177.76.228"
+  jaeger-ui: "10.177.76.230"
+  otel-grpc: "10.177.76.231"
+  otel-http: "10.177.76.231"
+  postgres: "10.177.76.224"
+  redis: "10.177.76.225"
+  minio-api: "10.177.76.226"
+  minio-console: "10.177.76.226"
+  pact-broker: "10.177.76.232"
+  mailpit-smtp: "10.177.76.235"
+  mailpit-web: "10.177.76.235"
+  mailhog-smtp: "10.177.76.234"
+  mailhog-web: "10.177.76.234"
+  faktory: "10.177.76.233"
+  faktory-dashboard: "10.177.76.233"
+  routellm: "10.177.76.221"
+  squid: "10.177.76.222"
+  resurrection-hub: "10.177.76.236"
+  freeradius-auth: "10.177.76.223"
+  freeradius-acct: "10.177.76.223"
+  registry: "10.177.76.220"
+  opensearch: "10.177.76.227"
+
+# When true, stop/disable the distro dnsmasq.service (Conflicts= with our unit).
+dev_dns_disable_system_dnsmasq: true

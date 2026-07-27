@@ -1,0 +1,40 @@
+---
+# Shared Linux WireGuard role for the Hostinger hub and ms02 routed peer.
+
+wireguard_configure: true
+wireguard_interface: wg0
+wireguard_address: ""
+wireguard_listen_port: 51820
+wireguard_mtu: 1380
+wireguard_peers: []
+
+wireguard_packages:
+  - wireguard
+  - wireguard-tools
+
+wireguard_config_dir: /etc/wireguard
+wireguard_private_key_path: "{{ wireguard_config_dir }}/privatekey"
+wireguard_public_key_path: "{{ wireguard_config_dir }}/publickey"
+wireguard_config_path: "{{ wireguard_config_dir }}/{{ wireguard_interface }}.conf"
+
+wireguard_enable_ip_forward: false
+wireguard_sysctl_path: /etc/sysctl.d/99-microscaler-wireguard.conf
+# Hub-only: Docker sets the VPS FORWARD policy to DROP, so explicitly permit
+# authenticated WireGuard peers to route to one another on the same interface.
+wireguard_forward_between_peers: false
+
+# Add the UDP allow rule without enabling UFW. The VPS currently has UFW
+# installed but inactive; enabling it requires a separate audit of its other
+# public services.
+wireguard_manage_ufw_rule: false
+
+# WireGuard normally repairs handshakes itself. This timer also recovers a
+# deleted/wedged interface or stale peer by restarting wg-quick.
+wireguard_healthcheck_enabled: true
+wireguard_healthcheck_peer_public_key: ""
+wireguard_healthcheck_max_age_seconds: 180
+wireguard_healthcheck_initial_delay: 120
+wireguard_healthcheck_interval: 120
+wireguard_healthcheck_randomized_delay: 15
+wireguard_healthcheck_executable: /usr/local/sbin/wireguard-healthcheck
+wireguard_healthcheck_service_name: "wireguard-healthcheck-{{ wireguard_interface }}"

@@ -1,0 +1,191 @@
+---
+# Resurrection-node Multipass cluster — nested KVM guests for cylon-daemon + Firecracker.
+
+- name: Build resurrection node VM name list
+  ansible.builtin.set_fact:
+    far_multipass_vm_names: >-
+      {{
+        range(1, (far_multipass_vm_count | int) + 1)
+        | map('string')
+        | map('regex_replace', '^(.+)$', far_multipass_vm_prefix ~ '-\1')
+        | list
+      }}
+
+- name: Read MemAvailable from /proc/meminfo (kB)
+  ansible.builtin.command: awk '/MemAvailable/ {print $2}' /proc/meminfo
+  register: far_multipass_mem_available
+  changed_when: false
+
+- name: Fail when host lacks RAM for requested resurrection node cluster
+  ansible.builtin.fail:
+    msg: >-
+      MemAvailable={{ far_multipass_mem_available.stdout | trim }} kB but
+      far_multipass_min_mem_available_kb={{ far_multipass_min_mem_available_kb }}
+      is required for {{ far_multipass_vm_count }} × {{ far_multipass_vm_memory }} guests.
+      Stop Kind (`shared-kind-cluster && just kind-stop`) or set
+      far_multipass_skip_ram_check=true.
+  when:
+    - not (far_multipass_skip_ram_check | default(false) | bool)
+    - (far_multipass_mem_available.stdout | trim | int) < (far_multipass_min_mem_available_kb | int)
+
+- name: Ensure multipass snap is installed
+  ansible.builtin.command: snap install multipass
+  args:
+    creates: /snap/bin/multipass
+  changed_when: true
+
+- name: Verify host nested KVM is enabled
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if [[ -r /sys/module/kvm_intel/parameters/nested ]]; then
+      test "$(tr -d '[:space:]' < /sys/module/kvm_intel/parameters/nested)" = Y
+    elif [[ -r /sys/module/kvm_amd/parameters/nested ]]; then
+      test "$(tr -d '[:space:]' < /sys/module/kvm_amd/parameters/nested)" = 1
+    else
+      echo "no kvm nested module parameter found" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Stat canonical cloud-init in cylon-images
+  ansible.builtin.stat:
+    path: "{{ far_multipass_cloud_init_src }}"
+  register: far_multipass_cloud_init_stat
+
+- name: Fail when cylon-images multipass cloud-init is missing
+  ansible.builtin.fail:
+    msg: >-
+      Expected {{ far_multipass_cloud_init_src }} — sync cylon-images to ms02
+      (checkout under {{ far_multipass_workspace_root }}/cylon-images).
+  when: not far_multipass_cloud_init_stat.stat.exists
+
+- name: Install cloud-init where Multipass snap can read it
+  ansible.builtin.copy:
+    src: "{{ far_multipass_cloud_init_src }}"
+    dest: "{{ far_multipass_cloud_init_dest }}"
+    owner: "{{ far_multipass_operator_user }}"
+    group: "{{ far_multipass_operator_user }}"
+    mode: "0644"
+    remote_src: true
+
+- name: List existing Multipass instances (JSON)
+  ansible.builtin.command: sudo -u {{ far_multipass_operator_user }} -H multipass list --format json
+  register: far_multipass_list_json
+  changed_when: false
+
+- name: Parse existing Multipass instance names
+  ansible.builtin.set_fact:
+    far_multipass_existing_names: >-
+      {{
+        (far_multipass_list_json.stdout | from_json).list
+        | default([])
+        | map(attribute='name')
+        | list
+      }}
+
+- name: Remove legacy far-node Multipass instances
+  ansible.builtin.command: sudo -u {{ far_multipass_operator_user }} -H multipass delete {{ item }} --purge
+  loop: "{{ far_multipass_legacy_names }}"
+  when: item in far_multipass_existing_names
+  register: far_multipass_legacy_purge
+  changed_when: far_multipass_legacy_purge.rc == 0
+  failed_when: false
+
+- name: Refresh instance list after legacy purge
+  ansible.builtin.command: sudo -u {{ far_multipass_operator_user }} -H multipass list --format json
+  register: far_multipass_list_json
+  changed_when: false
+  when: far_multipass_legacy_purge is changed
+
+- name: Parse instance names after legacy purge
+  ansible.builtin.set_fact:
+    far_multipass_existing_names: >-
+      {{
+        (far_multipass_list_json.stdout | from_json).list
+        | default([])
+        | map(attribute='name')
+        | list
+      }}
+  when: far_multipass_legacy_purge is changed
+
+- name: Build stopped resurrection-node-base from cloud-init
+  ansible.builtin.command: >-
+    sudo -u {{ far_multipass_operator_user }} -H
+    multipass launch {{ far_multipass_ubuntu }}
+    --name {{ far_multipass_base_instance }}
+    --cpus {{ far_multipass_vm_cpus }}
+    --memory {{ far_multipass_vm_memory }}
+    --disk {{ far_multipass_vm_disk }}
+    --cloud-init {{ far_multipass_cloud_init_dest }}
+  when: far_multipass_base_instance not in far_multipass_existing_names
+  register: far_multipass_base_launch
+  changed_when: far_multipass_base_launch.rc == 0
+
+- name: Wait for cloud-init on resurrection-node-base
+  ansible.builtin.command: >-
+    sudo -u {{ far_multipass_operator_user }} -H
+    multipass exec {{ far_multipass_base_instance }} -- cloud-init status --wait
+  when: far_multipass_base_launch is changed
+  changed_when: false
+  register: far_multipass_cloud_init_wait
+  failed_when: false
+
+- name: Verify resurrection-node-base provisioning (firecracker + kvm)
+  ansible.builtin.command: >-
+    sudo -u {{ far_multipass_operator_user }} -H
+    multipass exec {{ far_multipass_base_instance }} -- bash -lc
+    'test -c /dev/kvm && firecracker --version'
+  when: far_multipass_base_launch is changed
+  changed_when: false
+
+- name: Ensure resurrection-node-base is stopped before cloning workers
+  ansible.builtin.command: sudo -u {{ far_multipass_operator_user }} -H multipass stop {{ far_multipass_base_instance }}
+  when:
+    - far_multipass_base_instance in far_multipass_existing_names or far_multipass_base_launch is changed
+  register: far_multipass_base_stop
+  changed_when: "'stopped' in (far_multipass_base_stop.stdout | default(''))"
+  failed_when: false
+
+- name: Clone missing resurrection worker nodes from base
+  ansible.builtin.command: >-
+    sudo -u {{ far_multipass_operator_user }} -H
+    multipass clone {{ far_multipass_base_instance }} -n {{ item }}
+  loop: "{{ far_multipass_vm_names }}"
+  when: item not in far_multipass_existing_names
+  register: far_multipass_clone
+  changed_when: far_multipass_clone.rc == 0
+
+- name: Start stopped resurrection worker nodes
+  ansible.builtin.command: sudo -u {{ far_multipass_operator_user }} -H multipass start {{ item }}
+  loop: "{{ far_multipass_vm_names }}"
+  register: far_multipass_start
+  changed_when: "'started' in (far_multipass_start.stdout | default(''))"
+  failed_when: false
+
+- name: Mount workspace paths into resurrection nodes
+  ansible.builtin.command: >-
+    sudo -u {{ far_multipass_operator_user }} -H multipass mount
+    {{ far_multipass_workspace_root }}/{{ item.1.host_subpath }}
+    {{ item.0 }}:{{ item.1.guest }}
+  loop: "{{ far_multipass_vm_names | product(far_multipass_mounts) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1.guest }}"
+  register: far_multipass_mount
+  changed_when: far_multipass_mount.rc == 0
+  failed_when: >-
+    far_multipass_mount.rc != 0
+    and 'already mounted' not in (far_multipass_mount.stderr | default('') | lower)
+
+- name: Verify nested /dev/kvm inside each resurrection node
+  ansible.builtin.command: sudo -u {{ far_multipass_operator_user }} -H multipass exec {{ item }} -- test -c /dev/kvm
+  loop: "{{ far_multipass_vm_names }}"
+  changed_when: false
+
+- name: Verify firecracker binary inside each resurrection node
+  ansible.builtin.command: sudo -u {{ far_multipass_operator_user }} -H multipass exec {{ item }} -- firecracker --version
+  loop: "{{ far_multipass_vm_names }}"
+  changed_when: false
+  register: far_multipass_fc_version
+  failed_when: far_multipass_fc_version.rc != 0

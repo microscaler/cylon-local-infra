@@ -1,0 +1,23 @@
+[Interface]
+Address = {{ wireguard_address }}
+PrivateKey = {{ wireguard_private_key }}
+ListenPort = {{ wireguard_listen_port }}
+MTU = {{ wireguard_mtu }}
+{% if wireguard_forward_between_peers | bool %}
+PostUp = iptables -I FORWARD 1 -i %i -o %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -o %i -j ACCEPT
+{% endif %}
+
+{% for peer in wireguard_peers %}
+[Peer]
+# {{ peer.name }}
+PublicKey = {{ peer.public_key }}
+AllowedIPs = {{ peer.allowed_ips | join(', ') }}
+{% if peer.endpoint | default('') | length > 0 %}
+Endpoint = {{ peer.endpoint }}
+{% endif %}
+{% if peer.persistent_keepalive | default(0) | int > 0 %}
+PersistentKeepalive = {{ peer.persistent_keepalive }}
+{% endif %}
+
+{% endfor %}

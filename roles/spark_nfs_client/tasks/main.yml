@@ -1,0 +1,36 @@
+---
+# Mount ms02:/srv/hf-archive on every Spark for NFS-backed HF cold storage.
+
+- name: HF archive NFS client
+  when: spark_hf_nfs_enabled | default(false) | bool
+  tags: [spark, hf, hf_nfs, nfs_client]
+  block:
+    - name: Install NFS client packages
+      ansible.builtin.apt:
+        name: "{{ spark_hf_nfs_apt_packages }}"
+        state: present
+        update_cache: false
+
+    - name: Ensure mount point exists
+      ansible.builtin.file:
+        path: "{{ spark_hf_nfs_mount }}"
+        state: directory
+        owner: "{{ spark_hf_nfs_run_user }}"
+        group: "{{ spark_hf_nfs_run_group }}"
+        mode: "0755"
+
+    - name: Ensure hub subdirectory exists on NFS mount
+      ansible.builtin.file:
+        path: "{{ spark_hf_nfs_mount }}/hub"
+        state: directory
+        owner: "{{ spark_hf_nfs_run_user }}"
+        group: "{{ spark_hf_nfs_run_group }}"
+        mode: "0755"
+
+    - name: Mount ms02 HF archive export
+      ansible.posix.mount:
+        path: "{{ spark_hf_nfs_mount }}"
+        src: "{{ spark_hf_nfs_server }}:{{ spark_hf_nfs_export }}"
+        fstype: nfs4
+        opts: "{{ spark_hf_nfs_mount_options }}"
+        state: mounted

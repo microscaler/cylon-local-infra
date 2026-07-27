@@ -1,0 +1,40 @@
+---
+# Resurrection nodes — Multipass guests running cylon-daemon + nested Firecracker microVMs.
+
+far_multipass_vm_count: 3
+far_multipass_vm_prefix: resurrection-node
+far_multipass_vm_memory: 16G
+far_multipass_vm_cpus: 6
+far_multipass_vm_disk: 40G
+far_multipass_ubuntu: 24.04
+
+# Stopped clone source built from cylon-images/multipass/cloud-init.yaml
+far_multipass_base_instance: resurrection-node-base
+
+far_multipass_workspace_root: /home/casibbald/Workspace/microscaler
+far_multipass_cloud_init_src: "{{ far_multipass_workspace_root }}/cylon-images/multipass/cloud-init.yaml"
+far_multipass_cloud_init_dest: /home/casibbald/resurrection-node-cloud-init.yaml
+
+far_multipass_mounts:
+  - host_subpath: tiffany
+    guest: /opt
+  - host_subpath: mayfly
+    guest: /mayfly
+
+far_multipass_firecracker_version: v1.10.1
+
+far_multipass_min_mem_available_kb: 56623104
+far_multipass_skip_ram_check: false
+
+# Legacy far-node-* instances to remove when migrating naming.
+far_multipass_legacy_names:
+  - far-node-1
+  - far-node-2
+  - far-node-3
+
+far_multipass_grpc_host_ports:
+  resurrection-node-1: 50052
+  resurrection-node-2: 50053
+  resurrection-node-3: 50054
+
+far_multipass_operator_user: casibbald

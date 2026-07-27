@@ -1,0 +1,171 @@
+---
+- name: Configure headless Sunshine remote desktop
+  when: sunshine_remote_desktop_enabled | bool
+  block:
+    - name: Validate Sunshine host platform
+      ansible.builtin.assert:
+        that:
+          - ansible_facts["system"] == "Linux"
+          - ansible_facts["architecture"] == "x86_64"
+          - sunshine_remote_desktop_uid | int > 0
+        fail_msg: "The Sunshine role currently supports x86_64 Linux hosts."
+
+    - name: Install headless Xorg, XFCE, and Intel VA-API dependencies
+      ansible.builtin.apt:
+        name:
+          - dbus-x11
+          - intel-media-va-driver-non-free
+          - thunar
+          - vainfo
+          - xfce4-appfinder
+          - xfce4-panel
+          - xfce4-session
+          - xfce4-settings
+          - xfce4-terminal
+          - xfdesktop4
+          - xfwm4
+          - x11-utils
+          - xserver-xorg-core
+          - xserver-xorg-input-libinput
+          - xserver-xorg-video-dummy
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        install_recommends: false
+
+    - name: Gather installed package state
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: Download pinned official Sunshine package
+      ansible.builtin.get_url:
+        url: "{{ sunshine_remote_desktop_package_url }}"
+        dest: "/var/cache/apt/archives/{{ sunshine_remote_desktop_package_name }}"
+        checksum: "{{ sunshine_remote_desktop_package_checksum }}"
+        mode: "0644"
+
+    - name: Install pinned Sunshine package
+      ansible.builtin.apt:
+        deb: "/var/cache/apt/archives/{{ sunshine_remote_desktop_package_name }}"
+        state: present
+      when: not ansible_check_mode or "sunshine" in ansible_facts.packages
+      notify: Restart Sunshine remote desktop
+
+    - name: Grant the desktop user video and virtual-input access
+      ansible.builtin.user:
+        name: "{{ sunshine_remote_desktop_user }}"
+        groups:
+          - input
+          - render
+          - video
+        append: true
+      notify: Restart Sunshine remote desktop
+
+    - name: Install uinput module load configuration
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/sunshine.conf
+        content: "uinput\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Load uinput now
+      ansible.builtin.command:
+        cmd: modprobe uinput
+      changed_when: false
+
+    - name: Install Sunshine uinput permissions
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/85-sunshine-input.rules
+        content: |
+          KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
+        owner: root
+        group: root
+        mode: "0644"
+      register: sunshine_remote_desktop_udev_rule
+
+    - name: Reload udev rules
+      ansible.builtin.command:
+        cmd: udevadm control --reload-rules
+      changed_when: false
+      when: sunshine_remote_desktop_udev_rule.changed
+
+    - name: Apply uinput permissions
+      ansible.builtin.command:
+        cmd: udevadm trigger --name-match=uinput
+      changed_when: false
+      when: sunshine_remote_desktop_udev_rule.changed
+
+    - name: Check desktop user lingering
+      ansible.builtin.stat:
+        path: "/var/lib/systemd/linger/{{ sunshine_remote_desktop_user }}"
+      register: sunshine_remote_desktop_linger
+
+    - name: Enable desktop user lingering
+      ansible.builtin.command:
+        cmd: "loginctl enable-linger {{ sunshine_remote_desktop_user }}"
+      when: not sunshine_remote_desktop_linger.stat.exists
+
+    - name: Create Sunshine system configuration directory
+      ansible.builtin.file:
+        path: /etc/sunshine
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create Sunshine user configuration directory
+      ansible.builtin.file:
+        path: "/home/{{ sunshine_remote_desktop_user }}/.config/sunshine"
+        state: directory
+        owner: "{{ sunshine_remote_desktop_user }}"
+        group: "{{ sunshine_remote_desktop_user }}"
+        mode: "0700"
+
+    - name: Configure virtual Xorg display
+      ansible.builtin.template:
+        src: xorg-dummy.conf.j2
+        dest: /etc/sunshine/xorg-dummy.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart Sunshine remote desktop
+
+    - name: Configure Sunshine for X11 capture and Intel VA-API
+      ansible.builtin.template:
+        src: sunshine.conf.j2
+        dest: "/home/{{ sunshine_remote_desktop_user }}/.config/sunshine/sunshine.conf"
+        owner: "{{ sunshine_remote_desktop_user }}"
+        group: "{{ sunshine_remote_desktop_user }}"
+        mode: "0600"
+      notify: Restart Sunshine remote desktop
+
+    - name: Install Sunshine headless system services
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - sunshine-virtual-xorg.service
+        - sunshine-virtual-desktop.service
+        - sunshine-headless.service
+      notify: Restart Sunshine remote desktop
+
+    - name: Check installed Sunshine system service
+      ansible.builtin.stat:
+        path: /etc/systemd/system/sunshine-headless.service
+      register: sunshine_remote_desktop_service
+
+    - name: Enable and start Sunshine headless services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - sunshine-virtual-xorg.service
+        - sunshine-virtual-desktop.service
+        - sunshine-headless.service
+      when: not ansible_check_mode or sunshine_remote_desktop_service.stat.exists

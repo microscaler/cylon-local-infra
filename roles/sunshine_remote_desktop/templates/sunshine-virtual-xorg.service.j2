@@ -1,0 +1,13 @@
+[Unit]
+Description=Headless Xorg display for Sunshine
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/xorg/Xorg :{{ sunshine_remote_desktop_display }} -config /etc/sunshine/xorg-dummy.conf -noreset -nolisten tcp -ac
+ExecStartPost=/usr/bin/sleep 2
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target
