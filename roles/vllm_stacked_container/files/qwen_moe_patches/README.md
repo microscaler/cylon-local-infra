@@ -10,6 +10,7 @@ task in `roles/vllm_stacked_container/tasks/main.yml`.
 |------|--------------|---------------------|
 | `_triton_alloc_setup.py` + `.pth` | Replaces Triton's `NullAllocator` with `torch.cuda.caching_allocator_alloc` on interpreter startup (via site.py `.pth` machinery). | Without this, Triton fused-MoE kernels periodically stall on GB10's unified-memory allocator. `cp -f` is idempotent. Remove when Triton's default allocator works on GB10 (likely coincident with a CUDA/driver bump). |
 | `unsloth.jinja` | Chat template for Qwen3 tool-calling (Unsloth's fixed-up version). | Referenced by `--chat-template /vllm-patches/unsloth.jinja` in `sparks.yml`. |
+| `qwen38-yarn.json` | `text_config.rope_parameters` YaRN override (factor 2.0 → 524288). | Loaded via `--hf-overrides "$(cat /vllm-patches/qwen38-yarn.json)"` so the serve `bash -lc` line does not brace-expand JSON. |
 
 ## Historical: two diffs that USED to live here
 

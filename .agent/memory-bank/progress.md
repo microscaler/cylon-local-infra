@@ -26,18 +26,142 @@
 
 ## Session notes
 
-- **2026-07-27 (Kimi K3 storage-only ingestion assessment):** The official
-  `moonshotai` Hugging Face organization did not yet expose a Kimi K3 repository
-  when checked; wait for the verified repo and pin its commit rather than using
-  a mirror. Third-party estimates put the MXFP4 release near 594 GB. ms02's
-  existing empty `/srv/hf-archive` shares a pool with 654 GiB free, while
-  nvidia1/nvidia2 have 454/429 GiB free, so none is a safe local staging target.
-  Cloud Storage FUSE v3 can stream writes without equivalent local disk. Best
-  path is a transient GCE VM in the bucket region, avoiding the home WAN;
-  ms02-mounted GCS is the fallback. Disable HF Xet for sequential HTTP writes,
-  dry-run for exact size, use a dedicated prefix, and pin the release commit.
-  ms02 gcloud targets `cf-sam-pp-9e`, but the active user credential needs
-  reauthentication before the bucket name/location can be inspected.
+- **2026-08-25 (Zot retention drift diagnosed):** Confirmed Zot is separate
+  from the 208 GiB host Docker dataset: it uses Kubernetes ZVOL `pvc-b901...`
+  (34.2 GiB ZFS allocation, ~21 GiB mounted files). Zot v2.1.17 GC is working
+  (2,528 successful runs, 3,937 blobs and 1,593 manifests removed). The live
+  ConfigMap is wrong: retain five `dev-\d+` tags, then retain all other tags via
+  an unlimited `.*` rule. Actual excess includes 36 `cylon-daemon` tags, two
+  Sesame repos with seven, and three PriceWhisperer repos with six. The local
+  GitOps manifest has the intended single hard-cap rule
+  `mostRecentlyPushedCount: 2`, but it is uncommitted. Flux cannot advance
+  `stack-cluster` because reconciliation fails on immutable `zot-data`
+  `spec.volumeName` drift after the PVC was recreated. No cleanup performed.
+- **2026-08-25 (ZFS reclaim audit):** Ethernet restored stable Mac-to-ms02 RTT
+  (0.82/1.05/1.59 ms over `en20`). Audited the healthy but 87%-allocated rpool
+  without deleting data. Found roughly 772 GB of regenerable Rust target
+  directories, with no active cargo/rustc/sccache processes. Docker reports
+  288.9 GB logical reclaimable from 697 unused volumes; its compressed ZFS
+  dataset occupies 208 GiB. Two orphaned ZFS iSCSI datasets have no PV or open
+  session but retain targetcli entries and consume 96.9 GiB total. Rotated
+  syslogs consume about 22 GiB. Multipass's 75 GiB belongs to active VMs and is
+  not a default cleanup candidate. Additional user-review candidates include a
+  60.7 GiB Hugging Face cache and 47.5 GiB `backup_mac`. No cleanup performed.
+- **2026-08-25 (NFS slowdown isolated to Mac Wi-Fi):** The Mac currently has no
+  active NFS mount or TCP/2049 session; `~/Workspace/remote` is the unmounted
+  root-owned stub. Repeated tests showed the same periodic stalls from the Mac
+  to both ms02 (2.3/29.9/221 ms) and the router (2.4/28.2/216 ms), while wired
+  ms02-to-router latency was stable at 0.72/0.88/1.68 ms. The Mac's 5 GHz link
+  has strong signal (-44 dBm) and an 866 Mbps PHY rate, but likely suffers
+  radio/AP airtime, roaming/scanning, or AWDL/Continuity stalls. Bulk SSH
+  throughput remained about 214 Mbps, explaining why large transfers work
+  better than RTT-heavy NFS metadata. Server checks were healthy: NFS active,
+  TCP/2049 listening, zero bad RPC calls, 1 Gbps full-duplex eno4 with zero
+  errors/drops, healthy ZFS pools, and sub-millisecond storage latency. rpool is
+  88% allocated and 58% fragmented but did not show an active I/O bottleneck.
+- **2026-08-02 (NVFP4 archive storage retired):** Verified
+  `gs://microscaler-huggingface/models/RedHatAI/Kimi-K3-NVFP4/71eed69448bc5ee7f83c4c08a61d6598a25b6ae4`
+  contains 1,557,434,547,173 bytes. Disabled the watcher timer, stopped
+  `hf-archive-downloader`, detached `hf-archive-data`, and deleted the 3 TiB
+  disk. The terminated VM and its 30 GiB boot disk remain. A future run must
+  create and attach a replacement disk as `archive-data` before starting the
+  VM.
+- **2026-08-01 (RedHatAI Kimi K3 NVFP4 archive started):** Per operator
+  direction, disabled the watcher, stopped `hf-archive-downloader`, resized
+  `hf-archive-data` from 2 TiB to 3 TiB, restarted the VM, and grew ext4 online.
+  Removed the incomplete 1.1 TiB Unsloth MXFP4 partial. Replaced the exact
+  backstop policy with `RedHatAI/Kimi-K3-NVFP4`, requiring RedHatAI publisher,
+  Kimi K3 metadata, `moonshotai/Kimi-K3` lineage, compressed-tensors
+  `nvfp4-pack-quantized`, safetensors, and a valid immutable SHA. Deployed the
+  watcher, re-enabled its timer, and started the pinned
+  `71eed69448bc5ee7f83c4c08a61d6598a25b6ae4` download with two workers. The
+  3 TiB filesystem has approximately 2.9 TiB free and the service is active.
+  Twenty tests pass; prior branch-aware coverage remains 87%.
+- **2026-08-01 (Kimi NVFP4 archive diagnosis):** Confirmed no Kimi objects are
+  in GCS and watcher state is empty. The current implementation explicitly
+  rejects NVFP4 and therefore never selected `RedHatAI/Kimi-K3-NVFP4`.
+  Instead, the old `unsloth/Kimi-K3` MXFP4 backstop is stalled at about
+  1.1 TiB: 916.8 GB remains, but only 923.8 GB is free and the 20 GiB reserve
+  blocks each timer retry. Inspected the requested RedHatAI model: Kimi K3,
+  `moonshotai/Kimi-K3` lineage, compressed-tensors NVFP4, 83 safetensor shards,
+  SHA `71eed69448bc5ee7f83c4c08a61d6598a25b6ae4`, and 100 files / 1.6 TB by
+  pinned dry run. Awaiting an explicit choice to delete the incomplete Unsloth
+  snapshot and switch, resize storage and preserve both, or leave it unchanged.
+- **2026-08-01 (Sunshine enabled on trusted home LAN):** Diagnosed local
+  Moonlight failure while all Sunshine services were healthy. UFW exposed the
+  streaming ports only to picolino's WireGuard `10.77.0.3/32`, so a Mac using
+  its `192.168.1.x` home address was correctly blocked. Added the Sunshine TCP
+  and UDP rules to trusted `192.168.1.0/24`, retained the existing WireGuard
+  rules, and kept public access closed. Added both LAN and VPN Web UI origins
+  to `csrf_allowed_origins`, changed `just sunshine-web` to the LAN URL, added
+  `just sunshine-web-vpn`, and updated documentation. Deployed through Ansible;
+  all three services are active, UFW shows all seven LAN rules, and a direct
+  Mac HTTPS probe returns HTTP 401 as expected. Nine tests and syntax check
+  pass. Use Moonlight host `192.168.1.189` at home and `10.77.0.2` away.
+- **2026-07-29 (backstop download resumed):** Diagnosed why no Kimi archive had
+  completed. `unsloth/Kimi-K3` reached 931 GiB, then every timer retry failed
+  the free-space guard: 1.0 TB remained to download, but the 20 GiB reserve
+  could not fit while the completed Qwen test still occupied 67 GiB locally.
+  Confirmed the local and GCS Qwen snapshots matched exactly at
+  71,926,880,713 bytes, removed only the local Qwen copy, and recovered enough
+  space. Reset the failed unit and resumed the pinned Unsloth download with two
+  workers. The service is active and the partial tree is advancing; no Kimi
+  snapshot is complete in GCS yet.
+- **2026-07-28 (Unsloth Kimi K3 backstop started):** Downsized
+  `hf-archive-downloader` from `e2-standard-4` to the accepted `e2-medium`
+  shape (2 visible vCPU, 4 GiB RAM); GCE normalized the requested
+  `e2-custom-1-4096` to this machine type. Disks and watcher state were
+  preserved. Added an exact, metadata-constrained exception for
+  `unsloth/Kimi-K3`: Kimi K3 architecture, `moonshotai/Kimi-K3` lineage,
+  compressed-tensors MXFP4, safetensors, and immutable SHA pinning. Its dry run
+  is 121 files / 1.6 TB at SHA
+  `6095bb6b51abc90e7e8f8804ad4f65be4a441262`. It is a temporary backstop and
+  does not satisfy the FP8 goal. Download is active and resumable; worker
+  concurrency was reduced from four (3.0 GiB peak RAM) to two (2.4 GiB observed)
+  for safe headroom on the 4 GiB VM. Verification observed 28 GB downloaded.
+  Twenty tests pass at 87% coverage.
+- **2026-07-28 (first Kimi K3 FP8 candidate assessed):**
+  `RedHatAI/Kimi-K3-FP8-BLOCK` is a credible NVIDIA FP8 candidate but is not
+  accepted by the current Moonshot-only publisher policy. Metadata confirms
+  Kimi K3 architecture, `moonshotai/Kimi-K3` lineage, compressed-tensors
+  block FP8, predominantly F8_E4M3 tensors, 96 safetensor shards, and SHA
+  `a0dd16556a81f79acee4e576e88aae2e356472f1`. An exact pinned dry run reports
+  118 files / 2.8 TB, exceeding the VM's 2 TiB disk. Recommended next action:
+  explicitly trust this repository, resize the transient disk to 4 TiB, and
+  archive the pinned snapshot; otherwise continue waiting for Moonshot. The
+  operator chose to ignore this build for now because it is too large for the
+  target hardware. No infrastructure or watcher policy was changed.
+- **2026-07-27 (Kimi K3 sequential archive watcher):** Resized
+  `hf-archive-data` and its ext4 filesystem to 2 TiB. Added
+  `scripts/hf_archive_watcher.py`, a CLI-driven systemd oneshot that polls the
+  verified `moonshotai` organization every 15 minutes. It normalizes Kimi K3
+  naming variants, detects FP8 and FP16/BF16 primarily from safetensor parameter
+  metadata, rejects incompatible quantizations/formats, and pins every selected
+  repository to an immutable SHA. It downloads FP8 first, serially checksum-
+  syncs to GCS, verifies with a dry rsync, removes only the verified local
+  snapshot, then permits FP16/BF16. `hf-archive-watcher.timer` is enabled on the
+  VM; the first two live polls completed successfully and found no K3 FP8
+  candidate. Added operator recipes and `docs/gcp-hf-gce-archive.md`.
+  Eighteen tests pass with 87% coverage. The independent Qwen test upload
+  remains active with GCS process/thread concurrency 1/1.
+- **2026-07-27 (GCE Hugging Face preservation path):** Rejected the Cloud
+  Run/FUSE prototype after real Qwen traffic showed managed GCS FUSE falling
+  back to local staged writes. Removed its job, image repository, partial
+  objects, and repository implementation. Enabled Compute Engine and deployed
+  `hf-archive-downloader` (`e2-standard-4`, Ubuntu 24.04,
+  `europe-west1-b`) with IAP-only SSH, a 30 GB boot disk, and an auto-deleted
+  250 GB standard persistent ext4 disk at `/srv/hf-archive`. The runtime
+  identity `hf-archive-vm-runner` has object-user access only to the
+  EU multi-region Archive-class `microscaler-huggingface` bucket. Pinned
+  `huggingface_hub` 1.24.0 in `/opt/hf-archive-venv`. Qwen
+  `Qwen/Qwen3.6-35B-A3B` dry-run reported 40 files / 71.9 GB; local download
+  completed successfully in 21 minutes (67 GiB on disk). Bucket rsync is
+  running as `hf-qwen36-upload-serial.service` with one process and one thread;
+  transfer time is not critical after local verification. Verify with a
+  checksum-only dry rsync after completion. For Kimi, wait for verified
+  Moonshot repo IDs and immutable
+  SHAs, dry-run exact FP8 and FP16/BF16 sizes, grow the data disk, download to
+  ext4, upload, verify, then destroy VM and disk.
 - **2026-07-27 (Sunshine/Moonlight remote desktop):** Pivoted away from GNOME
   RDP and deployed `sunshine_remote_desktop` on ms02. It provides a dedicated
   2560x1440 Xorg/XFCE desktop without GDM autologin or a physical display,

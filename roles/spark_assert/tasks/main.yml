@@ -74,6 +74,7 @@
   when:
     - spark_assert_enabled | bool
     - spark_provision_vllm_stacked_container | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'ray'
     - inventory_hostname == (groups['sparks'] | sort | first)
   tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
@@ -89,6 +90,7 @@
   when:
     - spark_assert_enabled | bool
     - spark_provision_vllm_stacked_container | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'ray'
     - inventory_hostname != (groups['sparks'] | sort | first)
   tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
@@ -108,6 +110,7 @@
   when:
     - spark_assert_enabled | bool
     - spark_provision_vllm_stacked_container | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'ray'
     - inventory_hostname == (groups['sparks'] | sort | first)
   tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
@@ -131,6 +134,7 @@
     - spark_assert_enabled | bool
     - spark_assert_vllm_api | bool
     - spark_provision_vllm_stacked_container | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'ray'
     - inventory_hostname == (groups['sparks'] | sort | first)
   tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
@@ -146,6 +150,7 @@
   when:
     - spark_assert_enabled | bool
     - spark_provision_vllm_torchrun_stacked | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'torchrun'
   tags: [spark, spark_assert, vllm_torchrun_stack, vllm_container, stack_torchrun]
 
@@ -163,6 +168,7 @@
   changed_when: false
   when:
     - spark_assert_enabled | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'torchrun'
   tags: [spark, spark_assert, vllm_torchrun_stack, vllm_container, stack_torchrun]
 
@@ -180,6 +186,7 @@
   changed_when: false
   when:
     - spark_assert_enabled | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'ray'
   tags: [spark, spark_assert, vllm_ngc_stack, vllm_container, stack_ngc]
 
@@ -194,6 +201,7 @@
     - spark_assert_enabled | bool
     - spark_assert_vllm_api | bool
     - inventory_hostname == (groups['sparks'] | sort | first)
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (
         (spark_provision_vllm_stacked_container | default(true) | bool and (vllm_stack_kind | default('ray')) == 'ray')
         or (spark_provision_vllm_torchrun_stacked | default(true) | bool and (vllm_stack_kind | default('ray')) == 'torchrun')
@@ -231,6 +239,7 @@
   failed_when: spark_assert_nccl_gid.stdout | trim != (spark_nccl_ib_gid_index | default('3') | string)
   when:
     - spark_assert_enabled | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (
         (spark_provision_vllm_stacked_container | default(true) | bool and (vllm_stack_kind | default('ray')) == 'ray')
         or (spark_provision_vllm_torchrun_stacked | default(true) | bool and (vllm_stack_kind | default('ray')) == 'torchrun')
@@ -252,6 +261,66 @@
     - spark_provision_hf | default(false) | bool
     - inventory_hostname == (groups['sparks'] | sort | first)
   tags: [spark, spark_assert, hf, hf_prefetch]
+
+- name: Assert — DeepSeek DSpark container running
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}'
+      {{ vllm_dspark_container_name | default('vllm-dspark-' ~ inventory_hostname) }}
+  register: spark_assert_dspark
+  changed_when: false
+  failed_when: spark_assert_dspark.stdout | trim != "true"
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_vllm_dspark_stacked | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'deepseek_v4_flash'
+  tags: [spark, spark_assert, vllm_dspark_stack, stack_dspark, vllm_container]
+
+- name: Assert — no NGC Ray/torchrun containers when DeepSeek profile is active
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ray_ids="$(docker ps -q --filter 'name=vllm-ngc-ray' 2>/dev/null || true)"
+    tr_ids="$(docker ps -q --filter 'name=vllm-ngc-torchrun' 2>/dev/null || true)"
+    if [ -n "$ray_ids" ] || [ -n "$tr_ids" ]; then
+      echo "NGC Ray/torchrun containers must not run alongside DeepSeek DSpark:"
+      docker ps -a --filter 'name=vllm-ngc-ray'
+      docker ps -a --filter 'name=vllm-ngc-torchrun'
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - spark_assert_enabled | bool
+    - (spark_llm_profile | default('qwen38')) == 'deepseek_v4_flash'
+  tags: [spark, spark_assert, vllm_dspark_stack, stack_dspark, vllm_container]
+
+- name: Assert — DeepSeek OpenAI /v1/models on leader
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ vllm_dspark_api_port | default(8888) }}/v1/models"
+    return_content: true
+    status_code: 200
+    timeout: "{{ spark_assert_vllm_api_timeout_sec | int }}"
+  register: spark_assert_dspark_models
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_vllm_api | bool
+    - spark_provision_vllm_dspark_stacked | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'deepseek_v4_flash'
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  tags: [spark, spark_assert, vllm_dspark_stack, stack_dspark, vllm_container]
+
+- name: Assert — /v1/models lists DeepSeek served model name
+  ansible.builtin.assert:
+    that:
+      - dspark_served_model_name in spark_assert_dspark_models.content
+    fail_msg: >-
+      /v1/models did not include dspark_served_model_name={{ dspark_served_model_name }}.
+      Body={{ spark_assert_dspark_models.content[:500] }}
+  when:
+    - spark_assert_dspark_models is defined
+    - not (spark_assert_dspark_models.skipped | default(false))
+  tags: [spark, spark_assert, vllm_dspark_stack, stack_dspark, vllm_container]
 
 - name: Assert — node_exporter active
   ansible.builtin.command:

@@ -1,5 +1,5 @@
 ---
-- name: Configure Sunshine and its WireGuard-only firewall policy on ms02
+- name: Configure Sunshine and its LAN/WireGuard firewall policy on ms02
   hosts: ms02
   become: true
   roles:

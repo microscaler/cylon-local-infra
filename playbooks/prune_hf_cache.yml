@@ -1,0 +1,12 @@
+---
+# One-shot: prune HF hub trees not in hf_cache_keep_models on all Sparks.
+# Does not start/stop vLLM. Safe to run while Qwen is serving if you are only
+# deleting models that are not currently loaded.
+
+- name: Prune unused Hugging Face hub models on Sparks
+  hosts: sparks
+  gather_facts: false
+  become: true
+  roles:
+    - role: hf_cache_prune
+      tags: [hf, hf_prune, spark]

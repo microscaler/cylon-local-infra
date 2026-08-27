@@ -133,21 +133,24 @@
   tags: [spark, vllm_autoupgrade]
   when: spark_provision_vllm_autoupgrade | default(false) | bool
 
-- name: Phase — tear down inactive vLLM stack (Ray ↔ torchrun mutual exclusion)
+- name: Phase — tear down inactive vLLM stack (Qwen Ray/torchrun ↔ DeepSeek mutual exclusion)
   ansible.builtin.import_tasks: vllm_stack_teardown_inactive.yml
   tags:
     - spark
     - vllm_ngc_stack
     - vllm_torchrun_stack
+    - vllm_dspark_stack
     - stack_ngc
     - stack_torchrun
+    - stack_dspark
     - vllm_container
     - spark_assert
   when:
     - spark_provision_vllm_stacked_container | default(true) | bool
       or spark_provision_vllm_torchrun_stacked | default(true) | bool
+      or spark_provision_vllm_dspark_stacked | default(true) | bool
 
-- name: Phase — NGC stacked vLLM (Docker Ray + `vllm serve`)
+- name: Phase — NGC stacked vLLM (Docker Ray + `vllm serve`) — Qwen profile
   ansible.builtin.include_role:
     name: vllm_stacked_container
     apply:
@@ -159,9 +162,10 @@
   tags: [spark, vllm_ngc_stack, stack_ngc, vllm_container]
   when:
     - spark_provision_vllm_stacked_container | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'ray'
 
-- name: Phase — NGC stacked vLLM (torchrun + external_launcher, no Ray)
+- name: Phase — NGC stacked vLLM (torchrun + external_launcher, no Ray) — Qwen profile
   ansible.builtin.include_role:
     name: vllm_torchrun_stacked
     apply:
@@ -173,7 +177,22 @@
   tags: [spark, vllm_torchrun_stack, stack_torchrun, vllm_container]
   when:
     - spark_provision_vllm_torchrun_stacked | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
     - (vllm_stack_kind | default('ray')) == 'torchrun'
+
+- name: Phase — DeepSeek-V4-Flash (Anemll vLLM mp TP=2)
+  ansible.builtin.include_role:
+    name: vllm_dspark_stacked
+    apply:
+      tags:
+        - spark
+        - vllm_dspark_stack
+        - stack_dspark
+        - vllm_container
+  tags: [spark, vllm_dspark_stack, stack_dspark, vllm_container]
+  when:
+    - spark_provision_vllm_dspark_stacked | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'deepseek_v4_flash'
 
 - name: Phase — diagnostics (Docker + HF cache probes)
   ansible.builtin.include_role:

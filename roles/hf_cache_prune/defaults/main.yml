@@ -1,0 +1,21 @@
+---
+# Remove HF hub model trees not in the keep list (both Sparks).
+# Does NOT change Ansible Qwen serve defaults — only frees disk.
+# Prefetch daemon already drops state.json for unconfigured repos; this
+# deletes the on-disk hub dirs the daemon deliberately leaves behind.
+
+hf_cache_prune_enabled: true
+hf_cache_prune_dry_run: false
+
+# Parent of hub/ (same as vllm_hf_home).
+hf_cache_prune_hf_home: "{{ vllm_hf_home | default(spark_runtime_home ~ '/.cache/huggingface') }}"
+hf_cache_prune_hub_dir: "{{ hf_cache_prune_hf_home }}/hub"
+
+# Models to retain as hub/models--Org--Name/. Override in sparks.yml.
+hf_cache_keep_models: []
+
+# Also keep the active DeepSeek checkpoint when that profile is selected.
+hf_cache_prune_keep_active_dspark: true
+
+# Safety: refuse to prune if keep list is empty (would wipe the whole hub).
+hf_cache_prune_require_keep_list: true

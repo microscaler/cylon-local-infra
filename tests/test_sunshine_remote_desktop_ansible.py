@@ -103,13 +103,15 @@ class SunshineRemoteDesktopAnsibleTests(unittest.TestCase):
             self.assertNotIn("/bin/bash", unit)
             self.assertNotIn("/bin/sh", unit)
 
-    def test_ms02_enables_sunshine_and_vpn_only_ports(self) -> None:
+    def test_ms02_enables_sunshine_on_lan_and_wireguard(self) -> None:
         host_vars = (
             REPO_ROOT / "inventory" / "host_vars" / "ms02.yml"
         ).read_text()
         self.assertIn("sunshine_remote_desktop_enabled: true", host_vars)
         self.assertIn("47990", host_vars)
         self.assertIn("47998:48000", host_vars)
+        self.assertIn("LAN Sunshine HTTPS", host_vars)
+        self.assertIn("LAN Sunshine media", host_vars)
         self.assertIn("WireGuard Sunshine", host_vars)
 
     def test_dev_hosts_playbook_includes_sunshine_role(self) -> None:
@@ -131,6 +133,8 @@ class SunshineRemoteDesktopAnsibleTests(unittest.TestCase):
         self.assertIn("encoder = vaapi", config)
         self.assertIn("sunshine_remote_desktop_dri_device", config)
         self.assertIn("/dev/dri/renderD128", defaults)
+        self.assertIn("https://192.168.1.189:47990", config)
+        self.assertIn("https://10.77.0.2:47990", config)
 
 
 if __name__ == "__main__":

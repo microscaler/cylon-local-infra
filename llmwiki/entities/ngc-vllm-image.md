@@ -3,7 +3,7 @@ title: nvcr.io/nvidia/vllm NGC image
 kind: entity
 status: active
 tags: [ngc, docker, vllm, image]
-updated: 2026-04-18
+updated: 2026-08-17
 related: [concepts/ngc-stacked-container-stack.md, sources/nvidia-stacked-sparks.md]
 ---
 
@@ -18,7 +18,11 @@ Official NVIDIA-built vLLM container for Blackwell sm_121, distributed via NGC
 | Tag | Where | Notes |
 |---|---|---|
 | `25.11-py3` | `roles/vllm_stacked_container/defaults/main.yml` default | NVIDIA stacked-sparks doc example. |
-| `26.01-py3` | pulled on both `nvidia1` and `nvidia2` (2026-04-18) | Newer; consider pinning as the role default. |
+| `26.01-py3` | pulled on both `nvidia1` and `nvidia2` (2026-04-18) | Older pin. |
+| `26.03-py3` | **production** (`sparks.yml`) | Live 2026-08-17: vLLM **0.17.1**, transformers **4.57.5**. Has `Qwen3_5*` in vLLM registry. **Too old for Qwen3.8 VL processor (needs transformers ≥5.8.0).** |
+| `26.04-py3` | tried 2026-04-29 | Dropped bundled `ray` on PATH — rolled back. |
+| `26.07-py3` | **pulled** by ngc-image-sync; **not serving** | Live probe 2026-08-17: vLLM **0.24.0**, transformers **5.6.1**, `qwen3_5` in CONFIG_MAPPING, **`ray` not installed**. GB10: xgrammar tool-call 500s; Qwen3.6-FP8 DeepGEMM assert reported. |
+| `26.06-py3` | pulled; not serving | vLLM **0.22.1**, transformers **5.6.0**, **`ray` not installed**. NGC catalog “latest” as of 2026-08-17. |
 
 ## Why we prefer this over the bare-metal venv
 

@@ -197,7 +197,15 @@ spark_dual_hca_enabled: true
 # Production: Ray + 26.03-py3 + Qwen3.6-35B-A3B-FP8 (TP=2). Torchrun path retained
 # for future A/B only — set vllm_stack_kind: torchrun when re-validating.
 # Baseline snapshot: git tag `spark-ray-baseline-2026-05-20`.
-vllm_stack_kind: ray   # ray | torchrun
+vllm_stack_kind: ray   # ray | torchrun  (only used when spark_llm_profile=qwen38)
+
+# Active LLM profile on the Sparks (mutually exclusive — one stack owns both GPUs).
+#   qwen38            → NGC Ray/torchrun, :8000, Qwen/Qwen3.8-27B-FP8
+#   deepseek_v4_flash → Anemll vLLM mp TP=2, :8888, DeepSeek-V4-Flash-0731
+# Switch: set profile + `just spark-provision-recreate` (or profile-specific just recipes).
+# Qwen inventory (vllm_default_model / YaRN / parsers) is preserved when on DeepSeek.
+spark_llm_profile: qwen38   # | deepseek_v4_flash
+spark_provision_vllm_dspark_stacked: true
 
 # Image tag: pinned to 26.03-py3 (26.04+ drops bundled `ray`; see 2026-04-29 rollback run).
 vllm_stacked_container_image: "nvcr.io/nvidia/vllm:26.03-py3"
@@ -211,17 +219,17 @@ vllm_stacked_container_recreate: false
 
 # Model + TP configuration.
 #
-# CURRENT: Qwen/Qwen3.6-35B-A3B-FP8 — FP8 on GB10; prefetch via hf-prefetch
-# (see hf_prefetch_models). Prior production default was Qwen3.5-35B-A3B-FP8
-# (spark-vllm-docker recipes/qwen3.5-35b-a3b-fp8.yaml).
+# CURRENT: Qwen/Qwen3.8-27B-FP8 — dense VL FP8 on GB10; prefetch via hf-prefetch
+# (see hf_prefetch_models). Prior production default was Qwen3.6-35B-A3B-FP8
+# (MoE 35B / 3B active). Official BF16 card is Qwen/Qwen3.8-27B — do not serve that.
 #
 # Historical note: BF16-only Qwen3.6 was decode-bandwidth-bound (~45 tok/s); FP8
-# is the intended fix vs that baseline.
+# is the intended fix vs that baseline. Qwen3.8-27B-FP8 is dense (~38 GiB), not MoE.
 #
 # Earlier blockers (preserved for institutional memory):
 #   Gemma-4 — requires `vllm/vllm-openai:gemma4-cu130` (different image from NGC).
 #   Gemma-3-27b-it — HF-gated, account not yet approved.
-vllm_default_model: "Qwen/Qwen3.6-35B-A3B-FP8"
+vllm_default_model: "Qwen/Qwen3.8-27B-FP8"
 vllm_tensor_parallel_size: 2
 # NGC 26.03-py3 ships vllm without the fastsafetensors extra (tested 2026-04-19:
 # `ImportError: Please install vllm[fastsafetensors]`). The qwen-patch step in
@@ -231,12 +239,12 @@ vllm_tensor_parallel_size: 2
 vllm_load_format: "fastsafetensors"
 # Extra `vllm serve` args — tuned for full-cluster throughput.
 #
-# Context: native max_position_embeddings is 262144; fleet runs 225000 as a
-# stability margin vs GX10 abrupt-power-off reports at full native context
-# (see llmwiki/runs/2026-05-01-nvidia2-abrupt-power-off-vllm-long-context.md).
-# With FP8 weights + fp8 KV cache the per-token KV halves vs BF16, so
-# max_model_len 225000 still fits KV comfortably within the 70+ GiB cache
-# vLLM provisions at init.
+# Context: native max_position_embeddings is 262144. Fleet ran 225000 as a
+# GX10 abrupt-power-off margin (2026-05-01); 2026-08-19 raised Qwen3.8-27B-FP8
+# to native 262144 (no YaRN); 2026-08-19 evening enabled YaRN factor 2.0 →
+# 524288 (512 Ki). 1M is factor 4.0 — see llmwiki/concepts/qwen38-yarn-1m.md.
+# YaRN override is a file at /vllm-patches/qwen38-yarn.json (quoted cat)
+# because the serve task joins extra_args inside bash -lc.
 #
 # The flag block below is the adopted full set from
 # spark-vllm-docker recipes (qwen3.5-35b-a3b-fp8.yaml lineage) — same image family
@@ -287,7 +295,7 @@ vllm_api_server_extra_args:
   # There is NO `custom-*` / `local-*` / `byok-*` prefix. Every self-hosted
   # vLLM / Ollama user today masquerades as a frontier-model name. We pick
   # `gpt-4o-mini` as the primary cover:
-  #   - 128k advertised context (our --max-model-len 225000 ≥ that, so no
+  #   - 128k advertised context (our --max-model-len 524288 ≥ that, so no
   #     truncation surprises from Cursor's side)
   #   - no vision injection (unlike gpt-4o)
   #   - no reasoning-mode request shape (unlike o3-mini / o4-mini)
@@ -302,10 +310,15 @@ vllm_api_server_extra_args:
   - "--served-model-name"
   - "gpt-4o-mini"
   - "qwen3"
+  - "Qwen/Qwen3.8-27B-FP8"
   - "Qwen/Qwen3.6-35B-A3B-FP8"
   - "Qwen/Qwen3-Coder-Next-FP8"
   - "--max-model-len"
-  - "225000"
+  - "524288"
+  - "--hf-overrides"
+  # Quoted cat: serve starts inside bash -lc '... join(" ") ...'. Raw JSON
+  # brace-expands on mrope_section commas. File is bind-mounted at /vllm-patches.
+  - '"$(cat /vllm-patches/qwen38-yarn.json)"'
   - "--gpu-memory-utilization"
   # 0.80 robust default with FP8 weights + dual-HCA + Ray + FlashInfer stack.
   # GB10 reports 119.61 GiB to CUDA (UMA: LPDDR5X shared CPU + GPU pool).
@@ -334,14 +347,14 @@ vllm_api_server_extra_args:
   - "--attention-backend"
   - "flashinfer"
   - "--enable-prefix-caching"
-  # --- Tool calling + Unsloth chat template (Qwen3.6 production) ---
-  - "--chat-template"
-  - "/vllm-patches/unsloth.jinja"
+  # --- Tool calling + reasoning (Qwen3.8; use model chat template, not Unsloth 3.6) ---
   - "--enable-auto-tool-choice"
   - "--tool-call-parser"
   - "qwen3_coder"
   - "--reasoning-parser"
   - "qwen3"
+  - "--mm-encoder-tp-mode"
+  - "data"
 # Skip torch.compile / inductor kernels only if compilation fails on this GPU stack.
 vllm_enforce_eager: false
 # Ray GCS port (firewall + preflight). Container Ray still uses the same default.
@@ -463,7 +476,7 @@ vllm_distributed_extra_env:
   # If you ever need to add a model NOT in the cache, set this to "0" via -e
   # for the one playbook run, or stage it with hf-prefetch first (recommended).
   HF_HUB_OFFLINE: "1"
-  # Required for --max-model-len 225000 on Qwen3.6 (native 262144; vLLM 26.03+ validates against config).
+  # Required when --max-model-len exceeds or equals native (vLLM 26.03+ validates against config).
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   # unified memory that never gets used by our 2-node TP cluster (vLLM talks
   # to named actors, not the worker pool). Disable.
@@ -540,16 +553,33 @@ spark_provision_hf: true
 #   jq .models /var/lib/hf-prefetch/state.json
 # Total WAN cost is multi–100 GB for the Qwen checkpoints; QSFP save/sync is
 # ~minutes per model after each download completes on the leader.
+# Models the prefetch daemon downloads/keeps ready. Trimmed for DeepSeek headroom —
+# restore commented repos to hf_prefetch_models + re-run provision when needed.
+# Disk prune: `just spark-hf-prune` (uses hf_cache_keep_models; does not delete keep list).
 hf_prefetch_models:
   - TinyLlama/TinyLlama-1.1B-Chat-v1.0            # keep, smoke model
-  - Qwen/Qwen3.6-35B-A3B-FP8                    # production default (vllm_default_model)
-  - Qwen/Qwen3-Coder-30B-A3B-Instruct           # MoE coder; local NVMe + QSFP sync
-  - Qwen/Qwen3-Coder-Next-FP8                      # 80B/3B MoE hybrid; compare vs 30B-A3B
-  # Paused (re-enable when ready):
-  # - repo: moonshotai/Kimi-K2.7-Code             # ~554 GiB local + QSFP
+  - Qwen/Qwen3.8-27B-FP8                        # production default (vllm_default_model)
+  # Parked (re-add to prefetch + skip prune keep to restore):
+  # - Qwen/Qwen3.6-35B-A3B-FP8
+  # - Qwen/Qwen3-Coder-30B-A3B-Instruct
+  # - Qwen/Qwen3-Coder-Next-FP8
+  # - repo: moonshotai/Kimi-K2.7-Code
   # - repo: MiniMaxAI/MiniMax-M3
   #   cache_dir: "{{ spark_hf_nfs_mount }}/hub"
   #   sync_targets: []
+
+# Hub trees to retain on prune (`just spark-hf-prune` / playbooks/prune_hf_cache.yml).
+# DeepSeek profile also keeps dspark_model when hf_cache_prune_keep_active_dspark=true.
+hf_cache_keep_models:
+  - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  - Qwen/Qwen3.8-27B-FP8
+
+# DeepSeek-V4-Flash (roles/vllm_dspark_stacked) — used when spark_llm_profile=deepseek_v4_flash
+dspark_model: "deepseek-ai/DeepSeek-V4-Flash-0731"
+dspark_revision: "9e165c30e2704aec5d9d593cce3eebd58bbef1cb"
+dspark_served_model_name: "deepseek-v4-flash-0731"
+vllm_dspark_api_port: 8888
+vllm_dspark_master_port: 25000
 # Flip this to true in CI / blocking workflows to have Ansible wait for
 # every model to land (default: false, returns immediately).
 hf_prefetch_wait_for_ready: false
@@ -580,3 +610,6 @@ firewall_trusted_lan_tcp_ports:
   - "{{ vllm_stacked_container_api_port }}"
   - "{{ vllm_ray_port }}"
   - "{{ vllm_stacked_container_dashboard_port }}"
+  # DeepSeek Anemll stack (harmless when Qwen profile is active)
+  - "{{ vllm_dspark_api_port | default(8888) }}"
+  - "{{ vllm_dspark_master_port | default(25000) }}"

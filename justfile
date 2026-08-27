@@ -86,7 +86,21 @@ sunshine-logs:
     ssh ms02 'journalctl -u sunshine-virtual-xorg -u sunshine-virtual-desktop -u sunshine-headless --no-pager -n 100'
 
 sunshine-web:
+    open https://192.168.1.189:47990
+
+sunshine-web-vpn:
     open https://10.77.0.2:47990
+
+# ── GCE Hugging Face archive watcher (Kimi K3 FP8 → FP16/BF16) ────────────
+
+hf-kimi-watcher-status:
+    ssh ms02 'gcloud compute ssh hf-archive-downloader --zone=europe-west1-b --project=microscaler --tunnel-through-iap --quiet --command="systemctl list-timers hf-archive-watcher.timer --no-pager; systemctl show hf-archive-watcher.service -p ActiveState -p SubState -p Result; /opt/hf-archive-watcher/hf_archive_watcher.py status"'
+
+hf-kimi-watcher-logs:
+    ssh ms02 'gcloud compute ssh hf-archive-downloader --zone=europe-west1-b --project=microscaler --tunnel-through-iap --quiet --command="sudo journalctl -u hf-archive-watcher.service -n 100 --no-pager"'
+
+hf-kimi-watcher-poll:
+    ssh ms02 'gcloud compute ssh hf-archive-downloader --zone=europe-west1-b --project=microscaler --tunnel-through-iap --quiet --command="sudo systemctl start --no-block hf-archive-watcher.service"'
 
 # ── ms02 LAN reachability (HTTP probes; no SSH tunnel) ─────────────────────
 
@@ -722,6 +736,12 @@ spark-model-status *args:
     cd '{{ justfile_directory() }}'
     python3 scripts/spark_model_status.py "$@"
 
+# Poll hf-prefetch for Qwen3.8-27B-FP8. When status=ready, A/B with:
+#   just spark-model-status ansible-vllm --recreate -e vllm_default_model=Qwen/Qwen3.8-27B-FP8
+# Production default stays Qwen3.6-35B-A3B-FP8 until that boot test passes.
+spark-qwen38-status:
+    ssh nvidia1 'jq ".models[\"Qwen/Qwen3.8-27B-FP8\"]" /var/lib/hf-prefetch/state.json'
+
 # Full local workflow: inventory edit → spark_model_status cutover → full provision + assert.
 # Equivalent to: just spark-provision-recreate (after HF prefetch steps in cutover).
 # Edit inventory/group_vars/sparks.yml first (hf_prefetch_models, vllm_default_model).
@@ -769,6 +789,40 @@ spark-model-status-test:
 
 # Model cutover: edit sparks.yml → `just spark-model-cutover --recreate` (full provision + assert).
 # Equivalent to: spark-provision-recreate after hf prefetch steps.
+
+# Prune unused HF hub trees on Sparks (keeps hf_cache_keep_models). See docs/spark_llm_profiles.md.
+spark-hf-prune *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/prune_hf_cache.yml -l sparks ${extra[@]+"${extra[@]}"}
+
+# Dry-run HF prune (no deletes).
+spark-hf-prune-check *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/prune_hf_cache.yml -l sparks -e hf_cache_prune_dry_run=true ${extra[@]+"${extra[@]}"}
+
+# Switch Sparks to Qwen3.8 NGC Ray/torchrun profile (recreate stacked containers).
+spark-profile-qwen *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks \
+      -e spark_llm_profile=qwen38 \
+      -e vllm_stacked_container_recreate=true \
+      ${extra[@]+"${extra[@]}"}
+
+# Switch Sparks to DeepSeek-V4-Flash DSpark profile (recreate dspark containers).
+spark-profile-deepseek *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks \
+      -e spark_llm_profile=deepseek_v4_flash \
+      -e vllm_dspark_recreate=true \
+      ${extra[@]+"${extra[@]}"}
 
 # ── Spark runtime ops (not provision — read-only / recovery) ────────────────
 

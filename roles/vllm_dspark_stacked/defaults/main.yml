@@ -1,0 +1,60 @@
+---
+# DeepSeek-V4-Flash on 2× DGX Spark — first-party vLLM stack (Anemll image).
+# Uses docker run + mp TP=2 (not Ray, not MiaAI launcher scripts).
+# Mutual exclusion with NGC Qwen stack via spark_llm_profile.
+
+vllm_dspark_install_dir: /opt/vllm-dspark
+vllm_dspark_config_dir: /etc/vllm-dspark
+vllm_dspark_patches_host_dir: /opt/vllm-dspark/patches
+vllm_dspark_tmp_host_dir: "{{ spark_runtime_home }}/.cache/dspark-tmp"
+
+# Anemll GB10 image with DSpark / nvfp4_ds_mla (NGC cannot serve this checkpoint).
+vllm_dspark_image: "ghcr.io/anemll/dspark-vllm-gx10:0.1.1"
+vllm_dspark_image_digest: "sha256:a83948492cf13df455170fb42885f5ef4db54fefe0feff0f841ecbff464ac9d8"
+vllm_dspark_pull_image: true
+# When true, docker pull uses image@digest.
+vllm_dspark_pin_digest: true
+
+vllm_dspark_container_name: "vllm-dspark-{{ inventory_hostname }}"
+vllm_dspark_hf_home: "{{ vllm_hf_home | default(spark_runtime_home ~ '/.cache/huggingface') }}"
+vllm_dspark_hf_container_home: /cache/huggingface
+vllm_dspark_shm_size: "64gb"
+
+vllm_dspark_api_host: "0.0.0.0"
+vllm_dspark_api_port: 8888
+vllm_dspark_master_port: 25000
+
+vllm_dspark_recreate: false
+vllm_dspark_rdma_enabled: true
+vllm_dspark_rdma_device_path: /dev/infiniband
+
+# Apply vendored hotfixes from files/patches before `vllm serve`.
+vllm_dspark_hotfixes_enabled: true
+
+# Model
+dspark_model: "deepseek-ai/DeepSeek-V4-Flash-0731"
+dspark_revision: "9e165c30e2704aec5d9d593cce3eebd58bbef1cb"
+dspark_served_model_name: "deepseek-v4-flash-0731"
+
+# Serve knobs (encode into env + serve.sh)
+dspark_max_model_len: 1048576
+dspark_max_num_seqs: 6
+dspark_max_num_batched_tokens: 8192
+dspark_long_prefill_token_threshold: 1024
+dspark_gpu_memory_utilization: "0.835"
+dspark_mtp_num_tokens: 5
+dspark_draft_sample_method: probabilistic
+dspark_default_thinking: max
+dspark_tensor_parallel_size: 2
+dspark_hf_hub_offline: true
+
+# Download weights into HF cache (leader then rsync peers) when missing.
+vllm_dspark_prepare_weights: true
+vllm_dspark_prepare_image: "{{ vllm_dspark_image }}"
+
+# API ready poll (leader)
+vllm_dspark_api_ready_retries: 120
+vllm_dspark_api_ready_delay_sec: 15
+
+# Extra env merged into dspark.env.j2
+vllm_dspark_extra_env: {}

@@ -106,6 +106,9 @@ etc.). See [`llmwiki/entities/hf-prefetch-service.md`](../llmwiki/entities/hf-pr
 
 ## Runbook — HF weights sync and vLLM model switchover
 
+For **Qwen ↔ DeepSeek profile switches**, HF prune, and the DeepSeek DSpark
+runbook, see [`docs/spark_llm_profiles.md`](spark_llm_profiles.md).
+
 Use this when you **add a new Hugging Face repo to the cache**, **change which
 checkpoint the stack serves**, or **refresh daemon config** after editing
 inventory. All knobs live in **`inventory/group_vars/sparks.yml`** unless you

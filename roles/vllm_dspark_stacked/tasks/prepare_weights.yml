@@ -1,0 +1,42 @@
+---
+# Download DeepSeek weights into HF hub on the leader, then rsync to peers.
+
+- name: Check whether DeepSeek revision snapshot already exists
+  ansible.builtin.stat:
+    path: >-
+      {{ vllm_dspark_hf_home }}/hub/models--{{ dspark_model | replace('/', '--') }}/snapshots/{{ dspark_revision }}
+  register: vllm_dspark_snapshot
+  when: (dspark_revision | default('') | length) > 0
+
+- name: Download DeepSeek snapshot on leader (huggingface_hub in Anemll image)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker run --rm \
+      -e HF_HOME=/cache/huggingface \
+      -e HF_HUB_ENABLE_HF_TRANSFER=0 \
+      -v "{{ vllm_dspark_hf_home }}:/cache/huggingface" \
+      "{{ vllm_dspark_prepare_image }}" \
+      python3 -c 'from huggingface_hub import snapshot_download; snapshot_download(repo_id={{ dspark_model | to_json }}, revision={{ dspark_revision | to_json }}); print("ok")'
+  args:
+    executable: /bin/bash
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - (dspark_revision | default('') | length) > 0
+    - not (vllm_dspark_snapshot.stat.exists | default(false))
+
+- name: Rsync DeepSeek hub tree from leader to peer over QSFP
+  ansible.builtin.shell: |
+    set -euo pipefail
+    LEADER_IC="{{ hostvars[groups['sparks'] | sort | first].spark_interconnect_ip }}"
+    REL="hub/models--{{ dspark_model | replace('/', '--') }}"
+    mkdir -p "{{ vllm_dspark_hf_home }}/${REL}"
+    rsync -a \
+      -e "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes" \
+      "{{ spark_runtime_user | default('nvidia') }}@${LEADER_IC}:{{ vllm_dspark_hf_home }}/${REL}/" \
+      "{{ vllm_dspark_hf_home }}/${REL}/"
+  args:
+    executable: /bin/bash
+  when:
+    - inventory_hostname != (groups['sparks'] | sort | first)
+    - (dspark_revision | default('') | length) > 0
+    - not (vllm_dspark_snapshot.stat.exists | default(false))

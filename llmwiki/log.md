@@ -1122,3 +1122,60 @@ across machines are impossible.
 
 ## [2026-07-16] ops | lan-edge-captured-in-ansible
 Audited ad-hoc ms02/Mac LAN edge (dnsmasq, /etc/resolver, UFW DNS/haproxy/k8s, MetalLB L3 forward). Captured into cylon-local-infra: roles `dev_dns`, `metallb_lan_route`, firewall LAN rules, mac_workstation resolver + route. Docs: [concepts/ms02-lan-edge-ansible.md](./concepts/ms02-lan-edge-ansible.md). Still shared-k8s: `microscaler-lan-proxy` haproxy render. Mac needs interactive `just metallb-lan-route-mac` + `just mac-dev-dns`.
+
+## [2026-08-17] ingest | Qwen3.8-27B — do not switch production yet
+Ingested [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) against live
+`nvcr.io/nvidia/vllm:26.03-py3` on nvidia1: vLLM **0.17.1** already registers
+`Qwen3_5ForConditionalGeneration`, but bundled **transformers 4.57.5** vs recipe
+**≥5.8.0**. Production stays **`Qwen/Qwen3.6-35B-A3B-FP8`**. If we try it, prefetch
+**`Qwen/Qwen3.8-27B-FP8`** (not BF16) then A/B — do not flip `vllm_default_model`
+until serve boots. Pages: [sources/qwen38-27b.md](./sources/qwen38-27b.md),
+[entities/model-qwen3_8-27b.md](./entities/model-qwen3_8-27b.md).
+
+## [2026-08-17] ops | queued Qwen3.8-27B-FP8 prefetch; NGC upgrade blocked on Ray
+Added **`Qwen/Qwen3.8-27B-FP8`** to `hf_prefetch_models` (production default unchanged).
+Ansible `--tags hf_prefetch,spark_assert` applied; daemon state **`downloading`**.
+`just spark-qwen38-status` polls readiness; A/B serve is
+`just spark-model-status ansible-vllm --recreate -e vllm_default_model=Qwen/Qwen3.8-27B-FP8`.
+NGC audit: **26.06** and **26.07** are already on both Sparks via ngc-image-sync, but
+**neither image ships `ray`** — Ray stacked production must stay on **26.03-py3**
+until we validate torchrun on a newer tag or NVIDIA restores Ray. 26.07 has
+transformers 5.6.1 (`qwen3_5` in CONFIG_MAPPING) which is closer to the Qwen3.8
+recipe than 26.03's 4.57.5, but still not 5.8.0.
+
+## [2026-08-17] ingest | Qwen3.8 YaRN 1M — do not enable on first boot
+1M context is **YaRN `factor: 4.0`**, not native (262144). Official flags:
+`VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` (already in sparks.yml) + `--hf-overrides`
+nested under **`text_config.rope_parameters`** (replace, not merge; keep
+mrope_*). Static YaRN hurts short prompts. KV ~37 KiB/token → ~36 GiB at 1M;
+2× GB10 TP=2 can fit, but first serve stays **225000**.
+[concepts/qwen38-yarn-1m.md](./concepts/qwen38-yarn-1m.md).
+
+## [2026-08-17] run | Qwen3.8-27B-FP8 cutover | success
+First full `ansible-vllm --recreate` died on `spark_nfs_client` chown of
+`/mnt/ms02-hf-archive` (NFS root_squash). Retried with
+`--tags vllm_ngc_stack,spark_assert` + recreate: Ray TP=2 on 26.03-py3,
+`/v1/models` lists **`Qwen/Qwen3.8-27B-FP8`**, short completion returned
+`QWEN38_OK`. Production default is 3.8-FP8 at `--max-model-len 225000` (no YaRN).
+
+## [2026-08-19] ops | Qwen3.8-27B-FP8 max-model-len 225000 → 262144
+Raised `--max-model-len` to native **262144** (still no YaRN). Killed
+`vllm serve` on `vllm-ngc-ray-head`, then
+`ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack,spark_assert`
+(no recreate; Ray kept). `/v1/models` 200; live argv has `--max-model-len 262144`;
+short chat with `enable_thinking=false` returned `QWEN38_262K_OK`. Hermes
+`~/.hermes/config.yaml` `context_length` / `context_window` = 262144 (backup
+`~/.hermes/config.yaml.20260819-134854.bak`); running Hermes PIDs still need a
+restart to pick that up. No long-context load was run (GX10 abrupt-power-off
+history at full native context).
+
+## [2026-08-19] ops | Qwen3.8-27B-FP8 YaRN factor 2.0 → 524288
+Official 512 Ki step (`262144 × 2`). Staged
+`roles/vllm_stacked_container/files/qwen_moe_patches/qwen38-yarn.json` and
+`--hf-overrides "$(cat /vllm-patches/qwen38-yarn.json)"` (raw JSON in the
+serve `bash -lc` line brace-expands). API restart only; Ray kept. vLLM log:
+`Using max model len 524288`, `hf_overrides.rope_type=yarn`, GPU KV
+**1,111,712** tokens, **8.32×** concurrency at 524288. Short chat
+`QWEN38_512K_OK`. Hermes `context_length`/`context_window` = 524288 (backup
+`~/.hermes/config.yaml.20260819-180614.bak`); running Hermes PIDs still need
+a restart. No long-context load. 1M (factor 4.0) still opt-in.

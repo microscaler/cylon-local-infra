@@ -1,0 +1,103 @@
+---
+# Prune Hugging Face hub dirs not listed in hf_cache_keep_models.
+# Hub dirname: models--Org--Name (HF cache convention).
+
+- name: Resolve effective keep list (Qwen keep + optional DeepSeek)
+  ansible.builtin.set_fact:
+    hf_cache_prune_keep_effective: >-
+      {{
+        (hf_cache_keep_models | default([]))
+        + (
+          [dspark_model]
+          if (
+            (hf_cache_prune_keep_active_dspark | default(true) | bool)
+            and (spark_llm_profile | default('qwen38')) == 'deepseek_v4_flash'
+            and (dspark_model | default('') | length > 0)
+          )
+          else []
+        )
+      }}
+
+- name: Fail when keep list is empty (refuses to wipe hub)
+  ansible.builtin.fail:
+    msg: >-
+      hf_cache_keep_models is empty — refusing prune. Set keep list in
+      inventory/group_vars/sparks.yml (at least Qwen/Qwen3.8-27B-FP8).
+  when:
+    - hf_cache_prune_require_keep_list | bool
+    - (hf_cache_prune_keep_effective | length) == 0
+
+- name: Ensure hub directory exists
+  ansible.builtin.file:
+    path: "{{ hf_cache_prune_hub_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Compute prune plan (Python — reliable hub dirname match)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import json, pathlib
+    hub = pathlib.Path({{ hf_cache_prune_hub_dir | to_json }})
+    keep_repos = {{ hf_cache_prune_keep_effective | to_json }}
+    keep_dirs = {("models--" + r.replace("/", "--")) for r in keep_repos}
+    present = sorted(p.name for p in hub.glob("models--*") if p.is_dir())
+    remove = [str(hub / name) for name in present if name not in keep_dirs]
+    print(json.dumps({"keep_dirs": sorted(keep_dirs), "present": present, "remove": remove}))
+    PY
+  args:
+    executable: /bin/bash
+  register: hf_cache_prune_plan_raw
+  changed_when: false
+
+- name: Parse prune plan
+  ansible.builtin.set_fact:
+    hf_cache_prune_plan: "{{ hf_cache_prune_plan_raw.stdout | from_json }}"
+
+- name: Report prune plan
+  ansible.builtin.debug:
+    msg:
+      hub: "{{ hf_cache_prune_hub_dir }}"
+      keep_dirs: "{{ hf_cache_prune_plan.keep_dirs }}"
+      remove: "{{ hf_cache_prune_plan.remove }}"
+      dry_run: "{{ hf_cache_prune_dry_run | bool }}"
+
+- name: Remove pruned hub directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ hf_cache_prune_plan.remove }}"
+  when:
+    - not (hf_cache_prune_dry_run | bool)
+    - (hf_cache_prune_plan.remove | length) > 0
+
+- name: Drop pruned repos from hf-prefetch state.json (leader)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    state="/var/lib/hf-prefetch/state.json"
+    if [ ! -f "$state" ]; then
+      exit 0
+    fi
+    python3 - <<'PY'
+    import json, pathlib
+    keep = set({{ hf_cache_prune_keep_effective | to_json }})
+    path = pathlib.Path("/var/lib/hf-prefetch/state.json")
+    data = json.loads(path.read_text())
+    models = data.get("models") or {}
+    dropped = [k for k in list(models) if k not in keep]
+    for k in dropped:
+        models.pop(k, None)
+    data["models"] = models
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    print("dropped_state=" + ",".join(dropped) if dropped else "dropped_state=")
+    PY
+  args:
+    executable: /bin/bash
+  when:
+    - not (hf_cache_prune_dry_run | bool)
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  register: hf_cache_prune_state_out
+  changed_when: >-
+    hf_cache_prune_state_out.stdout is defined
+    and 'dropped_state=' in hf_cache_prune_state_out.stdout
+    and not hf_cache_prune_state_out.stdout.strip().endswith('dropped_state=')

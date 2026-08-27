@@ -1,0 +1,182 @@
+---
+# DeepSeek-V4-Flash — Anemll vLLM mp TP=2 across Sparks (first-party).
+
+- name: Interconnect IPv4 for DeepSeek NCCL master
+  ansible.builtin.import_tasks: ../../vllm_stacked_container/tasks/preflight_interconnect.yml
+
+- name: Set DeepSeek leader IP and node rank
+  ansible.builtin.set_fact:
+    spark_dspark_leader_ip: "{{ hostvars[groups['sparks'] | sort | first].spark_interconnect_ip }}"
+    spark_dspark_node_rank: "{{ 0 if inventory_hostname == (groups['sparks'] | sort | first) else 1 }}"
+
+- name: Ensure DeepSeek install / config / tmp directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ spark_runtime_user | default('nvidia') }}"
+    group: "{{ spark_runtime_user | default('nvidia') }}"
+  loop:
+    - "{{ vllm_dspark_install_dir }}"
+    - "{{ vllm_dspark_config_dir }}"
+    - "{{ vllm_dspark_patches_host_dir }}"
+    - "{{ vllm_dspark_tmp_host_dir }}"
+    - "{{ vllm_dspark_hf_home }}"
+
+- name: Stage DeepSeek hotfixes onto host
+  ansible.builtin.copy:
+    src: "patches/"
+    dest: "{{ vllm_dspark_patches_host_dir }}/"
+    mode: "0644"
+  when: vllm_dspark_hotfixes_enabled | bool
+
+- name: Deploy DeepSeek env file
+  ansible.builtin.template:
+    src: dspark.env.j2
+    dest: "{{ vllm_dspark_config_dir }}/dspark-{{ inventory_hostname }}.env"
+    mode: "0644"
+
+- name: Deploy DeepSeek serve entrypoint
+  ansible.builtin.template:
+    src: dspark-serve.sh.j2
+    dest: "{{ vllm_dspark_config_dir }}/dspark-serve.sh"
+    mode: "0755"
+
+- name: Pull Anemll DeepSeek vLLM image
+  ansible.builtin.command:
+    cmd: >-
+      docker pull
+      {{
+        (vllm_dspark_image ~ '@' ~ vllm_dspark_image_digest)
+        if (vllm_dspark_pin_digest | bool and (vllm_dspark_image_digest | default('') | length) > 0)
+        else vllm_dspark_image
+      }}
+  register: vllm_dspark_pull_out
+  changed_when: >-
+    'Image is up to date' not in (
+    (vllm_dspark_pull_out.stdout | default(''))
+    ~ (vllm_dspark_pull_out.stderr | default(''))
+    )
+  when: vllm_dspark_pull_image | bool
+
+- name: Tag pulled digest image to short name
+  ansible.builtin.command:
+    cmd: >-
+      docker tag
+      {{ vllm_dspark_image }}@{{ vllm_dspark_image_digest }}
+      {{ vllm_dspark_image }}
+  when:
+    - vllm_dspark_pull_image | bool
+    - vllm_dspark_pin_digest | bool
+    - (vllm_dspark_image_digest | default('') | length) > 0
+  failed_when: false
+  changed_when: false
+
+- name: Prepare DeepSeek HF weights
+  ansible.builtin.import_tasks: prepare_weights.yml
+  when: vllm_dspark_prepare_weights | bool
+
+- name: Remove DeepSeek container when recreating
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ vllm_dspark_container_name }}"
+  failed_when: false
+  when: vllm_dspark_recreate | bool
+
+- name: Inspect DeepSeek container state
+  ansible.builtin.command:
+    cmd: docker container inspect -f "{{ '{{' }}json .State.Running{{ '}}' }}" "{{ vllm_dspark_container_name }}"
+  register: vllm_dspark_running
+  failed_when: false
+  changed_when: false
+
+- name: Start stopped DeepSeek container
+  ansible.builtin.command:
+    cmd: docker start "{{ vllm_dspark_container_name }}"
+  register: vllm_dspark_docker_start
+  when:
+    - not (vllm_dspark_recreate | bool)
+    - vllm_dspark_running.rc == 0
+    - (vllm_dspark_running.stdout | default("") | trim) == "false"
+  failed_when: false
+  changed_when: vllm_dspark_docker_start.rc == 0
+
+# Worker first (rank 1), then leader — NCCL handshake expects peer early.
+- name: Start DeepSeek worker container (rank 1, headless)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker run -d --restart unless-stopped \
+      --name "{{ vllm_dspark_container_name }}" \
+      --entrypoint /bin/bash \
+      --network host \
+      --ipc host \
+      --shm-size "{{ vllm_dspark_shm_size }}" \
+      --gpus all \
+      {{ ('--device ' + vllm_dspark_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_dspark_rdma_enabled | bool) else '' }} \
+      --env-file "{{ vllm_dspark_config_dir }}/dspark-{{ inventory_hostname }}.env" \
+      -v "{{ vllm_dspark_hf_home }}:{{ vllm_dspark_hf_container_home }}" \
+      -v "{{ vllm_dspark_patches_host_dir }}:/opt/dspark-patches:ro" \
+      -v "{{ vllm_dspark_tmp_host_dir }}:/tmp" \
+      -v "{{ vllm_dspark_config_dir }}/dspark-serve.sh:/opt/dspark-serve.sh:ro" \
+      "{{ vllm_dspark_image }}" \
+      -lc 'exec /bin/bash /opt/dspark-serve.sh'
+  args:
+    executable: /bin/bash
+  when:
+    - inventory_hostname != (groups['sparks'] | sort | first)
+    - vllm_dspark_recreate | bool
+      or vllm_dspark_running.rc != 0
+      or (
+        (vllm_dspark_running.stdout | default("") | trim) == "false"
+        and (
+          vllm_dspark_docker_start is not defined
+          or vllm_dspark_docker_start.rc != 0
+        )
+      )
+
+- name: Wait briefly for worker before starting leader
+  ansible.builtin.pause:
+    seconds: 10
+  when: inventory_hostname == (groups['sparks'] | sort | first)
+
+- name: Start DeepSeek leader container (rank 0, API)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker run -d --restart unless-stopped \
+      --name "{{ vllm_dspark_container_name }}" \
+      --entrypoint /bin/bash \
+      --network host \
+      --ipc host \
+      --shm-size "{{ vllm_dspark_shm_size }}" \
+      --gpus all \
+      {{ ('--device ' + vllm_dspark_rdma_device_path + ' --cap-add IPC_LOCK --ulimit memlock=-1:-1') if (vllm_dspark_rdma_enabled | bool) else '' }} \
+      --env-file "{{ vllm_dspark_config_dir }}/dspark-{{ inventory_hostname }}.env" \
+      -v "{{ vllm_dspark_hf_home }}:{{ vllm_dspark_hf_container_home }}" \
+      -v "{{ vllm_dspark_patches_host_dir }}:/opt/dspark-patches:ro" \
+      -v "{{ vllm_dspark_tmp_host_dir }}:/tmp" \
+      -v "{{ vllm_dspark_config_dir }}/dspark-serve.sh:/opt/dspark-serve.sh:ro" \
+      "{{ vllm_dspark_image }}" \
+      -lc 'exec /bin/bash /opt/dspark-serve.sh'
+  args:
+    executable: /bin/bash
+  when:
+    - inventory_hostname == (groups['sparks'] | sort | first)
+    - vllm_dspark_recreate | bool
+      or vllm_dspark_running.rc != 0
+      or (
+        (vllm_dspark_running.stdout | default("") | trim) == "false"
+        and (
+          vllm_dspark_docker_start is not defined
+          or vllm_dspark_docker_start.rc != 0
+        )
+      )
+
+- name: Wait for DeepSeek OpenAI API on leader
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ vllm_dspark_api_port | int }}/v1/models"
+    status_code: 200
+    timeout: 5
+  register: vllm_dspark_api
+  retries: "{{ vllm_dspark_api_ready_retries | int }}"
+  delay: "{{ vllm_dspark_api_ready_delay_sec | int }}"
+  until: vllm_dspark_api.status | default(0) == 200
+  when: inventory_hostname == (groups['sparks'] | sort | first)

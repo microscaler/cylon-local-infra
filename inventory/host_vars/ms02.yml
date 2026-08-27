@@ -36,6 +36,13 @@ firewall_trusted_lan_rules:
   - {port: 80, proto: tcp, comment: "Microscaler dev haproxy HTTP"}
   - {port: 443, proto: tcp, comment: "Microscaler dev haproxy HTTPS"}
   - {port: 6443, proto: tcp, comment: "Microscaler dev Kubernetes API (kubectl from Mac)"}
+  - {port: 47984, proto: tcp, comment: "LAN Sunshine HTTPS"}
+  - {port: 47989, proto: tcp, comment: "LAN Sunshine control"}
+  - {port: 47990, proto: tcp, comment: "LAN Sunshine Web UI"}
+  - {port: 48010, proto: tcp, comment: "LAN Sunshine RTSP"}
+  - {port: "47998:48000", proto: udp, comment: "LAN Sunshine media"}
+  - {port: 48002, proto: udp, comment: "LAN Sunshine microphone"}
+  - {port: 48010, proto: udp, comment: "LAN Sunshine video"}
 
 # Remote picolino arrives through WireGuard as 10.77.0.3. Keep this /32 policy
 # separate from the broad home-LAN rules.
@@ -60,10 +67,10 @@ firewall_trusted_vpn_rules:
   - {port: 48002, proto: udp, comment: "WireGuard Sunshine microphone"}
   - {port: 48010, proto: udp, comment: "WireGuard Sunshine video"}
 
-# ── Sunshine/Moonlight remote desktop over WireGuard ─────────────────────
+# ── Sunshine/Moonlight remote desktop over LAN or WireGuard ──────────────
 # A dedicated Xorg/XFCE session avoids console autologin and works without a
-# physical display or dummy plug. Sunshine is not exposed to the home LAN or
-# public internet; only picolino's WireGuard address is allowed above.
+# physical display or dummy plug. Sunshine is available to the trusted home LAN
+# and picolino's WireGuard address, but remains blocked from the public internet.
 sunshine_remote_desktop_enabled: true
 sunshine_remote_desktop_user: casibbald
 sunshine_remote_desktop_uid: 1000

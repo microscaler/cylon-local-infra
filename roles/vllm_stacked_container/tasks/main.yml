@@ -45,6 +45,7 @@
     - _triton_alloc_setup.py
     - _triton_alloc_setup.pth
     - unsloth.jinja
+    - qwen38-yarn.json
   when: vllm_stacked_container_qwen_moe_patches_enabled | bool
 
 # Operator reference only; upstream URL path has moved (404) on some branches.
