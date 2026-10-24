@@ -13,6 +13,6 @@ node-taint:
   - "{{ t }}"
 {% endfor %}
 kubelet-arg:
-{% for a in k3s_agent_kubelet_args %}
+{% for a in k3s_agent_kubelet_args_oom + k3s_agent_kubelet_args %}
   - "{{ a }}"
 {% endfor %}

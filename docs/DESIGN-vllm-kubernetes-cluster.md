@@ -1,7 +1,9 @@
 # Design — the Cylon GPU cluster: eight DGX Sparks under Kubernetes, vLLM as pods
 
 Status: **draft for review** (24 Oct 2026, revised the same day: the MS-A2 is off the table — memory shortages push its
-delivery out — so the Sparks join the existing ms02 k3s cluster). Nothing here is built yet. Owner: Charles.
+delivery out — so the Sparks join the existing ms02 k3s cluster). Owner: Charles.
+**Phase status (24 Oct 2026): vLLM is now served from Kubernetes** on nvidia1/nvidia2 (spark1/spark2) — see 5.7.
+The Docker serving stack is retired on cylon nodes.
 
 This document replaces the Docker + Ansible serving stack on the Sparks by making all eight GX10 units GPU nodes of the
 existing **ms02 k3s cluster** (control plane in a Multipass VM on ms02), serving vLLM as pods, reachable from
@@ -239,6 +241,30 @@ serving**: `playbooks/cylon_node.yml` (`just cylon-node-up host=…`). Where it 
   to -999) so the kernel kills it before vLLM. nvidia1 has ~0.5 GB `MemAvailable` while serving. Revert in Phase 4.
 - Kubelet sets `vm.overcommit_memory=1`, `kernel.panic=10`, `kernel.panic_on_oops=1` on start (upstream, no opt-out).
 - Kubelet eviction/GC thresholds lowered to 5 % / 92 % because the 916 GB disks are 82–84 % HF cache.
+
+### 5.7 As built (24 Oct 2026) — vLLM served from Kubernetes (Phase 4 for spark1/spark2)
+
+The Docker Ray/vLLM stack on nvidia1/nvidia2 was replaced by pods the same day (downtime 14:36:53 → 14:46:51 EEST,
+~10 min, of which ~6 min were a service-env bug fixed in flight; the model group itself loads in ~2.5 min).
+
+- **shared-gitops** stacks (not parked): `cylon-gpu` = PriorityClass `cylon-serving`, NVIDIA device plugin v0.20.1
+  (`nvidia` RuntimeClass), rdma-shared-dev-plugin v1.5.4 (`rdma/roce_fabric` = both Cage A HCAs), LeaderWorkerSet
+  v0.11.1 (controller on k8s-worker-2); `cylon-serving` = LWS `cylon/qwen38-27b` (size 2, hostNetwork, leader
+  pinned to slot 1 so `http://192.168.1.104:8000/v1` is unchanged), Service `cylon/vllm`, LiteLLM v1.102.4 gateway
+  `cylon/llm-gateway:80` on MetalLB **10.177.76.236** (master key generated in-cluster, Secret
+  `llm-gateway-master-key`).
+- Same env / patches / `vllm serve` args as the Docker role. RDMA via the shared device plugin (no privileged pods),
+  `IPC_LOCK`, memlock unlimited through `LimitMEMLOCK=infinity` on k3s-agent. NCCL uses `NET/IB` on both HCAs (GDR
+  reported disabled, as GB10 UMA has no peer-mem path). `enableServiceLinks: false` — Service `vllm` otherwise injects
+  `VLLM_PORT=tcp://…`, which vLLM rejects.
+- Image: thin derived `10.177.76.220:5000/cylon/vllm:26.03-py3-cylon.1` (fastsafetensors 0.4.0 + Triton shim),
+  built on each node from its local NGC base and imported into k3s containerd, pinned against GC
+  (`just cylon-vllm-image`); not pushed to the registry yet.
+- Host: `group_vars/cylon_nodes.yml` retires the Docker stack, image sync and auto-upgrade; `cylon_node.yml`
+  keeps the old containers stopped with restart=no (kept, not removed, for rollback); k3s back to the default
+  OOM priority; hf-prefetch stays (it fills the HF cache the pods mount). `spark_assert` cylon profile checks all of it.
+- Measured: decode 13.1 tok/s (Docker baseline 13.0) for 512-token generations; leader pod deleted → group rebuilt
+  and serving in 116 s.
 
 ## 6. Node layer: what Ansible keeps doing
 

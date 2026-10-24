@@ -8,8 +8,11 @@
 #   1. node: route 10.177.76.0/24 via ms02 + UFW for kubelet / VXLAN / pod forwarding
 #   2. ms02: stop masquerading VM → cylon-node traffic (needs 1 for the return path)
 #   3. node: pinned k3s agent, tainted nvidia.com/gpu=present:NoSchedule, one at a time
+#   4. node: the Docker vLLM stack stays retired (vLLM is served by Kubernetes since
+#      24 Oct 2026): containers stopped with restart=no (kept, not removed), image sync and
+#      auto-upgrade daemons disabled
 # Hosts join the `cylon_nodes` inventory group (with cylon_node_* host_vars) to be
-# eligible. Nothing here touches Docker, the vLLM containers, the QSFP fabric or NCCL.
+# eligible. Nothing here touches the QSFP fabric or NCCL.
 
 - name: Cylon node — LAN route to ms02's VMs + UFW for k3s
   hosts: cylon_nodes
@@ -31,6 +34,7 @@
   become: true
   serial: 1
   roles:
+    - cylon_docker_vllm_retired
     - k3s_agent
   post_tasks:
     - name: Assert the cylon node profile

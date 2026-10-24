@@ -1,0 +1,11 @@
+---
+# Build the thin derived vLLM image on every cylon node and import it into k3s's
+# containerd (roles/cylon_vllm_image). Nodes build in parallel from their local NGC base.
+#
+#   just cylon-vllm-image
+- name: Cylon node — derived vLLM image in k3s containerd
+  hosts: cylon_nodes
+  gather_facts: false
+  become: true
+  roles:
+    - cylon_vllm_image

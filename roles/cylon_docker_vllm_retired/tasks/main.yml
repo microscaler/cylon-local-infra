@@ -1,0 +1,37 @@
+---
+- name: Docker vLLM retired
+  tags: [cylon_node, cylon_docker_vllm_retired]
+  block:
+    - name: Stop and disable the Docker-stack daemons (image sync, auto-upgrade)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ cylon_docker_vllm_services }}"
+      register: cylon_docker_vllm_svc
+      failed_when:
+        - cylon_docker_vllm_svc is failed
+        - "'Could not find the requested service' not in (cylon_docker_vllm_svc.msg | default(''))"
+
+    - name: Which Docker vLLM containers exist
+      ansible.builtin.command:
+        argv: [docker, ps, -a, --format, "{{ '{{' }}.Names{{ '}}' }}"]
+      register: cylon_docker_vllm_ps
+      changed_when: false
+
+    - name: Never restart them (restart policy no)
+      ansible.builtin.command:
+        argv: [docker, update, --restart=no, "{{ item }}"]
+      loop: "{{ cylon_docker_vllm_containers | select('in', cylon_docker_vllm_ps.stdout_lines) | list }}"
+      changed_when: false
+
+    - name: Running Docker vLLM containers
+      ansible.builtin.command:
+        argv: [docker, ps, --format, "{{ '{{' }}.Names{{ '}}' }}"]
+      register: cylon_docker_vllm_running
+      changed_when: false
+
+    - name: Stop them (the GPUs, :8000 and :6379 belong to the pods)
+      ansible.builtin.command:
+        argv: [docker, stop, -t, "30", "{{ item }}"]
+      loop: "{{ cylon_docker_vllm_containers | select('in', cylon_docker_vllm_running.stdout_lines) | list }}"

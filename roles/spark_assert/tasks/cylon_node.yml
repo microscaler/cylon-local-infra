@@ -40,11 +40,63 @@
       changed_when: false
       failed_when: (k3s_agent_version | default('v1.36.2+k3s1')) not in spark_assert_k3s_version.stdout
 
-    - name: Assert — k3s agent loses OOM fights to vLLM (oom_score_adj)
+    - name: Assert — k3s agent OOM priority (default unless k3s_agent_oom_score_adj is set)
       ansible.builtin.shell: "cat /proc/$(systemctl show -p MainPID --value k3s-agent)/oom_score_adj"
       register: spark_assert_k3s_oom
       changed_when: false
-      failed_when: spark_assert_k3s_oom.stdout | trim | int != (k3s_agent_oom_score_adj | default(1000) | int)
+      failed_when: >-
+        (spark_assert_k3s_oom.stdout | trim | int != k3s_agent_oom_score_adj | int)
+        if k3s_agent_oom_score_adj is not none
+        else (spark_assert_k3s_oom.stdout | trim | int > 0)
+
+    - name: Assert — pods get unlimited memlock (k3s-agent LimitMEMLOCK)
+      ansible.builtin.command:
+        argv: [systemctl, show, -p, LimitMEMLOCK, --value, k3s-agent]
+      register: spark_assert_k3s_memlock
+      changed_when: false
+      failed_when: spark_assert_k3s_memlock.stdout | trim != 'infinity'
+
+    - name: Assert — derived vLLM image present (and pinned) in k3s containerd
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s ctr -n k8s.io images ls | grep -F '{{ cylon_vllm_image | default('10.177.76.220:5000/cylon/vllm:26.03-py3-cylon.1') }} ' | grep -q 'io.cri-containerd.pinned=pinned'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Assert — Docker vLLM stack retired (no vLLM container running or set to restart)
+      ansible.builtin.shell: |
+        set -o pipefail
+        docker ps -a --filter name=vllm- --format '{{ '{{' }}.Names{{ '}}' }} {{ '{{' }}.State{{ '}}' }}' | while read -r n st; do
+          pol=$(docker inspect -f '{{ '{{' }}.HostConfig.RestartPolicy.Name{{ '}}' }}' "$n")
+          if [ "$st" = running ] || { [ "$pol" != no ] && [ -n "$pol" ]; }; then echo "$n $st restart=$pol"; fi
+        done
+      args:
+        executable: /bin/bash
+      register: spark_assert_docker_vllm
+      changed_when: false
+      failed_when: spark_assert_docker_vllm.stdout | trim | length > 0
+
+    - name: Assert — image sync / auto-upgrade daemons not running or enabled
+      ansible.builtin.shell: |
+        for s in vllm-stack-autoupgrade ngc-image-sync; do
+          a=$(systemctl is-active "$s" 2>/dev/null); e=$(systemctl is-enabled "$s" 2>/dev/null)
+          if [ "$a" = active ] || [ "$e" = enabled ]; then echo "$s $a $e"; fi
+        done
+      register: spark_assert_docker_daemons
+      changed_when: false
+      failed_when: spark_assert_docker_daemons.stdout | trim | length > 0
+
+    - name: Assert — the Kubernetes model group answers on the leader node (slot 1)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ vllm_stacked_container_api_port | default(8000) }}/v1/models"
+        return_content: true
+        timeout: 10
+      register: spark_assert_k8s_vllm
+      failed_when: >-
+        spark_assert_k8s_vllm.status != 200
+        or (vllm_default_model | default('Qwen/Qwen3.8-27B-FP8')) not in spark_assert_k8s_vllm.content
+      when: (cylon_node_slot | default(0) | int) == 1
 
     - name: Assert — kubelet answers on its healthz port
       ansible.builtin.uri:

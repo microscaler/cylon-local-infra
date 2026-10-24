@@ -691,6 +691,29 @@ ms02 +cmd:
 
 spark-vllm-api := env_var_or_default('SPARK_VLLM_API', 'http://192.168.1.104:8000')
 
+# Cylon nodes (inventory group cylon_nodes) serve vLLM from Kubernetes since 24 Oct 2026
+# (shared-gitops stacks cylon-gpu / cylon-serving); the Docker stack there is retired and the
+# recipes that would recreate it refuse (_docker-vllm-guard). Rollback only, after scaling the
+# LeaderWorkerSet to 0: CYLON_ALLOW_DOCKER_VLLM=1 just <recipe> (RUNBOOK-spark-recovery.md).
+docker-vllm-override := if env_var_or_default('CYLON_ALLOW_DOCKER_VLLM', '') == '1' { '-e spark_provision_vllm_stacked_container=true -e spark_assert_vllm_api=true' } else { '' }
+
+# Refuse Docker-vLLM (re)creation on cylon nodes unless CYLON_ALLOW_DOCKER_VLLM=1.
+_docker-vllm-guard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    if [[ "${CYLON_ALLOW_DOCKER_VLLM:-}" == 1 ]]; then
+      echo ">>> CYLON_ALLOW_DOCKER_VLLM=1 — Docker vLLM rollback path (is LWS cylon/qwen38-27b at replicas 0?)"
+      exit 0
+    fi
+    cylon="$(ansible-inventory --graph cylon_nodes 2>/dev/null | grep -Eo 'nvidia[0-9]+' | sort -u | tr '\n' ' ')"
+    if [[ -n "${cylon}" ]]; then
+      echo "✗ refusing: ${cylon}are cylon nodes — vLLM is served by Kubernetes there (LWS cylon/qwen38-27b)."
+      echo "  Restart it:  just cylon-vllm-restart        Status: just cylon-vllm-status"
+      echo "  Docker rollback only: RUNBOOK-spark-recovery.md (CYLON_ALLOW_DOCKER_VLLM=1)"
+      exit 1
+    fi
+
 # Canonical — full end-to-end reconcile + state assert.
 spark-provision *extra:
     #!/usr/bin/env bash
@@ -699,7 +722,7 @@ spark-provision *extra:
     ansible-playbook playbooks/provision_sparks.yml -l sparks ${extra[@]+"${extra[@]}"}
 
 # Full reconcile + recreate vLLM containers for the active stack only (vllm_stack_kind in inventory).
-spark-provision-recreate:
+spark-provision-recreate: _docker-vllm-guard
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
@@ -713,7 +736,7 @@ spark-provision-recreate:
       extra=(-e vllm_stacked_container_recreate=true)
       echo ">>> vllm_stack_kind=ray — recreating Ray only (torchrun will be torn down)"
     fi
-    ansible-playbook playbooks/provision_sparks.yml -l sparks "${extra[@]}"
+    ansible-playbook playbooks/provision_sparks.yml -l sparks "${extra[@]}" {{ docker-vllm-override }}
 
 # Dry-run full provision (check mode).
 spark-provision-check:
@@ -886,7 +909,7 @@ spark-vllm-ps:
 # Start the Ray *head* container on nvidia1. Idempotent: `docker start` is a
 # no-op if already running. Only valid when inventory vllm_stack_kind=ray —
 # use `just spark-provision` for torchrun.
-spark-vllm-head-start:
+spark-vllm-head-start: _docker-vllm-guard
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
@@ -899,7 +922,7 @@ spark-vllm-head-start:
       'docker start vllm-ngc-ray-head || true; docker ps -a --filter name=vllm-ngc-ray-head'
 
 # Restart the Ray *head* container on nvidia1 (graceful stop + start).
-spark-vllm-head-restart:
+spark-vllm-head-restart: _docker-vllm-guard
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
@@ -908,7 +931,7 @@ spark-vllm-head-restart:
 
 # Start the Ray *worker* container on nvidia2 only — recovery after a power loss
 # left `vllm-ngc-ray-worker-nvidia2` in `Exited` state (safe to re-run).
-spark-vllm-worker-start:
+spark-vllm-worker-start: _docker-vllm-guard
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
@@ -916,7 +939,7 @@ spark-vllm-worker-start:
       'docker start vllm-ngc-ray-worker-nvidia2 || true; docker ps -a --filter name=vllm-ngc-ray-worker-nvidia2'
 
 # Restart the Ray *worker* container on nvidia2.
-spark-vllm-worker-restart:
+spark-vllm-worker-restart: _docker-vllm-guard
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
@@ -1247,13 +1270,13 @@ spark-vllm-stop:
 
 # Remove the inactive stack and leave only vllm_stack_kind from inventory running.
 # Use when Ray and torchrun are both up (port/NCCL thrash).
-spark-vllm-stack-teardown:
+spark-vllm-stack-teardown: _docker-vllm-guard
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
     ansible-playbook playbooks/provision_sparks.yml -l sparks \
       --tags vllm_ngc_stack,vllm_torchrun_stack,spark_assert \
-      -e spark_provision_assert=false \
+      -e spark_provision_assert=false {{ docker-vllm-override }} \
       --skip-tags apt,kernel,docker,firewall,hf,ngc,spark_obs,spark_wifi
 
 # Docker logs for the Ray head container (bootstrap); for API server stdout see
@@ -1277,7 +1300,7 @@ spark-vllm-api-kill:
 
 # Kill the API server then re-run the role's API-start step (no Ray restart).
 # Active stack follows inventory `vllm_stack_kind` (ray | torchrun).
-spark-vllm-api-restart:
+spark-vllm-api-restart: _docker-vllm-guard
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
@@ -1289,7 +1312,7 @@ spark-vllm-api-restart:
       ansible nvidia1 -m shell -a \
         'docker exec vllm-ngc-ray-head bash -lc "pkill -f \"[v]llm serve\" || true"'
       sleep 5
-      ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack
+      ansible-playbook playbooks/provision_sparks.yml -l sparks --tags vllm_ngc_stack {{ docker-vllm-override }}
     fi
 
 # Tail detached vLLM API logs on the leader (Ray: vllm serve; torchrun: api_server).
@@ -1413,6 +1436,44 @@ cylon-node-check host:
     set -euo pipefail
     h="{{host}}"; h="${h#host=}"
     ansible-playbook playbooks/cylon_node.yml -l "${h},ms02" --check --diff
+
+# Build the derived vLLM image (NGC 26.03 + fastsafetensors + Triton shim) on every cylon
+# node and import it into k3s containerd, pinned (roles/cylon_vllm_image). Idempotent.
+cylon-vllm-image:
+    cd '{{ justfile_directory() }}' && ansible-playbook playbooks/cylon_vllm_image.yml
+
+# The Kubernetes vLLM model group + gateway (shared-gitops cylon-serving).
+cylon-vllm-status:
+    ssh ms02 "kubectl -n cylon get lws,pods,svc -o wide -l 'app.kubernetes.io/name in (vllm,llm-gateway)'"
+    curl -s -m 5 {{ spark-vllm-api }}/v1/models | python3 -m json.tool | grep '"id"' || echo "✗ {{ spark-vllm-api }}/v1/models not answering"
+
+# Rebuild the model group (leader + worker are recreated together; ~3 min to serve again).
+cylon-vllm-restart:
+    ssh ms02 "kubectl -n cylon delete pod qwen38-27b-0 --wait=false"
+
+# Emergency only: serve from the retired Docker stack again (containers/image kept for a few
+# days after the 24 Oct 2026 cutover). Suspends Flux for stack-cylon-serving, scales the
+# model group to 0, starts the Docker Ray head/worker and `vllm serve`.
+# Undo with `just cylon-vllm-rollforward`.
+cylon-vllm-rollback-docker:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ssh ms02 "flux suspend kustomization stack-cylon-serving -n flux-system; kubectl -n cylon patch lws qwen38-27b --type merge -p '{\"spec\":{\"replicas\":0}}'; kubectl -n cylon wait --for=delete pod -l leaderworkerset.sigs.k8s.io/name=qwen38-27b --timeout=180s || true"
+    ansible nvidia1 -b -m shell -a 'docker start vllm-ngc-ray-head'
+    ansible nvidia2 -b -m shell -a 'docker start vllm-ngc-ray-worker-nvidia2'
+    CYLON_ALLOW_DOCKER_VLLM=1 just spark-vllm-api-restart
+    curl -sf -m 10 {{ spark-vllm-api }}/v1/models >/dev/null && echo "✓ Docker vLLM serving; Flux stack-cylon-serving SUSPENDED — just cylon-vllm-rollforward to return"
+
+# Return from cylon-vllm-rollback-docker: stop Docker vLLM (restart=no), resume Flux (the
+# model group comes back at the replicas in Git).
+cylon-vllm-rollforward:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/cylon_node.yml -l cylon_nodes --tags cylon_docker_vllm_retired
+    ssh ms02 "flux resume kustomization stack-cylon-serving -n flux-system"
+    echo "model group loading (~3 min): just cylon-vllm-status"
 
 # Nodes, taints and labels of the cylon nodes as the cluster sees them.
 cylon-nodes-status:

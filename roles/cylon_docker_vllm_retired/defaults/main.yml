@@ -1,0 +1,11 @@
+---
+# Docker-era vLLM serving on a cylon node, kept retired (vLLM is a Kubernetes workload).
+# Containers are stopped and never restarted, but not removed (rollback for a few days).
+cylon_docker_vllm_containers:
+  - vllm-ngc-ray-head
+  - "vllm-ngc-ray-worker-{{ inventory_hostname }}"
+  - vllm-torchrun-head
+  - "vllm-torchrun-worker-{{ inventory_hostname }}"
+cylon_docker_vllm_services:
+  - vllm-stack-autoupgrade
+  - ngc-image-sync

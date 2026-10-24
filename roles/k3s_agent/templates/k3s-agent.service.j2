@@ -18,14 +18,21 @@ User=root
 LimitNOFILE=1048576
 LimitNPROC=infinity
 LimitCORE=infinity
+# Pods inherit containerd's rlimits (Kubernetes has no per-pod ulimit): vLLM/NCCL pin
+# RDMA buffers, so memlock is unlimited, as the Docker stack ran it (--ulimit memlock=-1).
+LimitMEMLOCK=infinity
 TasksMax=infinity
 TimeoutStartSec=0
 Restart=always
 RestartSec=5s
+{% if k3s_agent_oom_score_adj is not none %}
 OOMScoreAdjust={{ k3s_agent_oom_score_adj }}
+{% endif %}
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
 ExecStart=/usr/local/bin/k3s agent
+{% if k3s_agent_oom_score_adj is not none %}
 # k3s drops its own process to oom_score_adj -999 during start-up (the kubelet
 # --oom-score-adj flag is not applied in-process), so re-assert ours once it is ready.
 ExecStartPost=/bin/sh -c 'echo {{ k3s_agent_oom_score_adj }} > /proc/$MAINPID/oom_score_adj'
+{% endif %}

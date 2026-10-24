@@ -1,0 +1,10 @@
+# Managed by cylon-local-infra (roles/cylon_vllm_image). Do not edit on the host.
+FROM {{ cylon_vllm_image_base }}
+RUN pip install --no-cache-dir --disable-pip-version-check \
+      fastsafetensors=={{ cylon_vllm_image_fastsafetensors_version }} \
+ && python3 -c "import fastsafetensors"
+# Triton runtime allocator shim (auto-loaded via .pth): fused-MoE kernels stop stalling
+# on GB10's unified-memory allocator.
+COPY _triton_alloc_setup.py _triton_alloc_setup.pth {{ cylon_vllm_image_site_packages }}/
+LABEL org.opencontainers.image.base.name="{{ cylon_vllm_image_base }}" \
+      io.microscaler.cylon.fastsafetensors="{{ cylon_vllm_image_fastsafetensors_version }}"

@@ -35,20 +35,20 @@ k3s_agent_node_labels:
 k3s_agent_node_taints:
   - "nvidia.com/gpu=present:NoSchedule"
 
-# While vLLM still runs as Docker containers on the host (until design Phase 4),
-# k3s must lose any OOM fight: the agent (kubelet + containerd) runs at
-# oom_score_adj 1000 so the kernel kills it before vLLM/Ray. Kubelet would otherwise
-# set itself to -999. Set both back to the kubelet default (-999 / unset) once vLLM is
-# a pod on this node.
-k3s_agent_oom_score_adj: 1000
+# OOM priority of the agent (kubelet + embedded containerd). Unset (~) = k3s/kubelet default
+# (-999), now that vLLM runs as pods it manages (24 Oct 2026). While vLLM ran as Docker
+# containers beside the agent this was 1000 so the kernel killed k3s before vLLM/Ray; set a
+# number again only for such a mixed host.
+k3s_agent_oom_score_adj: ~
 
 # Kubelet tuning for 916 GB disks that hold the HF cache (~82–84 % used): the stock
 # 15 %/10 % eviction thresholds and 85 % image-GC trigger would flap DiskPressure.
 k3s_agent_kubelet_args:
-  - "oom-score-adj={{ k3s_agent_oom_score_adj }}"
   - "eviction-hard=memory.available<200Mi,nodefs.available<5%,imagefs.available<5%"
   - "image-gc-high-threshold=92"
   - "image-gc-low-threshold=88"
+# Kubelet flag only when overriding the default (-999).
+k3s_agent_kubelet_args_oom: "{{ [] if k3s_agent_oom_score_adj is none else ['oom-score-adj=' ~ k3s_agent_oom_score_adj] }}"
 
 # Note: kubelet itself sets vm.overcommit_memory=1, kernel.panic=10,
 # kernel.panic_on_oops=1 (and keeps vm.panic_on_oom=0, kernel.keys.*) at start —

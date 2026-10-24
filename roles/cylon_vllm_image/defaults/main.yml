@@ -1,0 +1,16 @@
+---
+# Thin derived vLLM image for the Kubernetes serving path (design §9.2).
+# FROM the pinned NGC image + the two bolt-ons the Docker stack applied with `docker exec`
+# on every cutover (fastsafetensors, Triton allocator .pth shim), so a pod start never
+# mutates its own image.
+#
+# Built on each cylon node from the NGC base already in Docker there, then imported into
+# k3s's containerd (k8s.io namespace) and pinned against kubelet image GC — no 20 GB pull
+# over Starlink. The tag names the LAN registry so a later push there needs no manifest
+# change; pods use imagePullPolicy IfNotPresent.
+cylon_vllm_image_base: "nvcr.io/nvidia/vllm:26.03-py3"
+cylon_vllm_image: "10.177.76.220:5000/cylon/vllm:26.03-py3-cylon.1"
+cylon_vllm_image_fastsafetensors_version: "0.4.0"
+cylon_vllm_image_site_packages: /usr/local/lib/python3.12/dist-packages
+cylon_vllm_image_build_dir: /opt/cylon/vllm-image
+cylon_vllm_image_patch_src: "{{ playbook_dir }}/../roles/vllm_stacked_container/files/qwen_moe_patches"

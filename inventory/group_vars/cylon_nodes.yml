@@ -1,0 +1,27 @@
+# Cylon nodes: Sparks joined to ms02's k3s whose vLLM is served by Kubernetes
+# (shared-gitops stacks cylon-gpu / cylon-serving: LeaderWorkerSet cylon/qwen38-27b,
+# gateway cylon/llm-gateway). Cut over 24 Oct 2026; design §17 Phase 4.
+#
+# Overrides group_vars/sparks.yml (ansible_group_priority in hosts.yml): the Docker serving
+# stack is retired here — provision_sparks.yml never (re)creates the Ray/vLLM containers or
+# the image/upgrade daemons, and playbooks/cylon_node.yml (roles/cylon_docker_vllm_retired)
+# keeps the old containers stopped with restart=no. The containers and the 26.03 image are
+# kept (not removed) for a few days as the rollback; RUNBOOK-spark-recovery.md.
+#
+# Kept: hf-prefetch (fills ~/.cache/huggingface, which the pods mount), firewall (the pods
+# use hostNetwork on the same ports), kernel/UMA/GPU-clock/observability host roles.
+
+spark_provision_vllm_stacked_container: false
+spark_provision_vllm_torchrun_stacked: false
+spark_provision_vllm_dspark_stacked: false
+spark_provision_vllm_glm53_stacked: false
+
+# Image sync and the auto-upgrade daemon drove the Docker stack; images now come from the
+# derived image (roles/cylon_vllm_image) and Git.
+spark_provision_ngc_image_sync: false
+spark_provision_vllm_autoupgrade: false
+vllm_autoupgrade_enabled: false
+
+# Docker-stack asserts (Ray containers, :8000 from the host) do not apply; the cylon node
+# profile (roles/spark_assert/tasks/cylon_node.yml) asserts the Kubernetes path instead.
+spark_assert_vllm_api: false

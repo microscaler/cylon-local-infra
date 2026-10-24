@@ -1,0 +1,71 @@
+---
+- name: Cylon vLLM image
+  tags: [cylon_vllm_image]
+  block:
+    - name: Build directory
+      ansible.builtin.file:
+        path: "{{ cylon_vllm_image_build_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Dockerfile
+      ansible.builtin.template:
+        src: Dockerfile.j2
+        dest: "{{ cylon_vllm_image_build_dir }}/Dockerfile"
+        mode: "0644"
+      register: cylon_vllm_image_dockerfile
+
+    - name: Triton allocator shim into the build context
+      ansible.builtin.copy:
+        src: "{{ cylon_vllm_image_patch_src }}/{{ item }}"
+        dest: "{{ cylon_vllm_image_build_dir }}/{{ item }}"
+        mode: "0644"
+      loop: [_triton_alloc_setup.py, _triton_alloc_setup.pth]
+      register: cylon_vllm_image_ctx
+
+    - name: Base image present in Docker
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{' }}.Id{{ '}}' }}", "{{ cylon_vllm_image_base }}"]
+      changed_when: false
+
+    - name: Derived image present in Docker?
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{' }}.Id{{ '}}' }}", "{{ cylon_vllm_image }}"]
+      register: cylon_vllm_image_docker
+      changed_when: false
+      failed_when: false
+
+    - name: Build the derived image (pip fastsafetensors needs network; base is local)
+      ansible.builtin.command:
+        argv: [docker, build, --pull=false, -t, "{{ cylon_vllm_image }}", "{{ cylon_vllm_image_build_dir }}"]
+      when: >-
+        cylon_vllm_image_docker.rc != 0
+        or cylon_vllm_image_dockerfile is changed
+        or cylon_vllm_image_ctx is changed
+      register: cylon_vllm_image_build
+      async: 3600
+      poll: 15
+
+    - name: Derived image in k3s containerd?
+      ansible.builtin.shell: |
+        k3s ctr -n k8s.io images ls -q | grep -Fx '{{ cylon_vllm_image }}'
+      args:
+        executable: /bin/bash
+      register: cylon_vllm_image_ctr
+      changed_when: false
+      failed_when: false
+
+    - name: Import into k3s containerd from Docker (~25 GB, local; no registry pull)
+      ansible.builtin.shell: |
+        set -o pipefail
+        docker save '{{ cylon_vllm_image }}' | k3s ctr -n k8s.io images import -
+      args:
+        executable: /bin/bash
+      when: cylon_vllm_image_ctr.rc != 0 or cylon_vllm_image_build is changed
+      async: 7200
+      poll: 30
+
+    - name: Pin the image against kubelet image GC
+      ansible.builtin.command:
+        argv: [k3s, ctr, -n, k8s.io, images, label, "{{ cylon_vllm_image }}", io.cri-containerd.pinned=pinned]
+      changed_when: false

@@ -1,18 +1,21 @@
 # Runbook — Spark recovery after abrupt power-off
 
-When a Spark hard-powers-off (no shutdown sequence, journal cuts mid-line):
+**Since 24 Oct 2026 vLLM on nvidia1/nvidia2 is served from Kubernetes** (ms02 k3s; shared-gitops stacks
+`cylon-gpu` / `cylon-serving`: LeaderWorkerSet `cylon/qwen38-27b`, gateway `cylon/llm-gateway` on 10.177.76.236;
+design doc §5.6/§17). There is nothing to restart by hand: when a Spark comes back, kubelet rejoins and the
+LeaderWorkerSet rebuilds the pair (any pod failure recreates the whole group), serving again in ~2–3 min.
 
 ```bash
 # 1. Power the Spark back on at the wall / button. Then:
-
-# 2. Bring the cluster back into service:
-just spark-vllm-api-restart        # restart `vllm serve` inside the head container
-just spark-vllm-status             # confirm head + worker are Up
+just cylon-vllm-status             # group Running 1/1, /v1/models answering
+just cylon-vllm-restart            # only if the group is wedged: recreates leader + worker
 just spark-observability-probe     # confirm metrics + logs flowing to ms02
 just spark-kernel-status           # confirm pin still durable
 ```
 
-That's it for the standard recovery — total ~3 min. Containers come back via Docker `--restart unless-stopped`; only `vllm serve` (which runs as `docker exec -d` inside the head) needs the manual restart.
+The Docker recipes (`spark-vllm-*-start/restart`, `spark-vllm-api-restart`, `spark-provision-recreate`) refuse on
+cylon nodes. The old containers and the 26.03 image are kept for a few days: `just cylon-vllm-rollback-docker`
+(emergency) / `just cylon-vllm-rollforward`.
 
 ## Forensics — open before triaging the crash
 
