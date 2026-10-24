@@ -254,8 +254,8 @@ The Docker Ray/vLLM stack on nvidia1/nvidia2 was replaced by pods the same day (
   `cylon/llm-gateway:80` on MetalLB **10.177.76.236** (master key generated in-cluster, Secret
   `llm-gateway-master-key`).
 - Same env / patches / `vllm serve` args as the Docker role. RDMA via the shared device plugin (no privileged pods),
-  `IPC_LOCK`, memlock unlimited through `LimitMEMLOCK=infinity` on k3s-agent. NCCL uses `NET/IB` on both HCAs (GDR
-  reported disabled, as GB10 UMA has no peer-mem path). `enableServiceLinks: false` — Service `vllm` otherwise injects
+  `IPC_LOCK`, memlock unlimited through `LimitMEMLOCK=infinity` on k3s-agent. NCCL uses `NET/IB` on both HCAs (rings
+  report `GDR 0`; not compared with the Docker run, which logged at WARN — decode speed is unchanged). `enableServiceLinks: false` — Service `vllm` otherwise injects
   `VLLM_PORT=tcp://…`, which vLLM rejects.
 - Image: thin derived `10.177.76.220:5000/cylon/vllm:26.03-py3-cylon.1` (fastsafetensors 0.4.0 + Triton shim),
   built on each node from its local NGC base and imported into k3s containerd, pinned against GC
