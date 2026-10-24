@@ -69,3 +69,31 @@
       ansible.builtin.command:
         argv: [k3s, ctr, -n, k8s.io, images, label, "{{ cylon_vllm_image }}", io.cri-containerd.pinned=pinned]
       changed_when: false
+
+    - name: Upstream images in k3s containerd?
+      ansible.builtin.shell: |
+        k3s ctr -n k8s.io images ls -q | grep -Fx '{{ item }}'
+      args:
+        executable: /bin/bash
+      loop: "{{ cylon_vllm_upstream_images }}"
+      register: cylon_vllm_upstream_ctr
+      changed_when: false
+      failed_when: false
+
+    # Over Starlink, ~10 GiB each. Never while a model group is loading on a node with no
+    # MemAvailable: on 24 Oct 2026 a pull + HF download beside a serving 27B wedged nvidia1.
+    - name: Pull upstream images by digest (arm64)
+      ansible.builtin.command:
+        argv: [k3s, ctr, -n, k8s.io, images, pull, --platform, linux/arm64, "{{ item.item }}"]
+      loop: "{{ cylon_vllm_upstream_ctr.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc != 0
+      async: 7200
+      poll: 30
+
+    - name: Pin upstream images against kubelet image GC
+      ansible.builtin.command:
+        argv: [k3s, ctr, -n, k8s.io, images, label, "{{ item }}", io.cri-containerd.pinned=pinned]
+      loop: "{{ cylon_vllm_upstream_images }}"
+      changed_when: false

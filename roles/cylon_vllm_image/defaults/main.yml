@@ -13,4 +13,11 @@ cylon_vllm_image: "10.177.76.220:5000/cylon/vllm:26.03-py3-cylon.1"
 cylon_vllm_image_fastsafetensors_version: "0.4.0"
 cylon_vllm_image_site_packages: /usr/local/lib/python3.12/dist-packages
 cylon_vllm_image_build_dir: /opt/cylon/vllm-image
+# Upstream images used as-is by model groups (no derived layer), pulled into k3s containerd
+# on every cylon node by digest and pinned against image GC. Qwen3.8-Flash-Next needs vLLM
+# >= 0.30 (NGC tops out at 0.29-dev in 26.09, and 26.04+ drop Ray): vllm/vllm-openai
+# nightly-aarch64 = nightly-c50aca14416ef29f6ed0ed256302f30646726dcd, CUDA 13.0.2 (driver
+# 580 / CUDA 13.0 on the Sparks rules out the cu134 builds), NCCL 2.30.7, ~10 GiB.
+cylon_vllm_upstream_images:
+  - docker.io/vllm/vllm-openai@sha256:39d9123969ef6c289c24746675e2e207d37527a208077d6fc4da044f8b8865f7
 cylon_vllm_image_patch_src: "{{ playbook_dir }}/../roles/vllm_stacked_container/files/qwen_moe_patches"
