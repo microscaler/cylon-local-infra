@@ -559,6 +559,9 @@ spark_provision_hf: true
 hf_prefetch_models:
   - TinyLlama/TinyLlama-1.1B-Chat-v1.0            # keep, smoke model
   - Qwen/Qwen3.8-27B-FP8                        # production default (vllm_default_model)
+  # NVIDIA NVFP4 Qwen3.8-Flash-Next (~124 GiB; cylon/qwen38-flash-next LWS in shared-gitops).
+  - repo: nvidia/Qwen3.8-Flash-Next-NVFP4
+    revision: fc694b54fb0174e0913e6adf86691ef85a4ead47
   # Parked (re-add to prefetch + skip prune keep to restore):
   # - Qwen/Qwen3.6-35B-A3B-FP8
   # - Qwen/Qwen3-Coder-30B-A3B-Instruct
@@ -573,6 +576,7 @@ hf_prefetch_models:
 hf_cache_keep_models:
   - TinyLlama/TinyLlama-1.1B-Chat-v1.0
   - Qwen/Qwen3.8-27B-FP8
+  - nvidia/Qwen3.8-Flash-Next-NVFP4   # revision fc694b54fb0174e0913e6adf86691ef85a4ead47 (keep list is per repo)
 
 # DeepSeek-V4-Flash (roles/vllm_dspark_stacked) — used when spark_llm_profile=deepseek_v4_flash
 dspark_model: "deepseek-ai/DeepSeek-V4-Flash-0731"
