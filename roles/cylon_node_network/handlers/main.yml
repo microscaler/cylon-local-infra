@@ -1,0 +1,4 @@
+---
+- name: Reload systemd for cylon-vm-route
+  ansible.builtin.systemd:
+    daemon_reload: true

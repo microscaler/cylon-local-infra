@@ -1,0 +1,8 @@
+# Managed by cylon-local-infra (roles/ms02_cylon_routing). Do not edit by hand.
+[Unit]
+Description=Cylon: VMs reach cylon nodes un-NATed (RETURN above Multipass MASQUERADE)
+After=network-online.target snap.multipass.multipassd.service
+
+[Service]
+Type=oneshot
+ExecStart={{ ms02_cylon_nat_script }}

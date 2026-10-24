@@ -1,0 +1,9 @@
+---
+# KillMode=process: restarting the agent leaves running pods alone.
+- name: Restart k3s-agent
+  ansible.builtin.systemd:
+    name: k3s-agent
+    state: restarted
+    daemon_reload: true
+    no_block: true
+  ignore_errors: "{{ ansible_check_mode }}"

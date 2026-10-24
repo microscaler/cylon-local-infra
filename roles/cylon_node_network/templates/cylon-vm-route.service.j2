@@ -1,0 +1,14 @@
+# Managed by cylon-local-infra (roles/cylon_node_network). Do not edit by hand.
+[Unit]
+Description=Cylon: route {{ cylon_vm_cidr }} (ms02 k3s VMs) via {{ cylon_vm_gateway }} on {{ cylon_lan_iface }}
+Wants=network-online.target
+After=network-online.target NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ cylon_vm_route_script }}
+ExecStop={{ cylon_vm_route_script }} del
+
+[Install]
+WantedBy=multi-user.target

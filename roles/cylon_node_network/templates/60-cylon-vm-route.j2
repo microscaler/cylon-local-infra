@@ -1,0 +1,8 @@
+#!/bin/bash
+# Managed by cylon-local-infra (roles/cylon_node_network). Do not edit by hand.
+# NetworkManager drops device routes when {{ cylon_lan_iface }} bounces; put ours back.
+[ "${1:-}" = "{{ cylon_lan_iface }}" ] || exit 0
+case "${2:-}" in
+  up|dhcp4-change|reapply) exec {{ cylon_vm_route_script }} ;;
+esac
+exit 0

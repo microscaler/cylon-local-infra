@@ -1,0 +1,26 @@
+---
+# ms02 side of design §5.2: Multipass VMs (10.177.76.0/24 on mpqemubrzone1) talk to the
+# cylon nodes (Sparks on the home LAN) with their real addresses, so k3s sees symmetric
+# node IPs (kubelet 10250, flannel VXLAN udp/8472, API 6443).
+#
+# Multipass masquerades everything leaving 10.177.76.0/24 (`generated for Multipass network
+# mpqemubrzone1` rules in iptables-nft nat/POSTROUTING) and rewrites those rules whenever
+# multipassd restarts. We insert RETURN rules above them for the cylon node /32s only:
+#   * only hosts that carry the return route (roles/cylon_node_network) are exempted —
+#     every other LAN destination (Starlink router, phones, …) keeps the NAT and keeps working;
+#   * a 30 s timer re-asserts order after multipassd re-generates its rules.
+# Forwarding LAN ↔ bridge is already allowed by roles/metallb_lan_route (ip_forward=1,
+# rp_filter=2, `ufw route allow` 192.168.1.0/24 ↔ 10.177.76.0/24) and by Multipass's own
+# FORWARD accept for traffic sourced from the bridge, so no extra FORWARD rules are needed.
+
+ms02_cylon_routing_enabled: true
+ms02_cylon_vm_cidr: "10.177.76.0/24"
+ms02_cylon_node_group: cylon_nodes
+ms02_cylon_node_ips: >-
+  {{ groups[ms02_cylon_node_group] | default([])
+     | map('extract', hostvars, 'cylon_node_lan_ip') | list }}
+# iptables comment tag identifying our rules (no spaces: `iptables -S` prints it bare).
+ms02_cylon_nat_tag: cylon-vm-lan-no-nat
+ms02_cylon_nat_script: /usr/local/sbin/cylon-vm-nat-exempt
+ms02_cylon_nat_unit: cylon-vm-nat-exempt
+ms02_cylon_nat_interval: 30s

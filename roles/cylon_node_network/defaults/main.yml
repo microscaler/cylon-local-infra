@@ -1,0 +1,38 @@
+---
+# Cylon node networking (design §5.2 / §6 step 5): a Spark on the home LAN reaches
+# ms02's Multipass VMs (k3s control plane + workers) by plain routing via ms02,
+# and UFW lets the cluster's kubelet / flannel VXLAN / pod traffic in.
+#
+# Never touches the QSFP fabric (enp1s0f0np0 169.254/16, enP2p1s0f0np0 10.200.0.0/30):
+# the route is bound to the LAN NIC and every UFW rule is additive and sourced from
+# the VM subnet, the pod CIDR or a peer node's LAN /32.
+
+cylon_node_network_enabled: true
+
+# LAN NIC (also k3s --flannel-iface). Its IPv4 must equal cylon_node_lan_ip (host_vars).
+cylon_lan_iface: enP7s7
+
+# ms02's Multipass bridge mpqemubrzone1 subnet, routed via ms02's LAN address.
+cylon_vm_cidr: "10.177.76.0/24"
+cylon_vm_gateway: "192.168.1.189"
+
+# ms02 k3s cluster CIDRs (existing; not configurable on the agent side).
+cylon_pod_cidr: "10.42.0.0/16"
+
+# Inventory group of every cylon node (VXLAN peers among themselves on the LAN).
+cylon_node_group: cylon_nodes
+
+# Kubelet API (apiserver logs/exec when not tunnelled, metrics-server, Prometheus).
+cylon_node_kubelet_port: 10250
+# flannel VXLAN (k3s default backend).
+cylon_node_vxlan_port: 8472
+
+# Once ms02 stops masquerading VM → node traffic, VM-originated connections arrive
+# from 10.177.76.x instead of ms02's 192.168.1.189. Mirror the LAN-only TCP allows
+# (vLLM API, Ray, dashboard, …) to the VM subnet so nothing that worked through the
+# NAT stops working.
+cylon_node_mirror_tcp_ports: "{{ firewall_trusted_lan_tcp_ports | default([]) }}"
+
+cylon_vm_route_script: /usr/local/sbin/cylon-vm-route
+cylon_vm_route_unit: cylon-vm-route.service
+cylon_vm_route_dispatcher: /etc/NetworkManager/dispatcher.d/60-cylon-vm-route

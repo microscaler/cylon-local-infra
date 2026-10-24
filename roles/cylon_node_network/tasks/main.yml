@@ -1,0 +1,102 @@
+---
+# Spark side of design §5.2: route to ms02's VMs + UFW for k3s. Additive only;
+# the fabric NICs and their UFW rules are never touched.
+
+- name: Cylon node network
+  when: cylon_node_network_enabled | bool
+  tags: [cylon_node, cylon_node_network, network, firewall]
+  block:
+    - name: Assert the LAN NIC carries this node's inventory LAN IP
+      ansible.builtin.assert:
+        that:
+          - cylon_node_lan_ip is defined
+          - ansible_facts[cylon_lan_iface] is defined
+          - ansible_facts[cylon_lan_iface].ipv4.address == cylon_node_lan_ip
+        fail_msg: >-
+          {{ cylon_lan_iface }} has {{ ansible_facts[cylon_lan_iface].ipv4.address | default('no IPv4') }},
+          host_vars say cylon_node_lan_ip={{ cylon_node_lan_ip | default('unset') }}.
+        quiet: true
+
+    - name: Install the VM-subnet route script
+      ansible.builtin.template:
+        src: cylon-vm-route.sh.j2
+        dest: "{{ cylon_vm_route_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the boot-time route unit
+      ansible.builtin.template:
+        src: cylon-vm-route.service.j2
+        dest: "/etc/systemd/system/{{ cylon_vm_route_unit }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd for cylon-vm-route
+
+    - name: Install the NetworkManager dispatcher hook (re-adds the route on LAN up)
+      ansible.builtin.template:
+        src: 60-cylon-vm-route.j2
+        dest: "{{ cylon_vm_route_dispatcher }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Flush handlers (daemon-reload before enabling the unit)
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable the route unit
+      ansible.builtin.systemd:
+        name: "{{ cylon_vm_route_unit }}"
+        enabled: true
+        state: started
+      ignore_errors: "{{ ansible_check_mode }}"   # unit not installed yet in --check
+
+    - name: Read the live route
+      ansible.builtin.command:
+        argv: [ip, -4, route, show, "{{ cylon_vm_cidr }}"]
+      register: cylon_vm_route_live
+      changed_when: false
+      check_mode: false
+
+    - name: Ensure the live route (unit already active, route missing or different)
+      ansible.builtin.command: "{{ cylon_vm_route_script }}"
+      when: >-
+        ('via ' ~ cylon_vm_gateway ~ ' dev ' ~ cylon_lan_iface) not in cylon_vm_route_live.stdout
+
+    # ── UFW (additive; same argv style as roles/firewall) ──────────────────
+    - name: UFW — kubelet from the VM subnet and the pod CIDR
+      ansible.builtin.command:
+        argv: [ufw, allow, from, "{{ item }}", to, any, port, "{{ cylon_node_kubelet_port | string }}",
+               proto, tcp, comment, "cylon k3s kubelet"]
+      loop: ["{{ cylon_vm_cidr }}", "{{ cylon_pod_cidr }}"]
+      register: cylon_ufw_kubelet
+      changed_when: "'Rule added' in cylon_ufw_kubelet.stdout"
+
+    - name: UFW — flannel VXLAN from the VM subnet and the other cylon nodes
+      ansible.builtin.command:
+        argv: [ufw, allow, from, "{{ item }}", to, any, port, "{{ cylon_node_vxlan_port | string }}",
+               proto, udp, comment, "cylon k3s flannel vxlan"]
+      loop: >-
+        {{ [cylon_vm_cidr] + (groups[cylon_node_group] | default([])
+           | difference([inventory_hostname])
+           | map('extract', hostvars, 'cylon_node_lan_ip') | map('regex_replace', '$', '/32') | list) }}
+      register: cylon_ufw_vxlan
+      changed_when: "'Rule added' in cylon_ufw_vxlan.stdout"
+
+    - name: UFW — forward pod-network traffic (FORWARD policy is DROP on the Sparks)
+      ansible.builtin.command:
+        argv: "{{ ['ufw', 'route', 'allow'] + item + ['comment', 'cylon k3s pod network'] }}"
+      loop:
+        - [from, "{{ cylon_pod_cidr }}"]
+        - [to, "{{ cylon_pod_cidr }}"]
+      register: cylon_ufw_route
+      changed_when: "'Rule added' in cylon_ufw_route.stdout"
+
+    - name: UFW — mirror LAN-only TCP allows to the VM subnet (no NAT via ms02 any more)
+      ansible.builtin.command:
+        argv: [ufw, allow, from, "{{ cylon_vm_cidr }}", to, any, port, "{{ item | string }}",
+               proto, tcp, comment, "cylon VM subnet (was NATed via ms02)"]
+      loop: "{{ cylon_node_mirror_tcp_ports }}"
+      register: cylon_ufw_mirror
+      changed_when: "'Rule added' in cylon_ufw_mirror.stdout"

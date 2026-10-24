@@ -1,0 +1,18 @@
+# Managed by cylon-local-infra (roles/k3s_agent). Do not edit by hand.
+server: "{{ k3s_agent_server_url }}"
+token: "{{ k3s_agent_token }}"
+node-name: "{{ k3s_agent_node_name }}"
+node-ip: "{{ k3s_agent_node_ip }}"
+flannel-iface: "{{ k3s_agent_flannel_iface }}"
+node-label:
+{% for l in k3s_agent_node_labels %}
+  - "{{ l }}"
+{% endfor %}
+node-taint:
+{% for t in k3s_agent_node_taints %}
+  - "{{ t }}"
+{% endfor %}
+kubelet-arg:
+{% for a in k3s_agent_kubelet_args %}
+  - "{{ a }}"
+{% endfor %}

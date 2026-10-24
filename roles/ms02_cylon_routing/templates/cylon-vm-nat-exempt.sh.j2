@@ -1,0 +1,37 @@
+#!/bin/bash
+# Managed by cylon-local-infra (roles/ms02_cylon_routing). Do not edit by hand.
+# Keep RETURN rules for VM → cylon-node traffic ABOVE Multipass's MASQUERADE in
+# nat/POSTROUTING. Idempotent; prints "changed" when it had to rewrite.
+set -euo pipefail
+IPT=/usr/sbin/iptables
+SRC="{{ ms02_cylon_vm_cidr }}"
+TAG="{{ ms02_cylon_nat_tag }}"
+DSTS=({% for ip in ms02_cylon_node_ips %}"{{ ip }}/32" {% endfor %})
+N={{ ms02_cylon_node_ips | length }}
+
+rules() { "$IPT" -t nat -S POSTROUTING | grep -v '^-P' || true; }
+
+ok=1
+for d in "${DSTS[@]}"; do
+  "$IPT" -t nat -C POSTROUTING -s "$SRC" -d "$d" -m comment --comment "$TAG" -j RETURN 2>/dev/null || ok=0
+done
+ours=$(rules | grep -c -- "--comment $TAG" || true)
+[ "$ours" -eq "$N" ] || ok=0
+if [ "$ok" = 1 ] && [ "$ours" -gt 0 ]; then
+  last_ours=$(rules | grep -n -- "--comment $TAG" | tail -1 | cut -d: -f1)
+  first_masq=$(rules | grep -n -- "-s $SRC .*-j MASQUERADE" | head -1 | cut -d: -f1)
+  if [ -n "$first_masq" ] && [ "$last_ours" -gt "$first_masq" ]; then ok=0; fi
+fi
+[ "$ok" = 1 ] && exit 0
+
+# Rebuild: drop ours, re-insert at the top of the chain.
+while read -r rule; do
+  [ -n "$rule" ] || continue
+  # shellcheck disable=SC2086
+  "$IPT" -t nat ${rule/-A POSTROUTING/-D POSTROUTING}
+done < <(rules | grep -- "--comment $TAG")
+for d in "${DSTS[@]}"; do
+  "$IPT" -t nat -I POSTROUTING 1 -s "$SRC" -d "$d" -m comment --comment "$TAG" -j RETURN
+done
+logger -t "$TAG" "re-applied VM -> cylon node NAT exemption: ${DSTS[*]:-none}"
+echo changed

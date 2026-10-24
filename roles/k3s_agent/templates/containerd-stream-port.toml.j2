@@ -1,0 +1,8 @@
+# Managed by cylon-local-infra (roles/k3s_agent). Do not edit by hand.
+# Replaces the base io.containerd.grpc.v1.cri section (stream server only) — see
+# k3s_agent_containerd_stream_port in roles/k3s_agent/defaults/main.yml.
+version = 3
+
+[plugins.'io.containerd.grpc.v1.cri']
+  stream_server_address = "127.0.0.1"
+  stream_server_port = "{{ k3s_agent_containerd_stream_port }}"

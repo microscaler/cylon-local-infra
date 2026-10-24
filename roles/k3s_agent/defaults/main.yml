@@ -1,0 +1,67 @@
+---
+# k3s agent: join a cylon node to ms02's k3s cluster as a tainted GPU agent
+# (design §5.3). Ansible reads the join token from the control-plane VM at run time
+# (multipass exec as casibbald on ms02, no_log) — it is never printed or committed.
+
+# Pinned to exactly the server's version; the role asserts it against k8s-cp-1.
+k3s_agent_version: "v1.36.2+k3s1"
+k3s_agent_arch: "{{ 'arm64' if ansible_facts.architecture == 'aarch64' else 'amd64' }}"
+k3s_agent_release_url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_agent_version | urlencode }}"
+k3s_agent_binary_name: "{{ 'k3s-arm64' if k3s_agent_arch == 'arm64' else 'k3s' }}"
+
+# The control-plane VM directly. The design's haproxy front (192.168.1.189:6443, role
+# k8s_api_lan) currently forwards to an Envoy MetalLB VIP (10.177.76.234) that does not
+# answer, so it cannot be used for joins; switch back when it serves the API again.
+# After the join the agent load-balances over the apiserver endpoints anyway.
+k3s_agent_server_url: "https://10.177.76.137:6443"
+
+# Where the token lives and how to read it.
+k3s_agent_token_host: ms02
+k3s_agent_cp_vm: k8s-cp-1
+k3s_agent_multipass_user: casibbald
+
+# kubectl for post-join checks / label reconcile runs on ms02 as this user.
+k3s_agent_kubectl_host: ms02
+k3s_agent_kubectl_user: casibbald
+
+k3s_agent_node_name: "{{ cylon_node_name | default(inventory_hostname) }}"
+k3s_agent_node_ip: "{{ cylon_node_lan_ip }}"
+k3s_agent_flannel_iface: "{{ cylon_lan_iface | default('enP7s7') }}"
+
+k3s_agent_node_labels:
+  - "nvidia.com/gpu.product=GB10"
+  - "cylon.microscaler.io/fabric=crs804"
+  - "cylon.microscaler.io/slot={{ cylon_node_slot }}"
+k3s_agent_node_taints:
+  - "nvidia.com/gpu=present:NoSchedule"
+
+# While vLLM still runs as Docker containers on the host (until design Phase 4),
+# k3s must lose any OOM fight: the agent (kubelet + containerd) runs at
+# oom_score_adj 1000 so the kernel kills it before vLLM/Ray. Kubelet would otherwise
+# set itself to -999. Set both back to the kubelet default (-999 / unset) once vLLM is
+# a pod on this node.
+k3s_agent_oom_score_adj: 1000
+
+# Kubelet tuning for 916 GB disks that hold the HF cache (~82–84 % used): the stock
+# 15 %/10 % eviction thresholds and 85 % image-GC trigger would flap DiskPressure.
+k3s_agent_kubelet_args:
+  - "oom-score-adj={{ k3s_agent_oom_score_adj }}"
+  - "eviction-hard=memory.available<200Mi,nodefs.available<5%,imagefs.available<5%"
+  - "image-gc-high-threshold=92"
+  - "image-gc-low-threshold=88"
+
+# Note: kubelet itself sets vm.overcommit_memory=1, kernel.panic=10,
+# kernel.panic_on_oops=1 (and keeps vm.panic_on_oom=0, kernel.keys.*) at start —
+# upstream behaviour with no opt-out short of failing to start.
+
+# containerd's CRI stream server (exec / attach / port-forward behind the kubelet) listens
+# on 127.0.0.1:10010 by default — inside Ray's worker port range (10002–19999), and the
+# Docker Ray head on nvidia1 already holds *:10010 (containerd then exits, k3s crash-loops).
+# Move it outside that range with a config-v3.toml.d drop-in (containerd replaces the whole
+# io.containerd.grpc.v1.cri section from imports; the base section holds only these two keys).
+# Kubelet 10250/10248 and kube-proxy 10249/10256 are in Ray's range too but far above the
+# ports Ray workers take in practice (10003–10023 on nvidia1); gone once Ray leaves the host.
+k3s_agent_containerd_stream_port: 20010
+
+k3s_agent_symlinks: [kubectl, crictl]   # /usr/bin/ctr already belongs to containerd.io
+k3s_agent_ready_timeout: 300s

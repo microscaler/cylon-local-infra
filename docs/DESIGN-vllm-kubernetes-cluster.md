@@ -221,6 +221,25 @@ cylon-local-infra/
 Pinned versions everywhere (the 20 Oct 2026 rule: every image, chart and CRD pinned to an exact version, nothing
 drifts). Flux notifications follow the platform rule: failures only, to Slack.
 
+### 5.6 As built (24 Oct 2026) — nvidia1/nvidia2 joined ahead of Phase 4
+
+nvidia1 and nvidia2 joined as `spark1` / `spark2` (tainted, labelled as in 5.3) **while the Docker vLLM stack keeps
+serving**: `playbooks/cylon_node.yml` (`just cylon-node-up host=…`). Where it departs from the text above:
+
+- **NAT exemption is per node, not per LAN.** ms02 RETURNs only `10.177.76.0/24 → <cylon node>/32` above Multipass's
+  MASQUERADE (`roles/ms02_cylon_routing`; a 30 s timer re-asserts the order because multipassd rewrites its rules).
+  Other LAN hosts have no return route to the VMs, so they keep the NAT. Forwarding was already allowed by
+  `metallb_lan_route`.
+- **Join URL is the control-plane VM** (`https://10.177.76.137:6443`): the haproxy front `192.168.1.189:6443` forwards
+  to an Envoy VIP (`10.177.76.234`) that does not answer TLS today.
+- **Ray's worker ports (10002–19999) overlap k3s.** The Ray head holds `*:10010`, k3s containerd's CRI stream port, so
+  the agent moves it to 20010 (containerd `config-v3.toml.d` drop-in). Kubelet/kube-proxy ports are in that range too;
+  this goes away when Ray leaves the hosts.
+- **The agent loses OOM fights**: k3s runs at `oom_score_adj` 1000 (unit `ExecStartPost`; k3s otherwise drops itself
+  to -999) so the kernel kills it before vLLM. nvidia1 has ~0.5 GB `MemAvailable` while serving. Revert in Phase 4.
+- Kubelet sets `vm.overcommit_memory=1`, `kernel.panic=10`, `kernel.panic_on_oops=1` on start (upstream, no opt-out).
+- Kubelet eviction/GC thresholds lowered to 5 % / 92 % because the 916 GB disks are 82–84 % HF cache.
+
 ## 6. Node layer: what Ansible keeps doing
 
 Ansible remains the only thing that touches a Spark's host OS. A new playbook `playbooks/cylon_node.yml` (with a

@@ -1,0 +1,14 @@
+#!/bin/bash
+# Managed by cylon-local-infra (roles/cylon_node_network). Do not edit by hand.
+# Route ms02's Multipass VM subnet via ms02 on the LAN NIC (never the fabric).
+#   cylon-vm-route        ensure the route
+#   cylon-vm-route del    remove it
+set -euo pipefail
+CIDR="{{ cylon_vm_cidr }}"
+GW="{{ cylon_vm_gateway }}"
+DEV="{{ cylon_lan_iface }}"
+if [ "${1:-add}" = "del" ]; then
+  ip route del "$CIDR" via "$GW" dev "$DEV" 2>/dev/null || true
+  exit 0
+fi
+ip route replace "$CIDR" via "$GW" dev "$DEV" proto static

@@ -1,0 +1,50 @@
+---
+- name: ms02 — VM ↔ cylon node routing without NAT
+  when: ms02_cylon_routing_enabled | bool
+  tags: [ms02_cylon_routing, cylon_node, network]
+  block:
+    - name: Assert forwarding is on (roles/metallb_lan_route owns it)
+      ansible.builtin.command:
+        argv: [sysctl, -n, net.ipv4.ip_forward]
+      register: ms02_cylon_ip_forward
+      changed_when: false
+      check_mode: false
+      failed_when: ms02_cylon_ip_forward.stdout | trim != '1'
+
+    - name: Assert every cylon node has a LAN IP in inventory
+      ansible.builtin.assert:
+        that: ms02_cylon_node_ips | select('match', '^[0-9.]+$') | list | length == ms02_cylon_node_ips | length
+        quiet: true
+
+    - name: Install the NAT-exemption script
+      ansible.builtin.template:
+        src: cylon-vm-nat-exempt.sh.j2
+        dest: "{{ ms02_cylon_nat_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the service and timer
+      ansible.builtin.template:
+        src: "cylon-vm-nat-exempt.{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ ms02_cylon_nat_unit }}.{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: [service, timer]
+      notify: Reload systemd for cylon-vm-nat-exempt
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Apply the exemption now
+      ansible.builtin.command: "{{ ms02_cylon_nat_script }}"
+      register: ms02_cylon_nat_apply
+      changed_when: "'changed' in ms02_cylon_nat_apply.stdout"
+
+    - name: Enable the re-assert timer
+      ansible.builtin.systemd:
+        name: "{{ ms02_cylon_nat_unit }}.timer"
+        enabled: true
+        state: started
+      ignore_errors: "{{ ansible_check_mode }}"   # unit not installed yet in --check

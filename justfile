@@ -1397,3 +1397,23 @@ resurrection-nodes-bridge:
       ssh ms02 "docker run --rm -d --name cylon-bridge-${host_port} -p ${host_port}:50051 alpine/socat tcp-listen:50051,fork,reuseaddr tcp:${ip}:50051"
       echo "ms02:${host_port} → ${vm} (${ip}:50051)"
     done
+
+# ── Cylon nodes: Spark → tainted GPU agent of ms02's k3s (design §5–6) ─────
+# playbooks/cylon_node.yml: node route + UFW, ms02 NAT exemption, pinned k3s agent.
+#   just cylon-node-up host=nvidia2      (or: just cylon-node-up nvidia2)
+#   just cylon-node-check host=nvidia2   (--check --diff)
+cylon-node-up host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    h="{{host}}"; h="${h#host=}"
+    ansible-playbook playbooks/cylon_node.yml -l "${h},ms02"
+
+cylon-node-check host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    h="{{host}}"; h="${h#host=}"
+    ansible-playbook playbooks/cylon_node.yml -l "${h},ms02" --check --diff
+
+# Nodes, taints and labels of the cylon nodes as the cluster sees them.
+cylon-nodes-status:
+    ssh ms02 "kubectl get nodes -l nvidia.com/gpu.product=GB10 -o wide; kubectl get nodes -l nvidia.com/gpu.product=GB10 -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints[*].key,SLOT:.metadata.labels.cylon\.microscaler\.io/slot"

@@ -18,3 +18,8 @@ spark_hosts_peer_aliases:
 # --- Kernel pin (roles/spark_kernel) ---
 # Cluster-wide pin: 6.17.0-1018-nvidia (4K) in group_vars/sparks.yml.
 # Use *-nvidia-64k only deliberately — different page-size ABI vs fleet CUDA/NCCL.
+
+# --- Cylon node (playbooks/cylon_node.yml; design §5.3) ---
+cylon_node_name: spark2
+cylon_node_slot: 2
+cylon_node_lan_ip: "192.168.1.229"

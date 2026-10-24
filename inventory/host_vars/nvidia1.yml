@@ -17,3 +17,9 @@ spark_hosts_peer_aliases:
 # Cluster-wide pin: 6.17.0-1018-nvidia (4K) in group_vars/sparks.yml.
 # Override here only for asymmetric A/B, e.g.:
 #   spark_kernel_pin: "6.17.0-1008-nvidia"
+
+# --- Cylon node (playbooks/cylon_node.yml; design §5.3) ---
+# k3s node name is the design's end-state name, so Phase 4's rename needs no re-join.
+cylon_node_name: spark1
+cylon_node_slot: 1
+cylon_node_lan_ip: "192.168.1.104"

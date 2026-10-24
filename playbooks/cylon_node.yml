@@ -1,0 +1,42 @@
+---
+# Cylon node: DGX Spark → tainted GPU agent of ms02's k3s cluster (design §5.2–5.3, §6).
+#
+#   just cylon-node-up host=nvidia2        # apply (ms02 routing + one node)
+#   just cylon-node-check host=nvidia2     # --check --diff
+#
+# Order matters and is what makes it safe for a node that already serves vLLM:
+#   1. node: route 10.177.76.0/24 via ms02 + UFW for kubelet / VXLAN / pod forwarding
+#   2. ms02: stop masquerading VM → cylon-node traffic (needs 1 for the return path)
+#   3. node: pinned k3s agent, tainted nvidia.com/gpu=present:NoSchedule, one at a time
+# Hosts join the `cylon_nodes` inventory group (with cylon_node_* host_vars) to be
+# eligible. Nothing here touches Docker, the vLLM containers, the QSFP fabric or NCCL.
+
+- name: Cylon node — LAN route to ms02's VMs + UFW for k3s
+  hosts: cylon_nodes
+  gather_facts: true
+  become: true
+  roles:
+    - cylon_node_network
+
+- name: ms02 — VMs reach cylon nodes without NAT
+  hosts: ms02
+  gather_facts: false
+  become: true
+  roles:
+    - ms02_cylon_routing
+
+- name: Cylon node — k3s agent + assert
+  hosts: cylon_nodes
+  gather_facts: true
+  become: true
+  serial: 1
+  roles:
+    - k3s_agent
+  post_tasks:
+    - name: Assert the cylon node profile
+      ansible.builtin.include_role:
+        name: spark_assert
+        tasks_from: cylon_node.yml
+        apply:
+          tags: [spark_assert, cylon_node]
+      tags: [spark_assert, cylon_node]

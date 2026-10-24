@@ -1,0 +1,190 @@
+---
+- name: k3s agent
+  tags: [cylon_node, k3s_agent]
+  block:
+    - name: Assert node inputs
+      ansible.builtin.assert:
+        that:
+          - cylon_node_lan_ip is defined
+          - cylon_node_slot is defined
+          - k3s_agent_arch in ['arm64', 'amd64']
+        quiet: true
+
+    - name: Read the server's k3s version
+      ansible.builtin.command:
+        argv: [multipass, exec, "{{ k3s_agent_cp_vm }}", --, /usr/local/bin/k3s, --version]
+      delegate_to: "{{ k3s_agent_token_host }}"
+      become: true
+      become_user: "{{ k3s_agent_multipass_user }}"
+      register: k3s_agent_server_version
+      changed_when: false
+      check_mode: false
+
+    - name: Assert the agent pin equals the server version
+      ansible.builtin.assert:
+        that: ("k3s version " ~ k3s_agent_version ~ " ") in k3s_agent_server_version.stdout
+        fail_msg: "server is '{{ k3s_agent_server_version.stdout_lines[0] }}', pin is {{ k3s_agent_version }}"
+        quiet: true
+
+    - name: Install the pinned k3s binary (sha256 from the release)
+      ansible.builtin.get_url:
+        url: "{{ k3s_agent_release_url }}/{{ k3s_agent_binary_name }}"
+        checksum: "sha256:{{ k3s_agent_release_url }}/sha256sum-{{ k3s_agent_arch }}.txt"
+        dest: /usr/local/bin/k3s
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart k3s-agent
+
+    - name: Check for existing kubectl / crictl
+      ansible.builtin.stat:
+        path: "/usr/local/bin/{{ item }}"
+      loop: "{{ k3s_agent_symlinks }}"
+      register: k3s_agent_symlink_stat
+
+    - name: Link kubectl / crictl to k3s (only where nothing else owns the name)
+      ansible.builtin.file:
+        src: /usr/local/bin/k3s
+        dest: "/usr/local/bin/{{ item.item }}"
+        state: link
+        force: true   # only reached when the name is absent or already a symlink (see when)
+      loop: "{{ k3s_agent_symlink_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: not item.stat.exists or item.stat.islnk
+
+    - name: Read the agent join token from the control plane (never logged)
+      ansible.builtin.shell: |
+        set -o pipefail
+        multipass exec {{ k3s_agent_cp_vm | quote }} -- sudo sh -c \
+          'cat /var/lib/rancher/k3s/server/agent-token 2>/dev/null || cat /var/lib/rancher/k3s/server/node-token' < /dev/null
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ k3s_agent_token_host }}"
+      become: true
+      become_user: "{{ k3s_agent_multipass_user }}"
+      register: k3s_agent_token_read
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Keep the token as a fact (never logged)
+      ansible.builtin.set_fact:
+        k3s_agent_token: "{{ k3s_agent_token_read.stdout | trim }}"
+      no_log: true
+
+    - name: Fail if the token is empty
+      ansible.builtin.assert:
+        that: k3s_agent_token | length > 20
+        fail_msg: "could not read the k3s join token from {{ k3s_agent_cp_vm }}"
+        quiet: true
+      no_log: true
+
+    - name: Ensure /etc/rancher/k3s
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write the agent config (contains the token — mode 0600, no diff)
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: /etc/rancher/k3s/config.yaml
+        owner: root
+        group: root
+        mode: "0600"
+      diff: false
+      no_log: true
+      notify: Restart k3s-agent
+
+    - name: Ensure the containerd config drop-in directory
+      ansible.builtin.file:
+        path: /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Move containerd's CRI stream server out of Ray's worker port range
+      ansible.builtin.template:
+        src: containerd-stream-port.toml.j2
+        dest: /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/10-cylon-stream-port.toml
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart k3s-agent
+
+    - name: Install the k3s-agent unit
+      ansible.builtin.template:
+        src: k3s-agent.service.j2
+        dest: /etc/systemd/system/k3s-agent.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart k3s-agent
+
+    - name: Enable and start k3s-agent
+      ansible.builtin.systemd:
+        name: k3s-agent
+        enabled: true
+        state: started
+        daemon_reload: true
+        no_block: true   # Type=notify + TimeoutStartSec=0 would hang on a failed join; the Ready wait gates
+      ignore_errors: "{{ ansible_check_mode }}"   # unit not installed yet in --check
+
+    - name: Flush handlers (restart on binary/config/unit change)
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for k3s-agent to finish starting (start/restart above are no_block)
+      ansible.builtin.command:
+        argv: [systemctl, is-active, k3s-agent]
+      register: k3s_agent_active
+      changed_when: false
+      failed_when: false
+      until: k3s_agent_active.stdout | trim == 'active'
+      retries: 60
+      delay: 5
+      when: not ansible_check_mode
+
+    - name: Fail if k3s-agent never became active
+      ansible.builtin.fail:
+        msg: "k3s-agent is '{{ k3s_agent_active.stdout | trim }}' — journalctl -u k3s-agent on {{ inventory_hostname }}"
+      when:
+        - not ansible_check_mode
+        - k3s_agent_active.stdout | trim != 'active'
+
+    - name: Wait for the node to be Ready
+      ansible.builtin.command:
+        argv: [kubectl, wait, --for=condition=Ready, "node/{{ k3s_agent_node_name }}", "--timeout={{ k3s_agent_ready_timeout }}"]
+      delegate_to: "{{ k3s_agent_kubectl_host }}"
+      become: true
+      become_user: "{{ k3s_agent_kubectl_user }}"
+      changed_when: false
+      when: not ansible_check_mode
+      retries: 3
+      delay: 10
+      register: k3s_agent_ready
+      until: k3s_agent_ready.rc == 0
+
+    # --node-label / --node-taint only apply at registration; reconcile drift after.
+    - name: Reconcile node labels
+      ansible.builtin.command:
+        argv: "{{ ['kubectl', 'label', '--overwrite', 'node', k3s_agent_node_name] + k3s_agent_node_labels }}"
+      delegate_to: "{{ k3s_agent_kubectl_host }}"
+      become: true
+      become_user: "{{ k3s_agent_kubectl_user }}"
+      register: k3s_agent_label
+      changed_when: "' labeled' in k3s_agent_label.stdout and 'not labeled' not in k3s_agent_label.stdout"
+      when: not ansible_check_mode
+
+    - name: Reconcile node taints
+      ansible.builtin.command:
+        argv: "{{ ['kubectl', 'taint', '--overwrite', 'node', k3s_agent_node_name] + k3s_agent_node_taints }}"
+      delegate_to: "{{ k3s_agent_kubectl_host }}"
+      become: true
+      become_user: "{{ k3s_agent_kubectl_user }}"
+      register: k3s_agent_taint
+      changed_when: false   # kubectl reports "modified" even when nothing changed
+      when: not ansible_check_mode

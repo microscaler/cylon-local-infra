@@ -1,0 +1,31 @@
+# Managed by cylon-local-infra (roles/k3s_agent). Do not edit by hand.
+# Upstream k3s-agent unit (get.k3s.io) + OOMScoreAdjust; config in /etc/rancher/k3s/config.yaml.
+[Unit]
+Description=Lightweight Kubernetes (k3s agent {{ k3s_agent_version }})
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target {{ cylon_vm_route_unit | default('cylon-vm-route.service') }}
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/default/%N
+KillMode=process
+Delegate=yes
+User=root
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+OOMScoreAdjust={{ k3s_agent_oom_score_adj }}
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/k3s agent
+# k3s drops its own process to oom_score_adj -999 during start-up (the kubelet
+# --oom-score-adj flag is not applied in-process), so re-assert ours once it is ready.
+ExecStartPost=/bin/sh -c 'echo {{ k3s_agent_oom_score_adj }} > /proc/$MAINPID/oom_score_adj'

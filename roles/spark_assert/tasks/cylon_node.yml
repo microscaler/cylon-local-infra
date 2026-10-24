@@ -1,0 +1,54 @@
+---
+# "cylon node" profile (design §6 step 7): a Spark joined to ms02's k3s as a GPU agent.
+# Called from playbooks/cylon_node.yml (include_role tasks_from: cylon_node.yml).
+
+- name: Cylon node asserts
+  tags: [spark_assert, cylon_node]
+  when: not ansible_check_mode
+  block:
+    - name: Assert — route to ms02's VMs via ms02 on the LAN NIC
+      ansible.builtin.command:
+        argv: [ip, -4, route, show, "{{ cylon_vm_cidr | default('10.177.76.0/24') }}"]
+      register: spark_assert_cylon_route
+      changed_when: false
+      failed_when: >-
+        ('via ' ~ (cylon_vm_gateway | default('192.168.1.189')) ~ ' dev ' ~ (cylon_lan_iface | default('enP7s7')))
+        not in spark_assert_cylon_route.stdout
+
+    - name: Assert — cylon-vm-route unit enabled
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, cylon-vm-route.service]
+      register: spark_assert_cylon_route_unit
+      changed_when: false
+      failed_when: spark_assert_cylon_route_unit.stdout | trim != 'enabled'
+
+    - name: Assert — UFW lets flannel VXLAN in from the VM subnet
+      ansible.builtin.shell: "ufw status | grep -E '^{{ cylon_node_vxlan_port | default(8472) }}/udp +ALLOW( IN)? +{{ (cylon_vm_cidr | default('10.177.76.0/24')) | regex_escape }}'"
+      changed_when: false
+
+    - name: Assert — k3s-agent active and enabled
+      ansible.builtin.command:
+        argv: [systemctl, is-active, k3s-agent]
+      register: spark_assert_k3s_active
+      changed_when: false
+      failed_when: spark_assert_k3s_active.stdout | trim != 'active'
+
+    - name: Assert — k3s binary is the pinned version
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, --version]
+      register: spark_assert_k3s_version
+      changed_when: false
+      failed_when: (k3s_agent_version | default('v1.36.2+k3s1')) not in spark_assert_k3s_version.stdout
+
+    - name: Assert — k3s agent loses OOM fights to vLLM (oom_score_adj)
+      ansible.builtin.shell: "cat /proc/$(systemctl show -p MainPID --value k3s-agent)/oom_score_adj"
+      register: spark_assert_k3s_oom
+      changed_when: false
+      failed_when: spark_assert_k3s_oom.stdout | trim | int != (k3s_agent_oom_score_adj | default(1000) | int)
+
+    - name: Assert — kubelet answers on its healthz port
+      ansible.builtin.uri:
+        url: http://127.0.0.1:10248/healthz
+        return_content: true
+      register: spark_assert_kubelet_healthz
+      failed_when: spark_assert_kubelet_healthz.content | trim != 'ok'

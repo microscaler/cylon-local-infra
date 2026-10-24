@@ -1,0 +1,11 @@
+# Managed by cylon-local-infra (roles/ms02_cylon_routing). Do not edit by hand.
+[Unit]
+Description=Cylon: re-assert the VM -> cylon node NAT exemption (multipassd rewrites nat rules)
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec={{ ms02_cylon_nat_interval }}
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
