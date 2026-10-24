@@ -1416,4 +1416,4 @@ cylon-node-check host:
 
 # Nodes, taints and labels of the cylon nodes as the cluster sees them.
 cylon-nodes-status:
-    ssh ms02 "kubectl get nodes -l nvidia.com/gpu.product=GB10 -o wide; kubectl get nodes -l nvidia.com/gpu.product=GB10 -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints[*].key,SLOT:.metadata.labels.cylon\.microscaler\.io/slot"
+    ssh ms02 "kubectl get nodes -l nvidia.com/gpu.product=GB10 -o wide -L cylon.microscaler.io/slot,cylon.microscaler.io/fabric; kubectl get nodes -l nvidia.com/gpu.product=GB10 -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints"
