@@ -1,9 +1,11 @@
 # Design — the Cylon GPU cluster: eight DGX Sparks under Kubernetes, vLLM as pods
 
-Status: **draft for review** (24 Oct 2026). Nothing here is built yet. Owner: Charles.
+Status: **draft for review** (24 Oct 2026, revised the same day: the MS-A2 is off the table — memory shortages push its
+delivery out — so the Sparks join the existing ms02 k3s cluster). Nothing here is built yet. Owner: Charles.
 
-This document replaces the Docker + Ansible serving stack on the Sparks with a Kubernetes cluster that owns all eight
-GX10 units, serves vLLM as pods, and is reachable from PriceWhisperer's GCP pp runtime cluster over a private tunnel. It
+This document replaces the Docker + Ansible serving stack on the Sparks by making all eight GX10 units GPU nodes of the
+existing **ms02 k3s cluster** (control plane in a Multipass VM on ms02), serving vLLM as pods, reachable from
+PriceWhisperer's GCP pp runtime cluster over a private tunnel. It
 reverses an earlier decision recorded in [`llmwiki/concepts/8-spark-fabric-and-orchestrator.md`](../llmwiki/concepts/8-spark-fabric-and-orchestrator.md)
 ("stay on Docker + Ansible, no k3s on the MS-A2, Kubernetes on the Pi cluster"); section 2 says why.
 
@@ -37,7 +39,7 @@ Contents
 | | Today |
 |---|---|
 | Hardware | 8 × ASUS Ascent GX10 (NVIDIA GB10, 20 Grace cores, ~121 GiB unified LPDDR5X, ConnectX-7 with 2 QSFP cages). **2 in service** (nvidia1 `192.168.1.104`, nvidia2 `192.168.1.229`); **6 unboxed since 20 May 2026**, deliberately not brought up until there is a proper Kubernetes setup. |
-| Planned hardware | Minisforum MS-A2 (32 GB) as `orchestrator1`; MikroTik **CRS804-4DDQ-HRM** (4 × 400G QSFP-DD, broken out to 8 × 200G QSFP56) as the Spark fabric switch; a 20-blade ComputeBlade (Pi 5) cluster for general workloads. |
+| Planned hardware | ~~Minisforum MS-A2 as `orchestrator1`~~ (dropped 24 Oct 2026: delivery times, memory shortages); MikroTik **CRS804-4DDQ-HRM** (4 × 400G QSFP-DD, broken out to 8 × 200G QSFP56) as the Spark fabric switch; a 20-blade ComputeBlade (Pi 5) cluster for general workloads. |
 | OS | DGX OS (Ubuntu 24.04 aarch64), kernel pinned `6.17.0-1018-nvidia` (4K pages), OTA masked, driver 580.142, CUDA 13.1. |
 | Fabric | One DAC between nvidia1/nvidia2, cage A. Fabric 1 `enp1s0f0np0` (169.254 link-local, MTU 9000), fabric 2 `enP2p1s0f0np0` (10.200.0.0/30), dual-HCA RoCE (23.75 GB/s all-reduce). Plan: `10.10.100.0/24` once the switch is in. |
 | Serving | NGC `nvcr.io/nvidia/vllm:26.03-py3` (pinned: 26.04 dropped `ray`). Ray head container on nvidia1, worker on nvidia2, `--network host`, `--restart unless-stopped`. `vllm serve` is **not** the container's process: Ansible starts it with `docker exec -d`. Profile `qwen38`: Qwen3.8-27B-FP8, TP=2, 512k context (YaRN ×2), served as `gpt-4o-mini`, `qwen3` and three other aliases, port 8000. |
@@ -87,7 +89,7 @@ Non-goals (for now)
 - Training or fine-tuning (the GCP README defers "GPU training in GCP" until a job outgrows the owned GB10 estate).
 - Multi-tenant scheduling of arbitrary GPU jobs; this cluster serves models.
 - Public exposure. Nothing here is reachable from the internet, ever.
-- Running general workloads on the Sparks. The Pi cluster or the MS-A2 take those.
+- Running general workloads on the Sparks. The ms02 worker VMs (and later the Pi cluster) take those.
 - Replacing Tailscale with fleetingDNS. Section 13 is written so the tunnel layer can be swapped when fleetingDNS lands.
 
 ## 4. Architecture at a glance
@@ -95,21 +97,22 @@ Non-goals (for now)
 ```mermaid
 flowchart LR
   subgraph home["Home LAN 192.168.1.0/24 (Starlink, no inbound)"]
-    subgraph cylon["Cylon k3s cluster"]
-      cp["orchestrator1 (MS-A2)\nk3s server, etcd\nFlux, gateway, operators"]
-      subgraph fabric["MikroTik CRS804 — RoCE fabric 10.10.100.0/24"]
-        s1["spark1"]; s2["spark2"]; s3["spark3"]; s4["spark4"]
-        s5["spark5"]; s6["spark6"]; s7["spark7"]; s8["spark8"]
-      end
-      gw["llm-gateway (LiteLLM)\nLB 192.168.1.240"]
-      ts["Tailscale operator\ningress proxy: cylon-llm"]
-      cp --- fabric
-      gw --> fabric
-      ts --> gw
+    subgraph ms02["ms02 (192.168.1.189): routes 10.177.76.0/24 to the LAN, no NAT for LAN"]
+      cp["k8s-cp-1 (Multipass VM)\nk3s server, etcd"]
+      w["k8s-worker-1 (VM)\nFlux, gateway, operators"]
+      arc["k8s-runner-1..5 (VMs)\nARC CI runners"]
+      lb["MetalLB multipass-l2\n10.177.76.220-239"]
     end
-    hermes["Hermes / editors / CI runners (ms02)"] --> gw
+    subgraph fabric["MikroTik CRS804: RoCE fabric 10.10.100.0/24"]
+      s1["spark1"]; s2["spark2"]; s3["spark3"]; s4["spark4"]
+      s5["spark5"]; s6["spark6"]; s7["spark7"]; s8["spark8"]
+    end
+    cp -. "k3s agents join over the LAN\n(route via ms02)" .- fabric
+    w -->|"llm-gateway (LiteLLM)"| fabric
+    hermes["Hermes, editors, LAN clients\n(route to 10.177.76.0/24 via ms02)"] --> lb
+    ts["Tailscale operator proxy\ncylon-llm"] --> w
   end
-  subgraph gcp["GCP us-east4 / us-east1 (Shared VPC 'shared')"]
+  subgraph gcp["GCP (Shared VPC 'shared')"]
     pp["pw-runtime-pp workloads\n(selectorless Service → EndpointSlice)"]
     router["pw-gcp-router (e2-micro)\nTailscale, canIpForward, MASQUERADE"]
     pp -- "VPC route 100.64.0.0/10" --> router
@@ -119,66 +122,100 @@ flowchart LR
 
 The pieces:
 
-- **One new k3s cluster, "cylon"**, separate from ms02's Multipass cluster. Control plane on the MS-A2; the eight
-  Sparks are GPU agents. Flux reconciles it from Git.
-- **Host layer stays in Ansible** (kernel pin, UMA tuning, IPv6, GPU clock, fabric addressing, k3s agent install). That
-  is what Ansible is good at and it is already written.
+- **The existing ms02 k3s cluster** (v1.36, Multipass VMs, flannel vxlan, MetalLB, Flux from
+  `microscaler/shared-gitops-k8s-cluster`). Its control plane stays where it is; the eight Sparks join it as tainted
+  arm64 GPU agents. CPU-side pieces (gateway, operators) run on the existing amd64 worker VMs.
+- **ms02 routes** between its Multipass bridge (`10.177.76.0/24`) and the LAN without NAT for LAN destinations, so VMs
+  and Sparks see each other's real addresses (section 5.2).
+- **Host layer stays in Ansible** (cylon-local-infra: kernel pin, UMA tuning, IPv6, GPU clock, fabric addressing, k3s
+  agent install). **Cluster layer goes into shared-gitops** under the existing `cylon-infra` component.
 - **GPU and RDMA** reach pods through the NVIDIA device plugin, an RDMA shared-device plugin and `hostNetwork`.
 - **vLLM groups as LeaderWorkerSets**: one LWS per model, group size = tensor-parallel width, replicas = how many copies.
-- **A gateway (LiteLLM)** in front of every model gives one URL, model aliases, API keys and per-consumer budgets.
+- **A gateway (LiteLLM)** in front of every model gives one URL, model aliases, API keys and per-consumer budgets, on an
+  address from ms02's existing MetalLB pool.
 - **Tailscale** carries pp → Cylon traffic: the Tailscale operator exposes the gateway on the tailnet; the existing GCP
   router forwards pp traffic to it.
 
-## 5. The cluster: control plane, nodes, GitOps
+## 5. The cluster: the Sparks join ms02's k3s
 
-### 5.1 A separate cluster, not ms02's
+### 5.1 Why ms02's cluster
 
-ms02's cluster is the wrong home: its nodes are Multipass VMs NATed behind ms02 on `10.177.76.0/24` (flannel vxlan to a
-LAN host would need new routing or a bridged network), it is all amd64, its observability is scaled to zero, and ms02 is
-being cut back to CI only. A GPU estate that hauliage's PII path depends on should not share a failure domain with CI
-runners. Cylon gets its own cluster.
+The MS-A2 that was to host a dedicated control plane is not coming (memory shortages push delivery out). The ms02
+cluster is already running, already GitOps-managed, and already home to the CI runners and shared platform pieces, so
+the Sparks join it rather than wait for hardware. What that costs, and how it is contained:
 
-### 5.2 Distribution: k3s
+| Concern | Containment |
+|---|---|
+| Control plane shares a host (ms02) with CI | Serving pods keep running if the API server is down; etcd snapshots off-host (5.4); CI and GPU nodes isolated by taints, namespaces and PriorityClasses |
+| VMs are NATed behind ms02 on `10.177.76.0/24`; Sparks are on the LAN | ms02 routes between the two without NAT (5.2) |
+| Cluster is all amd64; Sparks are arm64 | Sparks are tainted; only workloads that tolerate the taint and ship arm64 images land there (5.3) |
+| k8s-cp-1 is small (2 vCPU, 5.8 GiB, single etcd member) | Resize to 4 vCPU / 8 GiB before eight agents join (GitOps change in shared-gitops first, then the Multipass resize) |
+| ms02 was heading for "CI only" | Deliberate exception: CI **and** the GPU estate's control plane and gateway. NCCL traffic never touches ms02 |
 
-k3s, matching ms02 (same tooling, same habits), with flannel's built-in WireGuard backend (`--flannel-backend=wireguard-native`)
-or vxlan on the LAN. Server flags mirror ms02's: `--disable traefik --disable servicelb` (MetalLB and the gateway take
-those jobs), plus `--cluster-cidr 10.60.0.0/16 --service-cidr 10.61.0.0/16` so Cylon's ranges collide with nothing in
-GCP (10.100–10.104/16, 10.200/16), ms02 (10.42/10.43) or the fabric (section 14).
+### 5.2 Networking between the VMs and the Sparks
 
-The NVIDIA container runtime is wired into k3s's containerd by the GPU operator's toolkit or by k3s's own detection of
-`nvidia-container-runtime` (k3s auto-registers a `nvidia` runtime when the binary is on the host — DGX OS ships it).
+Today the Multipass VMs reach the LAN through ms02's NAT, and LAN hosts reach the VMs only where a static route
+`10.177.76.0/24 via 192.168.1.189` exists (the `metallb_lan_route` role installs it on ms02 and the Mac). k3s needs real,
+symmetric addresses between every pair of nodes (kubelet ↔ API server, flannel VXLAN on UDP 8472), so:
 
-Alternative considered: **RKE2** (CIS-hardened, NVIDIA documents it for the GPU operator). Not chosen: nothing here
-needs CIS profiles, and two k3s estates are simpler than one of each. Revisit if the GPU operator misbehaves on k3s.
+1. **Route, don't NAT.** Every Spark gets the static route `10.177.76.0/24 via 192.168.1.189` (extend
+   `metallb_lan_route` to the `sparks` group). On ms02, exempt LAN destinations from Multipass's masquerade
+   (`iptables -t nat -I POSTROUTING -s 10.177.76.0/24 -d 192.168.1.0/24 -j RETURN`, persisted by an Ansible role) and
+   allow forwarding between `mpqemubrzone1` and `eno4` for the ports k3s needs. VMs then see Sparks as `192.168.1.x`,
+   Sparks see VMs as `10.177.76.x`, and flannel VXLAN runs over plain routed L3.
+2. **Fix the stale firewall role.** `multipass_bridge_firewall` still names `mpqemubr0`; the live bridge is
+   `mpqemubrzone1`. Spark UFW gains allow rules from `10.177.76.0/24` and the pod CIDR `10.42.0.0/16` for kubelet
+   (10250), flannel (8472/udp) and the serving ports.
+3. **Why not bridge the VMs onto the LAN instead?** It would work too (a bridged Multipass NIC on one of ms02's idle
+   10G ports), but it changes every existing node's `--node-ip`, and re-IPing an embedded-etcd server is a disruptive
+   migration. Routing leaves the running cluster untouched. Revisit only if the hop through ms02 shows in measurements;
+   it carries control traffic and gateway → vLLM requests, never NCCL (that stays on the fabric).
+4. **MTU**: LAN 1500, VXLAN overhead 50 → pod MTU 1450 everywhere; `--flannel-iface enP7s7` keeps the overlay on the
+   Sparks' LAN NIC, never on the 9000-MTU fabric.
 
-### 5.3 Control plane
+### 5.3 Joining a Spark
 
-- **orchestrator1 (MS-A2)** runs the k3s server with embedded etcd, Flux, the gateway, MetalLB, the Tailscale operator,
-  and other CPU-only platform pieces. The Sparks carry a `NoSchedule` taint (`nvidia.com/gpu=present`) so nothing
-  non-GPU lands on them.
-- **Single server to start**, with etcd snapshots every 6 h to ms02's ZFS (`rpool`, 1.3 TB free) over NFS and a copy to
-  GCS. A Kubernetes control plane outage does not stop running pods; serving continues.
-- **HA later:** two more server nodes from the ComputeBlade cluster (arm64, cheap) for a 3-member etcd. Do not run
-  servers on Sparks — a GX10 power-off would take an etcd member with it.
-- **Until the MS-A2 is in hand:** a server VM on ms02, **bridged onto the LAN** (not the NATed Multipass bridge — one of
-  ms02's down 10G ports, `eno1np0`/`eno2np1`, is the natural bridge member). Moving the server later is a k3s
-  etcd-snapshot restore onto the MS-A2. This keeps the six new Sparks from waiting on hardware.
+- Agent version **pinned to the server's** (`v1.36.2+k3s1`; one worker VM has already drifted to `v1.36.3`, which the
+  upgrade plan in section 16 straightens out).
+- Flags: `--node-ip <LAN IP> --flannel-iface enP7s7 --node-label cylon.microscaler.io/fabric=crs804
+  --node-label cylon.microscaler.io/slot=N --node-label nvidia.com/gpu.product=GB10
+  --node-taint nvidia.com/gpu=present:NoSchedule`, server URL the haproxy front `https://192.168.1.189:6443` that the
+  `k8s_api_lan` role already exposes (it survives a control-plane VM re-IP; the VM's own `10.177.76.137:6443` works too).
+- The join token is read from k8s-cp-1 at join time by Ansible (`multipass exec`), never written to Git or printed.
+- k3s detects `nvidia-container-runtime` on the host (DGX OS ships it) and registers a `nvidia` runtime handler.
+- **DaemonSet audit before the first join**: every DaemonSet that tolerates all taints must ship arm64 or carry
+  `nodeAffinity: kubernetes.io/arch=amd64`. k3s's own pieces (flannel, kube-proxy) are in the binary and are fine;
+  MetalLB speaker, log/metrics agents and democratic-csi node plugins are the ones to check.
+- The Sparks get no ARC runners and no general pods: the taint does that, and ARC already targets its own runner nodes.
 
-### 5.4 GitOps layout
+### 5.4 Control-plane safety
 
-Cluster state lives in **this repo** (cylon-local-infra), beside the Ansible that prepares the hosts, so a Spark's whole
-story is in one place:
+- etcd snapshots every 6 h to ms02's ZFS (`rpool`) **and** to a GCS bucket (k3s `--etcd-s3` against GCS's S3 interop),
+  so a lost ms02 does not lose the cluster's state. Restore is a scripted `just` recipe in shared-gitops, not a runbook.
+- PriorityClasses: `cylon-serving` (high) for model groups and the gateway, CI runners below it, so a CI burst on the
+  shared workers can never evict the gateway. A dedicated worker VM for the cylon platform pieces is cheap insurance
+  (`k8s-worker-2` is stopped today and could be revived for this).
+- Control-plane HA is out of scope while the cluster lives on one physical host: more etcd members on ms02 add no
+  resilience against ms02 itself.
+
+### 5.5 GitOps layout
+
+Cluster state goes into **shared-gitops-k8s-cluster** (the repo ms02's Flux already reconciles), under the existing
+`gitops/root/components/cylon-infra/` component, with values in `deployment-configuration/profiles/dev/cylon-infra/`
+(which already holds `VLLM_API_BASE` and the RouteLLM/LiteLLM values). This repo (cylon-local-infra) keeps everything
+that touches a Spark's host, plus the ms02 routing role:
 
 ```
-k8s/
-  clusters/cylon/            # Flux entry: flux-system (vendored per version, as gcp-infrastructure does), kustomizations
-  infrastructure/
-    metallb/  tailscale-operator/  nvidia-device-plugin/  rdma-shared-device-plugin/
-    node-feature-discovery/  lws/  dcgm-exporter/  otel-collector/  image-prepuller/
-  serving/
-    models/<model>/          # LeaderWorkerSet + Service + PodMonitor per model group
-    gateway/                 # LiteLLM config, routes, keys (SOPS/External Secrets)
-  jobs/                      # model prefetch Jobs, one-off migrations (removed after they run)
+shared-gitops-k8s-cluster/gitops/root/components/cylon-infra/
+  infrastructure/   nvidia-device-plugin/  rdma-shared-device-plugin/  node-feature-discovery/
+                    lws/  dcgm-exporter/  image-prepuller/  tailscale-operator/  priorityclasses/
+  serving/models/<model>/   # LeaderWorkerSet + Service + PodMonitor per model group
+  serving/gateway/          # LiteLLM config, routes, keys (SOPS, as the repo already does)
+  jobs/                     # model sync Jobs, one-off migrations (removed after they run)
+
+cylon-local-infra/
+  playbooks/cylon_node.yml  # bare DGX OS -> Ready GPU agent of the ms02 cluster
+  roles/...                 # existing host roles, plus ms02 routing and the NAT exemption
 ```
 
 Pinned versions everywhere (the 20 Oct 2026 rule: every image, chart and CRD pinned to an exact version, nothing
@@ -187,7 +224,7 @@ drifts). Flux notifications follow the platform rule: failures only, to Slack.
 ## 6. Node layer: what Ansible keeps doing
 
 Ansible remains the only thing that touches a Spark's host OS. A new playbook `playbooks/cylon_node.yml` (with a
-`just cylon-node-up host=spark5` recipe) takes a bare DGX OS box to a Ready, GPU-labelled node:
+`just cylon-node-up host=spark5` recipe) takes a bare DGX OS box to a Ready, GPU-labelled node of the ms02 cluster:
 
 1. **Inventory**: add `spark3..spark8` with their LAN and fabric addresses; rename hosts to `spark1..spark8` (nvidia1 →
    spark1, nvidia2 → spark2 at migration; aliases kept for SSH). Fix the known stale facts while doing it (nvidia2's
@@ -199,9 +236,10 @@ Ansible remains the only thing that touches a Spark's host OS. A new playbook `p
    IPv6 off on fabric interfaces (clean RoCE GID table), PFC/ECN as the switch requires.
 4. **Storage**: format and mount the model NVMe at a fixed path (`/var/lib/cylon/models`), owned by uid 1000 (`nvidia`),
    and the ms02 NFS cold store at `/mnt/ms02-hf-archive` (export widened to the new hosts).
-5. **k3s agent**: join with `--node-ip <LAN>`, labels (`cylon.microscaler.io/fabric=crs804`,
-   `cylon.microscaler.io/slot=N`, `nvidia.com/gpu.product=GB10`), taint `nvidia.com/gpu=present:NoSchedule`.
-6. **Retire on that host**: the Docker vLLM containers, `hf-prefetch.service`, `ngc-image-sync.service`,
+5. **Routing to ms02's VMs**: static route `10.177.76.0/24 via 192.168.1.189` and UFW allows from the VM subnet and
+   pod CIDR (section 5.2).
+6. **k3s agent**: join the ms02 cluster with the flags in section 5.3 (version pinned to the server's).
+7. **Retire on that host**: the Docker vLLM containers, `hf-prefetch.service`, `ngc-image-sync.service`,
    `vllm-stack-autoupgrade.service`, host otelcol/promtail (their jobs move into the cluster, sections 9 and 12).
    `spark_assert` gains a "cylon node" profile asserting the above.
 
@@ -312,22 +350,24 @@ model) becomes a size-1 group in every layout.
 
 - NGC images are ~20 GB. A **pre-puller DaemonSet** pulls the pinned image onto every Spark ahead of any rollout,
   replacing `ngc-image-sync.service`.
-- A **pull-through registry** on orchestrator1 (Zot or `registry:2` in proxy mode) caches `nvcr.io` and `ghcr.io` on
-  the LAN so eight nodes do not each pull 20 GB over Starlink.
+- A **pull-through cache** for `nvcr.io` and `ghcr.io` beside the registry the ms02 cluster already runs
+  (`10.177.76.220`), so eight nodes do not each pull 20 GB over Starlink.
 - The runtime patches applied today by `docker exec` (Triton allocator `.pth` shim, `pip install fastsafetensors`)
   move into a **thin derived image** built in CI (`FROM nvcr.io/nvidia/vllm:26.03-py3`), pushed to the LAN registry, so
   a pod start never mutates its own image.
 
 ## 10. The API surface: gateway, names, auth
 
-- **LiteLLM proxy** (or the RouteLLM/LiteLLM values that already exist under shared-gitops `cylon-infra`) on
-  orchestrator1, one Service in front of every model group:
+- **LiteLLM proxy** (the RouteLLM/LiteLLM values already exist under shared-gitops `cylon-infra`) on the ms02 worker
+  VMs, one Service in front of every model group:
   - OpenAI-compatible `/v1`, model aliases (`gpt-4o-mini`, `qwen3`, `qwen3-coder`, `aux`) mapped to groups, so
     consumers never encode which model is behind a name;
   - **virtual keys per consumer** (hermes, ci-release-notes, hauliage-extraction, pw-pp, editors) with budgets and
     rate limits, stored via SOPS in Git or External Secrets;
   - retries and fallbacks across replicas; the gateway, not the client, routes around a group that is recreating.
-- **Names**: `llm.cylon.lan` for the LAN (MetalLB L2 address, section 14), and the tailnet name `cylon-llm` for GCP.
+- **Names**: `llm.cylon.lan` for the LAN, on a fixed free address from ms02's existing MetalLB pool `multipass-l2`
+  (`10.177.76.220–239`), reachable from any LAN host with the `10.177.76.0/24 via 192.168.1.189` route (the Mac and
+  ms02 already have it; Hermes runs on ms02), and the tailnet name `cylon-llm` for GCP.
   Consumers move from `http://192.168.1.104:8000/v1` to the gateway URL once (Hermes `~/.hermes/config.yaml`, the
   shared-gitops `VLLM_API_BASE`, CI `release_notes_base_url`, hauliage).
 - vLLM itself listens only on the node; only the gateway is exposed.
@@ -363,8 +403,9 @@ collectors, plus vLLM's `/metrics` per group. The open question is *where it lan
   alongside the rest of the platform's dashboards. Pros: one place for everything, the platform portal already reads
   Managed Prometheus. Cons: egress (small for metrics), and logs must respect the 50 GB free tier — ship WARN+ only and
   sample vLLM access logs.
-- Option 2: a small kube-prometheus-stack + Loki on orchestrator1, with Grafana on the LAN/tailnet. Self-contained, works
-  without the tunnel, costs a few GB of RAM on the MS-A2.
+- Option 2: bring ms02's own observability stack back (it is scaled to zero today) or a small kube-prometheus-stack +
+  Loki on the worker VMs. Self-contained, works without the tunnel, but competes with CI for ms02's RAM (160 of 183 GiB
+  in use today).
 
 Either way: alerts for group not ready, node NotReady, GPU XID errors, ECC/RAS events, fabric link down, KV-cache
 utilisation > 90 %, p95 time-to-first-token, and model-sync failures — routed failures-only to Slack, page-worthy ones to
@@ -410,7 +451,7 @@ sequenceDiagram
 
 Cylon side
 
-- Tailscale **Kubernetes operator** on orchestrator1; the gateway Service gets
+- Tailscale **Kubernetes operator** on the ms02 worker VMs (amd64); the gateway Service gets
   `tailscale.com/expose: "true"` + `tailscale.com/hostname: cylon-llm` + tag `tag:cylon-llm`. The proxy is an
   outbound-only WireGuard peer; nothing opens on the Starlink router.
 - TLS on the tailnet name via Tailscale HTTPS certificates (`cylon-llm.<tailnet>.ts.net`), or TLS terminated in the
@@ -453,12 +494,13 @@ the client) and must degrade — PII paths (hauliage extraction) **must not fall
 
 | Range | Use | Notes |
 |---|---|---|
-| 192.168.1.0/24 | Home LAN (Spark `enP7s7`, ms02, MS-A2) | Starlink router; DHCP reservations per Spark |
-| 192.168.1.240–.250 | MetalLB L2 pool on the LAN (gateway, registry, Grafana if local) | **Exclude from the router's DHCP range** (decision: can the Starlink router do that? otherwise use a static range it never hands out) |
+| 192.168.1.0/24 | Home LAN (Spark `enP7s7`, ms02 `eno4`) | Starlink router; DHCP reservations per Spark |
+| 10.177.76.0/24 | ms02 Multipass bridge `mpqemubrzone1`: cluster VMs | Routed to the LAN via 192.168.1.189, **no NAT for LAN destinations** |
+| 10.177.76.220–239 | MetalLB `multipass-l2` (existing) | Gateway LB IP comes from here; no Starlink DHCP change needed |
 | 10.10.100.0/24 | Fabric 1 (`enp1s0f0np0`), sparkN = .N | Planned in the 8-spark concept page; never routed |
 | 10.10.101.0/24 | Fabric 2 (`enP2p1s0f0np0`), sparkN = .N | Replaces the two-host 10.200.0.0/30 |
-| 10.60.0.0/16 | Cylon pod CIDR | Distinct from GCP 10.100–10.104/16, ms02 10.42/16 |
-| 10.61.0.0/16 | Cylon service CIDR | Distinct from GCP 10.200/16, ms02 10.43/16 |
+| 10.42.0.0/16 | Pod CIDR (existing ms02 cluster) | No overlap with GCP 10.100–10.104/16 |
+| 10.43.0.0/16 | Service CIDR (existing) | No overlap with GCP 10.200/16 |
 | 100.64.0.0/10 | Tailnet | Routed from pp via the GCP router only |
 
 The fabric ranges sit inside GCP's `10.0.0.0/8` "internal" firewall allowance by number, but they are never advertised
@@ -500,9 +542,12 @@ Each phase ends with something working; no phase depends on a later one.
 - vLLM relaunched on nvidia1/nvidia2 (24 Oct 2026).
 - Optional stop-gap: a systemd watchdog on nvidia1 that probes `/health` and reruns the relaunch, until Phase 4.
 
-**Phase 1 — control plane and the first new Spark**
-- k3s server: VM on ms02 bridged to the LAN (or the MS-A2 if it has arrived). Flux bootstrapped from `k8s/clusters/cylon`.
-- MetalLB, NFD, device plugin, RDMA plugin, LWS, dcgm-exporter, otel collector, pull-through registry, pre-puller.
+**Phase 1 — ms02 ready for GPU agents, and the first new Spark**
+- In shared-gitops first, then live: resize k8s-cp-1 (4 vCPU / 8 GiB), etcd snapshots to ZFS + GCS, PriorityClasses,
+  the DaemonSet arm64 audit, the `cylon-infra` component skeleton.
+- On ms02 (Ansible): routing between `mpqemubrzone1` and the LAN with the NAT exemption; fix `multipass_bridge_firewall`.
+- In the cluster: NFD, device plugin, RDMA plugin, LWS, dcgm-exporter, pre-puller, a pull-through cache for `nvcr.io`
+  beside the registry the cluster already runs at `10.177.76.220`.
 - `playbooks/cylon_node.yml` brings **spark3** up from bare DGX OS. Exit: `nvidia.com/gpu: 1` allocatable,
   `nvidia-smi` in a test pod, a size-1 Qwen3.8-27B group answering `/v1/models` on the node.
 
@@ -520,25 +565,28 @@ Each phase ends with something working; no phase depends on a later one.
   cable them to the switch. Retire the Docker-era roles' services (keep the roles for history). Exit: 8 nodes Ready.
 
 **Phase 5 — the tunnel to pp**
-- Tailscale operator + `cylon-llm` in Cylon; Crossplane changes in gcp-infrastructure (router `canIpForward`, Route,
+- Tailscale operator + `cylon-llm` in the ms02 cluster; Crossplane changes in gcp-infrastructure (router `canIpForward`, Route,
   firewall, MASQUERADE in the router image, pp Service/EndpointSlice/DNS, key via External Secrets).
 - Exit: a pp Helm test pod gets a completion from `llm.pp.<domain>`; the tailnet ACL denies everything else.
 
 **Phase 6 — operations**
 - Remote power + node-problem-detector, observability destination (section 12), Renovate canary upgrades, layout B
-  when a large model is wanted, etcd HA on the blades.
+  when a large model is wanted.
 
 ## 18. Decisions to make
 
-1. **Control plane before the MS-A2 arrives**: bridged VM on ms02 (proposed) or wait?
-2. **Observability destination**: Managed Prometheus + Cloud Logging via the tunnel (proposed) or a local stack on the MS-A2?
+1. ~~Where the control plane lives~~ — decided 24 Oct 2026: the Sparks join the ms02 cluster; no MS-A2.
+2. **Observability destination**: Managed Prometheus + Cloud Logging via the tunnel (proposed) or ms02's own stack
+   brought back from zero?
 3. **Gateway**: LiteLLM (proposed; the RouteLLM/LiteLLM values already exist in shared-gitops) or the in-house LLMRouter?
 4. **Starting layout**: A (proposed), B or C — and which models beyond Qwen3.8-27B (GLM-5.3-Flash? DeepSeek-V4-Flash?).
 5. **Executor**: stay on Ray + `26.03-py3` (proposed) vs invest in validating torchrun to unlock newer NGC images.
 6. **Remote power**: buy a switched PDU / smart plugs for eight Sparks?
-7. **LAN addressing**: can the Starlink router reserve a range outside DHCP for MetalLB, or do we need a small router of our own in front?
+7. **Routing vs bridging** the Multipass VMs (5.2): route with a NAT exemption (proposed) or re-IP the cluster onto the LAN?
 8. **Tunnel**: Tailscale (proposed) now, fleetingDNS later — confirm, and confirm pp only (not prod) may reach Cylon.
 9. **Hostnames**: rename nvidia1/nvidia2 to spark1/spark2 at migration (proposed), keeping SSH aliases.
+10. **ms02's role**: CI plus the GPU estate's control plane and gateway — confirm, and whether to revive `k8s-worker-2`
+    as a dedicated worker for the cylon platform pieces.
 
 ## 19. Risks
 
@@ -549,7 +597,10 @@ Each phase ends with something working; no phase depends on a later one.
 | Ray-only multi-node pins us to an old NGC image | Track torchrun validation as its own work item; single-node groups are unaffected |
 | GX10 power-offs during long-context work | Spare node + group recreate + remote power; the PII queueing rule for consumers |
 | Starlink outage cuts pp off | pp callers fail fast and degrade; no cloud fallback for PII |
-| MS-A2 single control plane | Pods keep serving without it; etcd snapshots to ms02 and GCS; HA on the blades in Phase 6 |
+| ms02 is a single point of failure for the control plane and the gateway | Pods keep serving without the API server; etcd snapshots to ZFS + GCS; scripted restore |
+| CI bursts starve the gateway on shared worker VMs | PriorityClasses; a dedicated worker VM for cylon platform pieces |
+| Routed (not NATed) VM ↔ LAN traffic surprises other ms02 services | The NAT exemption is scoped to `-d 192.168.1.0/24`; UFW on ms02 and the Sparks allow only the k3s ports |
+| arm64 Sparks in an amd64 cluster pick up DaemonSets without arm64 images | Taint on every Spark; DaemonSet audit before the first join |
 | ms02 NFS becomes a dependency | Only for cold models; hot models live on each Spark |
 
 ## 20. Appendix: facts this design rests on
