@@ -3,6 +3,8 @@
 Status: **draft for review** (24 Oct 2026, revised the same day: the MS-A2 is off the table — memory shortages push its
 delivery out — so the Sparks join the existing ms02 k3s cluster). Owner: Charles.
 **Phase status (24 Oct 2026): vLLM is now served from Kubernetes** on nvidia1/nvidia2 (spark1/spark2) — see 5.7.
+Since the evening of 24 Oct the pair serves **Qwen3.8-Flash-Next NVFP4** (vLLM nightly, mp executor) instead of
+Qwen3.8-27B-FP8; `just cylon-model-switch model=27b` switches back — see 5.8.
 The Docker serving stack is retired on cylon nodes.
 
 This document replaces the Docker + Ansible serving stack on the Sparks by making all eight GX10 units GPU nodes of the
@@ -265,6 +267,36 @@ The Docker Ray/vLLM stack on nvidia1/nvidia2 was replaced by pods the same day (
   OOM priority; hf-prefetch stays (it fills the HF cache the pods mount). `spark_assert` cylon profile checks all of it.
 - Measured: decode 13.1 tok/s (Docker baseline 13.0) for 512-token generations; leader pod deleted → group rebuilt
   and serving in 116 s.
+
+### 5.8 As built (24 Oct 2026, evening) — Qwen3.8-Flash-Next NVFP4 on spark1/spark2
+
+`cylon/qwen38-flash-next` (LeaderWorkerSet, size 2) now serves on spark1/spark2 **in place of**
+`qwen38-27b`, which stays in Git at 0 replicas. One file picks the group:
+shared-gitops `serving/active-model.yaml`; `just cylon-model-switch model=flash-next|27b|none`
+commits it to main and reconciles Flux. Service `cylon/vllm` selects whichever leader runs,
+and both groups serve the legacy aliases (`gpt-4o-mini`, `qwen3`, …), so consumers and the
+gateway need no change on a switch; the gateway also knows `qwen3.8-flash-next` /
+`qwen3-flash`.
+
+Departures from the 27B pattern in 5.7:
+
+- **Image**: upstream `vllm/vllm-openai:nightly-aarch64` by digest (vLLM 0.32.1rc1.dev435,
+  CUDA 13.0) — NGC has no vLLM ≥ 0.30. Pre-pulled into k3s containerd and pinned
+  (`roles/cylon_vllm_image`, `cylon_vllm_upstream_images`); not in the LAN registry.
+- **No Ray** (not in that image): vLLM's own multi-node executor, leader `--nnodes 2
+  --node-rank 0` (API + torch.distributed master on its fabric IP, port 29521), worker
+  `--node-rank 1 --headless`. Same hostNetwork / RDMA plugin / NCCL env; NCCL on `NET/IB`
+  over both HCAs.
+- **Weights gate**: both pods wait until every file of the pinned snapshot is on the node
+  before starting vLLM (hf-prefetch downloads on nvidia1, then rsyncs to nvidia2).
+- N-gram embedding kept off pinned host memory (`--engram-config '{"cpu_offload":false}'`) so
+  `--gpu-memory-utilization` (0.75) accounts for it on unified memory.
+- Measured: decode ~29–30 tok/s single stream (27B: 13.1), native 262144 context, cold start
+  ~10 min (weights ~6.5 min), leader-delete recovery 531 s. Details:
+  [`llmwiki/entities/model-qwen3_8-flash-next.md`](../llmwiki/entities/model-qwen3_8-flash-next.md).
+- Incident: a 10 GiB image pull + the HF download on nvidia1 while 27B served at ~0 GiB
+  MemAvailable wedged the node for ~30 min (recovered unaided). Rule: no heavy I/O on a node
+  with a model resident below 16 GiB MemAvailable; copy images between Sparks over the fabric.
 
 ## 6. Node layer: what Ansible keeps doing
 

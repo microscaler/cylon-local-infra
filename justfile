@@ -1447,16 +1447,16 @@ cylon-vllm-status:
     ssh ms02 "kubectl -n cylon get lws,pods,svc -o wide -l 'app.kubernetes.io/name in (vllm,llm-gateway)'"
     curl -s -m 5 {{ spark-vllm-api }}/v1/models | python3 -m json.tool | grep '"id"' || echo "✗ {{ spark-vllm-api }}/v1/models not answering"
 
-# Rebuild the running model group (leader + worker are recreated together; ~3 min to serve
-# again for 27B, longer for Flash-Next).
+# Leader + worker are recreated together; ~2 min to serve again for 27B, ~9 min for Flash-Next.
+# Rebuild the running model group on spark1/spark2.
 cylon-vllm-restart:
     ssh ms02 "kubectl -n cylon delete pod -l app.kubernetes.io/name=vllm,cylon.microscaler.io/role=leader --wait=false"
 
-# Which model group serves on spark1/spark2: flash-next (nvidia/Qwen3.8-Flash-Next-NVFP4),
-# 27b (Qwen/Qwen3.8-27B-FP8) or none. Only one fits; whichever runs answers every alias on
-# http://192.168.1.104:8000/v1 and the gateway. A Git commit to shared-gitops main
-# (serving/active-model.yaml) + Flux reconcile, never a kubectl edit.
 #   just cylon-model-switch model=27b
+# model = flash-next (nvidia/Qwen3.8-Flash-Next-NVFP4), 27b (Qwen/Qwen3.8-27B-FP8) or none. Only
+# one fits; whichever runs answers every alias on http://192.168.1.104:8000/v1 and the gateway.
+# A Git commit to shared-gitops main (serving/active-model.yaml) + Flux reconcile, no kubectl edit.
+# Pick the model group serving on spark1/spark2 (flash-next | 27b | none).
 cylon-model-switch model:
     ssh ms02 bash -s -- {{ model }} < '{{ justfile_directory() }}/scripts/cylon-model-switch.sh'
 

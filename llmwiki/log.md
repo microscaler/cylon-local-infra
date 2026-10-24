@@ -1179,3 +1179,25 @@ serve `bash -lc` line brace-expands). API restart only; Ray kept. vLLM log:
 `QWEN38_512K_OK`. Hermes `context_length`/`context_window` = 524288 (backup
 `~/.hermes/config.yaml.20260819-180614.bak`); running Hermes PIDs still need
 a restart. No long-context load. 1M (factor 4.0) still opt-in.
+
+## [2026-10-24] incident | nvidia1 wedged by an image pull beside a resident model
+15:26 EEST: started a 10 GiB `k3s ctr images pull` (vLLM nightly) on nvidia1 while the
+Flash-Next HF download ran and the 27B group was still resident (~0 GiB MemAvailable).
+15:28:46 spark1 NodeStatusUnknown; ping and TCP 22 answered but sshd never sent a banner;
+the 27B leader hung in Terminating. Parking 27B in Git (shared-gitops 33387bf) could not
+act until the node came back by itself at 16:00 (no reboot, load average 371). The pull
+failed; the download continued. **Guardrail**: no pulls, builds or downloads on a Spark
+with a model group resident unless MemAvailable ≥ 16 GiB; park the group first. Move
+images between Sparks over the fabric (`k3s ctr images export` → rsync over QSFP →
+`import`), never pull the same image twice over Starlink.
+
+## [2026-10-24] ops | Qwen3.8-Flash-Next NVFP4 serving from Kubernetes (TP=2, mp, no Ray)
+`nvidia/Qwen3.8-Flash-Next-NVFP4@fc694b5` (123.6 GiB, hf-prefetch ~3 h over Starlink then
+QSFP rsync) serving on spark1+spark2 as LWS `cylon/qwen38-flash-next`, in place of
+qwen38-27b (kept at 0 replicas; `just cylon-model-switch model=27b` brings it back).
+Image `vllm/vllm-openai:nightly-aarch64@sha256:39d91239…` (vLLM 0.32.1rc1.dev435, CUDA 13.0)
+— no Ray, so vLLM's mp multi-node executor (`--nnodes 2`, worker `--headless`). NVFP4 MoE on
+FLASHINFER_CUTLASS, NCCL NET/IB on both HCAs. Decode ~29–30 tok/s (27B 13.1), native 262k
+context, correct thinking / non-thinking / tool calls / 17.7k-token needle, every alias
+answers via 192.168.1.104:8000 and the gateway. See
+[entities/model-qwen3_8-flash-next.md](./entities/model-qwen3_8-flash-next.md).

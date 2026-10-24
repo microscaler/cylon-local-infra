@@ -24,6 +24,7 @@ Catalog of wiki pages. **Read [AGENTS.md](./AGENTS.md) first.**
 | [model-gemma-4-31b-it](./entities/model-gemma-4-31b-it.md)                     | `google/gemma-4-31B-it` — stacked TP=2 target model.                                                                                                                                              |
 | [model-tinyllama-1_1b](./entities/model-tinyllama-1_1b.md)                     | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` — smoke-test model.                                                                                                                                          |
 | [model-qwen3_8-27b](./entities/model-qwen3_8-27b.md)                           | Production `Qwen/Qwen3.8-27B-FP8` (dense VL). Fleet `--max-model-len` **524288** (YaRN factor 2.0) as of 2026-08-19. Do not serve BF16.                                                             |
+| [model-qwen3_8-flash-next](./entities/model-qwen3_8-flash-next.md) | `nvidia/Qwen3.8-Flash-Next-NVFP4` — **serving** on spark1/spark2 since 2026-10-24 (k8s LWS, vLLM nightly mp TP=2, ~30 tok/s, 262k). Replaces 27B while it runs; `just cylon-model-switch`. |
 
 
 ### Superseded (kept as institutional memory)

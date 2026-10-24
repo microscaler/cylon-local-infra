@@ -33,7 +33,10 @@ cd "${wt}"
 if git diff --quiet; then
   echo "active-model.yaml already serves ${model}"
 else
-  git commit -q -am "cylon: serve ${model} on spark1/spark2 (just cylon-model-switch)"
+  msg="cylon: serve ${model} on spark1/spark2 (just cylon-model-switch)"
+  # Optional trailer lines (e.g. co-author) from the caller's environment.
+  [ -n "${CYLON_SWITCH_TRAILER:-}" ] && msg="${msg}"$'\n\n'"${CYLON_SWITCH_TRAILER}"
+  git commit -q -am "${msg}"
   for _ in 1 2 3; do
     git pull -q --rebase origin main && git push -q origin HEAD:main && break
     sleep 3
