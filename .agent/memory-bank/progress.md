@@ -1,5 +1,12 @@
 # Progress
 
+## Session 2026-11-02 — fleet and GitOps commits pushed
+
+`cylon-local-infra` `8f0ca3c` is on `origin/main`. Shared-gitops `main` is
+`f40647f`: Flux status UI `140b2a5`, Zot two-tag retention plus
+`docker2s2` `bc346d6`, and the August memory-bank notes `f40647f`.
+Both working trees are clean.
+
 ## Session 2026-09-01 — finish rerp Failed HelmReleases
 
 **Missed:** `rerp/general-ledger` + `invoice` had suspend cleared; Ready=RollbackFailed. Re-suspended then **deleted** (KS `rerp-accounting-services` already suspended so they will not recreate). Deploys left at 0/0. Manifests in rerp repo already `suspend: true` (still unpushed).
@@ -327,8 +334,7 @@ ssh -o ControlMaster=no ms02 'cd ~/Workspace/microscaler/shared-gitops-k8s-clust
   `http.compat` is `docker2s2` so `docker push` of Docker manifest v2 is
   accepted. Proved push and pull of a scratch probe image, then deleted the
   tag. All five runner nodes got the HTTP containerd mirror for that
-  registry. Both GitOps edits are unpushed; Flux will revert them. The Zot
-  manifest still also carries the uncommitted 2-tag retention edit.
+  registry. Those Zot edits are on `shared-gitops` `main` as `bc346d6`.
 - **2026-10-01 (Zot iSCSI mount lock):** Zot pod was Unknown with
   `operation locked` on `pvc-ca98cc93` (zfs-iscsi, not NFS). Live iptables
   was missing the configured TCP 3260 allow from `10.177.76.0/24`, so

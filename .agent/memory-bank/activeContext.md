@@ -1,6 +1,6 @@
 # Active Context
 
-**Last updated:** 2026-09-01 — platform-gitopssets fixed (GitOpsSet orphan reclaim).
+**Last updated:** 2026-11-02 — Spark fleet commit and GitOps registry changes are on `main`.
 
 ## Current focus (cross-repo, 2026-09-01)
 
@@ -515,9 +515,8 @@ Mac `/etc/hosts` managed block is `nvidia1` `192.168.1.110` and
 on ms02 uses `http://10.177.76.236/v1`. After the 7.0.0-1024 reboot, Flash-Next stayed on spark1/spark2
 (slot affinity). Weights are on both. The worker exited because
 `fabric-hosts` still mapped `192.168.1.104` and `192.168.1.229`.
-Live ConfigMaps and the `.tsn-gitops` copies now map `.110` and
-`.120`. The group is Running again; the GitOps edit is not committed,
-so Flux can revert it.
+`fabric-hosts` is on `shared-gitops` `main` as `2926698`. The leader
+RoCE GID pin is `7aa69ca`. Flux applies that branch.
 `~/.ssh/config.d/sparks` HostNames are `.110` `.120` `.130` `.140`.
 Passwordless sudo is on the Sparks (`/etc/sudoers.d/90-casibbald`).
 
@@ -532,8 +531,10 @@ is not on. nvidia5–8 are not in inventory. DeepSeek target is
 `DeepSeek-V4.1-Flash-1017` on slots 3–6; slots 7–8 stay for vector 1
 training. The repo still only knows parked `DeepSeek-V4-Flash-0731`.
 
-Those two GitOps edits are local only and Flux will revert them:
-`gitops/root/components/arc/runner-scale-set.yaml` and `http.compat` in
-`gitops/root/components/cluster/zot-registry.yaml`. The Zot file also still
-contains the uncommitted 2-tag retention change, so a commit of that file
-would publish both.
+2026-11-02: `cylon-local-infra` `8f0ca3c` is on `origin/main`. Shared-gitops
+`main` also has the Flux status UI (`140b2a5`, `flux.dev.microscaler.local`,
+chart `0.59.0` serverOnly) and the Zot change (`bc346d6`): `dev-*` and
+`tilt-*` keep the two newest tags, and `http.compat` is `docker2s2`.
+`envoy-gateway` stays suspended in the dev inventory, so the Flux UI
+route waits on that gateway. The local shared-gitops checkout matches
+`origin/main`.
