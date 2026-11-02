@@ -5,7 +5,9 @@
 `cylon-local-infra` `8f0ca3c` is on `origin/main`. Shared-gitops `main` is
 `f40647f`: Flux status UI `140b2a5`, Zot two-tag retention plus
 `docker2s2` `bc346d6`, and the August memory-bank notes `f40647f`.
-Both working trees are clean.
+Both working trees are clean. A later fetch showed each `main` equal to
+`origin/main` (`e507b39`, `f40647f`). Nothing to rebase. The pushes were
+fast-forwards.
 
 ## Session 2026-09-01 — finish rerp Failed HelmReleases
 

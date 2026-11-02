@@ -537,4 +537,5 @@ chart `0.59.0` serverOnly) and the Zot change (`bc346d6`): `dev-*` and
 `tilt-*` keep the two newest tags, and `http.compat` is `docker2s2`.
 `envoy-gateway` stays suspended in the dev inventory, so the Flux UI
 route waits on that gateway. The local shared-gitops checkout matches
-`origin/main`.
+`origin/main`. A fetch after the push showed no other worktree commits on
+either `main`.
