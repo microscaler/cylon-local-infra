@@ -1,0 +1,12 @@
+---
+# Move a Spark's management NIC to cylon_node_lan_ip.
+# `nmcli connection up` drops the current SSH session. Update
+# ~/.ssh/config.d/sparks HostName to the new address before the next Ansible run.
+#
+#   ansible-playbook playbooks/spark_lan_address.yml -l nvidia1,nvidia2
+- name: Spark LAN address from inventory
+  hosts: sparks
+  gather_facts: false
+  become: true
+  roles:
+    - spark_lan_address

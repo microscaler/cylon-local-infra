@@ -1,0 +1,8 @@
+---
+# Static LAN address for the management NIC. Desired address is cylon_node_lan_ip
+# (inventory/host_vars). Applying a change runs `nmcli connection up`, which
+# drops the SSH session that Ansible is using.
+spark_lan_iface: "{{ cylon_lan_iface | default('enP7s7') }}"
+spark_lan_prefix: 24
+spark_lan_gateway: "192.168.1.1"
+spark_lan_dns: "192.168.1.1"

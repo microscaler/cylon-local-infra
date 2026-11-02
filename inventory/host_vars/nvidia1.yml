@@ -1,7 +1,8 @@
 # Leader-only (gx10-e1ce). LAN IPv6-off default lives in inventory/group_vars/sparks.yml.
 
 # RoCE v2 + IPv4 GID index for NCCL on this host (`show_gids` → rocep1s0f0 / roceP2p1s0f0).
-spark_nccl_ib_gid_index: "3"
+# 2026-11-02: index 3 is empty after boot; v2 IPv4 is index 4. spark2 is still 3.
+spark_nccl_ib_gid_index: "4"
 
 # QSFP link-local + stable names for Ray/GCS, NCCL OOB, and operator SSH (roles/spark_hosts).
 spark_hosts_local_ip: "169.254.102.149"
@@ -14,12 +15,11 @@ spark_hosts_peer_aliases:
   - nvidia2
 
 # --- Kernel pin (roles/spark_kernel) ---
-# Cluster-wide pin: 6.17.0-1018-nvidia (4K) in group_vars/sparks.yml.
-# Override here only for asymmetric A/B, e.g.:
-#   spark_kernel_pin: "6.17.0-1008-nvidia"
+# Fleet pin: 7.0.0-1024-nvidia (4K) in group_vars/sparks.yml.
 
 # --- Cylon node (playbooks/cylon_node.yml; design §5.3) ---
 # k3s node name is the design's end-state name, so Phase 4's rename needs no re-join.
+# LAN was DHCP 192.168.1.104; normalised to 192.168.1.110.
 cylon_node_name: spark1
 cylon_node_slot: 1
-cylon_node_lan_ip: "192.168.1.104"
+cylon_node_lan_ip: "192.168.1.110"

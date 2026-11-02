@@ -1,0 +1,27 @@
+---
+# Persist vm.swappiness=0 on GB10 UMA. Default 60 pages vLLM/UVM into
+# /swap.img and decode collapses (25 → 11 → 4 tok/s with no vLLM restart).
+# Drop-in: /etc/sysctl.d/99-spark-uma.conf (spark_uma_sysctl_file).
+# This file is safe on a live engine: it only stops *new* reclaim.
+
+- name: Persist sysctl — GB10 UMA swappiness
+  ansible.builtin.copy:
+    dest: "{{ spark_uma_sysctl_file }}"
+    content: |
+      # Managed by Ansible — see inventory/group_vars/sparks.yml and spark_provision/tasks/uma_sysctl.yml
+      # GB10 shares LPDDR5X between OS page cache and GPU weights. Default swappiness
+      # steals vLLM pages during hf-prefetch / drop-cache storms.
+      vm.swappiness = {{ spark_uma_swappiness }}
+    owner: root
+    group: root
+    mode: "0644"
+  when: spark_provision_uma_sysctl | default(true) | bool
+
+- name: Apply spark UMA sysctl
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - -p
+      - "{{ spark_uma_sysctl_file }}"
+  when: spark_provision_uma_sysctl | default(true) | bool
+  changed_when: true

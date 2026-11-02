@@ -25,6 +25,10 @@ firewall_trusted_vpn_cidr: ""
 firewall_trusted_vpn_tcp_ports: []
 firewall_trusted_vpn_udp_ports: []
 firewall_trusted_vpn_rules: []
+# Optional Multipass/MetalLB bridge (e.g. 10.177.76.0/24). Workers need
+# host iSCSI :3260 after a UFW-on reboot; empty = skip.
+firewall_trusted_bridge_cidr: ""
+firewall_trusted_bridge_tcp_ports: []
 # Spark QSFP interconnect (link-local): allow inbound from this CIDR for Ray/vLLM node-to-node traffic.
 # Ray uses many dynamic TCP ports (not only 6379 / worker range). Empty = skip.
 firewall_spark_interconnect_cidr: ""

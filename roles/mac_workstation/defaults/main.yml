@@ -60,8 +60,10 @@ mac_workstation_configure_nfs: true
 mac_workstation_manage_etc_hosts: true
 mac_workstation_etc_hosts_lines:
   - "192.168.1.189 ms02"
-  - "192.168.1.104 nvidia1"
-  - "192.168.1.229 nvidia2"
+  - "192.168.1.110 nvidia1"
+  - "192.168.1.120 nvidia2"
+  - "192.168.1.130 nvidia3"
+  - "192.168.1.140 nvidia4"
 
 # ── SSH: fragment include + retired tunnel cleanup ────────────────────────
 # UIs, NFS, and kubectl hit ms02 on the LAN (see docs/dev_hosts.md). This role

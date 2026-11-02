@@ -96,3 +96,68 @@ Git Status: 23 uncommitted changes
 Memory Bank Status: COMPLETE
 ========================================
 
+
+
+========================================
+SESSION START: 2026-08-27 16:43:00
+========================================
+Project: cylon-local-infra
+User: casibbald
+Shell: /bin/zsh
+Working Directory: /Users/casibbald/Workspace/local/cylon-local-infra
+Git Branch: main
+Git Status: 0 uncommitted changes
+Memory Bank Status: COMPLETE
+========================================
+
+========================================
+SESSION UPDATE: 2026-08-29 19:42
+========================================
+GLM-5.3 first boot aborted. DeepSeek-V4-Flash-0731 was not cached;
+prefetch started. Qwen3.8 Ray restored on :8000 (smoke QWEN38_BACK).
+Inventory intent: deepseek_v4_flash. Cut over :8888 when state.json ready.
+Memory bank + llmwiki updated.
+========================================
+
+
+
+========================================
+SESSION START: 2026-09-09 09:26:38
+========================================
+Project: cylon-local-infra
+User: casibbald
+Shell: /bin/zsh
+Working Directory: /Users/casibbald/Workspace/local/cylon-local-infra
+Git Branch: main
+Git Status: 30 uncommitted changes
+Memory Bank Status: COMPLETE
+========================================
+
+
+
+========================================
+SESSION START: 2026-09-25 06:50:14
+========================================
+Project: cylon-local-infra
+User: casibbald
+Shell: /bin/zsh
+Working Directory: /Users/casibbald/Workspace/local/cylon-local-infra
+Git Branch: unknown
+Git Status: 1 uncommitted changes
+Memory Bank Status: COMPLETE
+========================================
+
+
+
+========================================
+SESSION START: 2026-09-26 10:36:55
+========================================
+Project: cylon-local-infra
+User: casibbald
+Shell: /bin/zsh
+Working Directory: /Users/casibbald/Workspace/local/cylon-local-infra
+Git Branch: unknown
+Git Status: 1 uncommitted changes
+Memory Bank Status: COMPLETE
+========================================
+

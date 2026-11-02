@@ -163,6 +163,15 @@
     - (mac_workstation_etc_hosts_lines | default([])) | length > 0
   tags: [mac, hosts, etc_hosts]
 
+- name: Point the unmanaged vllm hosts alias at nvidia1
+  become: true
+  ansible.builtin.replace:
+    path: /etc/hosts
+    regexp: '^192\.168\.1\.104[[:space:]]+vllm[[:space:]]*$'
+    replace: "192.168.1.110 vllm"
+  when: mac_workstation_manage_etc_hosts | default(false)
+  tags: [mac, hosts, etc_hosts]
+
 # ── ~/.ssh — config.d include + remove retired ms02-dev-tunnel fragment ─────
 # ms02 is reached on the LAN (no LocalForward/SOCKS in this repo). Operators
 # keep their own `Host ms02` stanzas under ~/.ssh/config.d/.

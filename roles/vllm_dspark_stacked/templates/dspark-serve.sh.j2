@@ -61,6 +61,11 @@ if [ "${HOTFIXES_ENABLED}" = "1" ] && [ -d "${PATCH_DIR}" ]; then
   do
     apply_sh "${PATCH_DIR}/${_hf}"
   done
+  # Redact API keys from startup logs when keyed serve is configured.
+  if [ -n "${VLLM_API_KEY:-}" ]; then
+    apply_sh "${PATCH_DIR}/hotfix-vllm-redact-api-key-log.sh"
+    bash "${PATCH_DIR}/hotfix-vllm-redact-api-key-log.sh" --status || exit 1
+  fi
   apply_py "${PATCH_DIR}/hotfix-dsv4-issue55-tool-truncation.py"
   apply_py "${PATCH_DIR}/hotfix-vllm-empty-encoder-output.py"
   apply_py "${PATCH_DIR}/hotfix-dsv4-issue27-partial-prefill-concurrency.py"
@@ -68,6 +73,13 @@ if [ "${HOTFIXES_ENABLED}" = "1" ] && [ -d "${PATCH_DIR}" ]; then
   apply_py "${PATCH_DIR}/hotfix-dsv4-issue26-hybrid-swa-min.py"
   apply_py "${PATCH_DIR}/hotfix-dsv4-issue133-triton-specialization.py"
   apply_py "${PATCH_DIR}/hotfix-dsv4-suppress-stops-in-reasoning.py"
+  # Opt-in (default off — same as MiaAI compose flags).
+  if [ "${DSPARK_ENABLE_ISSUE31_GPU_HOTFIX:-0}" = "1" ]; then
+    apply_py "${PATCH_DIR}/hotfix-dsv4-issue31-v2-thinking-budget-gpu.py"
+  fi
+  if [ "${DSPARK_ENABLE_ASSISTANT_FINAL_HOTFIX:-0}" = "1" ]; then
+    apply_py "${PATCH_DIR}/hotfix-dsv4-assistant-final-continuation.py"
+  fi
 fi
 
 case "${DRAFT_SAMPLE_METHOD:-probabilistic}" in

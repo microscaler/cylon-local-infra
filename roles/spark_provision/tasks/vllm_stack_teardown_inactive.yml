@@ -70,7 +70,20 @@
   changed_when: false
   when: (spark_llm_profile | default('qwen38')) == 'qwen38'
 
-- name: Remove NGC Ray containers when DeepSeek profile is active
+- name: Remove GLM-5.3 containers when Qwen profile is active
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -aq --filter 'name=vllm-glm53' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      docker rm -f $ids
+    fi
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when: (spark_llm_profile | default('qwen38')) == 'qwen38'
+
+- name: Remove NGC Ray containers when DeepSeek or GLM-5.3 profile is active
   ansible.builtin.shell: |
     set -euo pipefail
     ids="$(docker ps -aq --filter 'name=vllm-ngc-ray' 2>/dev/null || true)"
@@ -81,12 +94,38 @@
     executable: /bin/bash
   failed_when: false
   changed_when: false
-  when: (spark_llm_profile | default('qwen38')) == 'deepseek_v4_flash'
+  when: (spark_llm_profile | default('qwen38')) in ['deepseek_v4_flash', 'glm53_flash']
 
-- name: Remove NGC torchrun containers when DeepSeek profile is active
+- name: Remove NGC torchrun containers when DeepSeek or GLM-5.3 profile is active
   ansible.builtin.shell: |
     set -euo pipefail
     ids="$(docker ps -aq --filter 'name=vllm-ngc-torchrun' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      docker rm -f $ids
+    fi
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when: (spark_llm_profile | default('qwen38')) in ['deepseek_v4_flash', 'glm53_flash']
+
+- name: Remove DeepSeek containers when GLM-5.3 profile is active
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -aq --filter 'name=vllm-dspark' 2>/dev/null || true)"
+    if [ -n "$ids" ]; then
+      docker rm -f $ids
+    fi
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when: (spark_llm_profile | default('qwen38')) == 'glm53_flash'
+
+- name: Remove GLM-5.3 containers when DeepSeek profile is active
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -aq --filter 'name=vllm-glm53' 2>/dev/null || true)"
     if [ -n "$ids" ]; then
       docker rm -f $ids
     fi

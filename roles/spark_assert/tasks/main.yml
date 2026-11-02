@@ -246,7 +246,7 @@
       )
   tags: [spark, spark_assert, vllm_ngc_stack, vllm_torchrun_stack, vllm_container]
 
-- name: Assert — HF prefetch production model ready (leader)
+- name: Assert — HF prefetch production model ready (leader, Qwen profile)
   ansible.builtin.shell: |
     set -euo pipefail
     jq -e --arg m '{{ vllm_default_model }}' '.models[$m].status == "ready"' \
@@ -259,6 +259,24 @@
     - spark_assert_enabled | bool
     - spark_assert_hf_prefetch_model_ready | bool
     - spark_provision_hf | default(false) | bool
+    - (spark_llm_profile | default('qwen38')) == 'qwen38'
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  tags: [spark, spark_assert, hf, hf_prefetch]
+
+- name: Assert — HF prefetch GLM-5.3 NVFP4 ready (leader)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    jq -e --arg m '{{ glm53_model }}' '.models[$m].status == "ready"' \
+      /var/lib/hf-prefetch/state.json
+  args:
+    executable: /bin/bash
+  register: spark_assert_hf_glm53_ready
+  changed_when: false
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_hf_prefetch_model_ready | bool
+    - spark_provision_hf | default(false) | bool
+    - (spark_llm_profile | default('qwen38')) == 'glm53_flash'
     - inventory_hostname == (groups['sparks'] | sort | first)
   tags: [spark, spark_assert, hf, hf_prefetch]
 
@@ -322,6 +340,68 @@
     - not (spark_assert_dspark_models.skipped | default(false))
   tags: [spark, spark_assert, vllm_dspark_stack, stack_dspark, vllm_container]
 
+- name: Assert — GLM-5.3 container running
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}'
+      {{ vllm_glm53_container_name | default('vllm-glm53-' ~ inventory_hostname) }}
+  register: spark_assert_glm53
+  changed_when: false
+  failed_when: spark_assert_glm53.stdout | trim != "true"
+  when:
+    - spark_assert_enabled | bool
+    - spark_provision_vllm_glm53_stacked | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'glm53_flash'
+  tags: [spark, spark_assert, vllm_glm53_stack, stack_glm53, vllm_container]
+
+- name: Assert — no NGC or DeepSeek containers when GLM-5.3 profile is active
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ray_ids="$(docker ps -q --filter 'name=vllm-ngc-ray' 2>/dev/null || true)"
+    tr_ids="$(docker ps -q --filter 'name=vllm-ngc-torchrun' 2>/dev/null || true)"
+    ds_ids="$(docker ps -q --filter 'name=vllm-dspark' 2>/dev/null || true)"
+    if [ -n "$ray_ids" ] || [ -n "$tr_ids" ] || [ -n "$ds_ids" ]; then
+      echo "NGC/DeepSeek containers must not run alongside GLM-5.3:"
+      docker ps -a --filter 'name=vllm-ngc-ray'
+      docker ps -a --filter 'name=vllm-ngc-torchrun'
+      docker ps -a --filter 'name=vllm-dspark'
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - spark_assert_enabled | bool
+    - (spark_llm_profile | default('qwen38')) == 'glm53_flash'
+  tags: [spark, spark_assert, vllm_glm53_stack, stack_glm53, vllm_container]
+
+- name: Assert — GLM-5.3 OpenAI /v1/models on leader
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ vllm_glm53_api_port | default(8000) }}/v1/models"
+    return_content: true
+    status_code: 200
+    timeout: "{{ spark_assert_vllm_api_timeout_sec | int }}"
+  register: spark_assert_glm53_models
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_vllm_api | bool
+    - spark_provision_vllm_glm53_stacked | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'glm53_flash'
+    - inventory_hostname == (groups['sparks'] | sort | first)
+  tags: [spark, spark_assert, vllm_glm53_stack, stack_glm53, vllm_container]
+
+- name: Assert — /v1/models lists GLM-5.3 served model name
+  ansible.builtin.assert:
+    that:
+      - glm53_served_model_name in spark_assert_glm53_models.content
+    fail_msg: >-
+      /v1/models did not include glm53_served_model_name={{ glm53_served_model_name }}.
+      Body={{ spark_assert_glm53_models.content[:500] }}
+  when:
+    - spark_assert_glm53_models is defined
+    - not (spark_assert_glm53_models.skipped | default(false))
+  tags: [spark, spark_assert, vllm_glm53_stack, stack_glm53, vllm_container]
+
 - name: Assert — node_exporter active
   ansible.builtin.command:
     argv: [systemctl, is-active, node_exporter]
@@ -347,10 +427,23 @@
     - spark_observability_ic_probe_enabled | default(true) | bool
   tags: [spark, spark_assert, spark_obs, spark_obs_ic_probe]
 
+- name: Assert — GB10 UMA swappiness
+  ansible.builtin.slurp:
+    src: /proc/sys/vm/swappiness
+  register: spark_assert_swappiness_file
+  failed_when: >-
+    (spark_assert_swappiness_file.content | b64decode | trim)
+    != (spark_uma_swappiness | default(0) | string)
+  when:
+    - spark_assert_enabled | bool
+    - spark_assert_uma_swappiness | default(false) | bool
+  tags: [spark, spark_assert, spark_uma]
+
 - name: Assert — cluster gate passed
   ansible.builtin.debug:
     msg: >-
       {{ inventory_hostname }}: declared state OK
-      (stack={{ vllm_stack_kind | default('ray') }})
+      (profile={{ spark_llm_profile | default('qwen38') }},
+      stack={{ vllm_stack_kind | default('ray') }})
   when: spark_assert_enabled | bool
   tags: [spark, spark_assert]

@@ -1,0 +1,61 @@
+---
+- name: Spark LAN address
+  tags: [spark_lan_address, network]
+  block:
+    - name: Read the LAN NIC IPv4
+      ansible.builtin.command:
+        argv: [ip, -4, -o, addr, show, dev, "{{ spark_lan_iface }}"]
+      register: spark_lan_addr
+      changed_when: false
+
+    - name: Decide whether the inventory address is already on the NIC
+      ansible.builtin.set_fact:
+        spark_lan_needs_apply: >-
+          {{ (cylon_node_lan_ip ~ '/' ~ (spark_lan_prefix | string))
+             not in spark_lan_addr.stdout }}
+
+    - name: Read the NetworkManager connection on the LAN NIC
+      ansible.builtin.command:
+        argv: [nmcli, -g, GENERAL.CONNECTION, device, show, "{{ spark_lan_iface }}"]
+      register: spark_lan_connection_cmd
+      changed_when: false
+      when: spark_lan_needs_apply | bool
+
+    - name: Fail when the LAN NIC has no NetworkManager connection
+      ansible.builtin.assert:
+        that:
+          - spark_lan_connection_cmd.stdout | default('') | trim | length > 0
+          - spark_lan_connection_cmd.stdout | default('') | trim != '--'
+        fail_msg: "{{ spark_lan_iface }} has no NetworkManager connection"
+        quiet: true
+      when: spark_lan_needs_apply | bool
+
+    - name: Set the LAN connection to the inventory address
+      ansible.builtin.command:
+        argv:
+          - nmcli
+          - connection
+          - modify
+          - "{{ spark_lan_connection_cmd.stdout | trim }}"
+          - ipv4.method
+          - manual
+          - ipv4.addresses
+          - "{{ cylon_node_lan_ip }}/{{ spark_lan_prefix }}"
+          - ipv4.gateway
+          - "{{ spark_lan_gateway }}"
+          - ipv4.dns
+          - "{{ spark_lan_dns }}"
+          - ipv6.method
+          - disabled
+      when: spark_lan_needs_apply | bool
+
+    - name: Apply the LAN connection (drops SSH when the address changes)
+      ansible.builtin.command:
+        argv:
+          - nmcli
+          - connection
+          - up
+          - "{{ spark_lan_connection_cmd.stdout | trim }}"
+      async: 20
+      poll: 0
+      when: spark_lan_needs_apply | bool

@@ -46,6 +46,12 @@ firewall_trusted_lan_rules:
 
 # Remote picolino arrives through WireGuard as 10.77.0.3. Keep this /32 policy
 # separate from the broad home-LAN rules.
+# Multipass workers (10.177.76.0/24) must reach host LIO iSCSI. UFW INPUT
+# DROP after reboot was the 2026-09-14 Zot FailedMount (SYN-SENT :3260).
+firewall_trusted_bridge_cidr: "10.177.76.0/24"
+firewall_trusted_bridge_tcp_ports:
+  - 3260
+
 firewall_trusted_vpn_cidr: "10.77.0.3/32"
 firewall_trusted_vpn_tcp_ports:
   - 22
@@ -108,7 +114,7 @@ hf_archive_enabled: true
 hf_archive_lan_ip: "192.168.1.189"
 hf_archive_ssh_user: casibbald
 hf_archive_cache_dir: "/srv/hf-archive/hub"
-hf_archive_ssh_from: "192.168.1.104"
+hf_archive_ssh_from: "192.168.1.110"
 
 nfs_server_export_paths:
   - path: /srv/hf-archive
@@ -148,9 +154,13 @@ nfs_server_exports:
   - path: /srv/hf-archive
     clients:
       # GB10 Sparks — hf-prefetch writes cold models here over NFS (MiniMax-M3, …).
-      - cidr: 192.168.1.104/32
+      - cidr: 192.168.1.110/32
         options: "rw,sync,no_subtree_check,sec=sys,all_squash,anonuid=1000,anongid=1000"
-      - cidr: 192.168.1.229/32
+      - cidr: 192.168.1.120/32
+        options: "rw,sync,no_subtree_check,sec=sys,all_squash,anonuid=1000,anongid=1000"
+      - cidr: 192.168.1.130/32
+        options: "rw,sync,no_subtree_check,sec=sys,all_squash,anonuid=1000,anongid=1000"
+      - cidr: 192.168.1.140/32
         options: "rw,sync,no_subtree_check,sec=sys,all_squash,anonuid=1000,anongid=1000"
 
 # ── Reverse SSH tunnel → Hostinger VPS (away-from-LAN access) ─────────────

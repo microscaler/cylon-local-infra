@@ -30,6 +30,9 @@ vllm_dspark_rdma_device_path: /dev/infiniband
 
 # Apply vendored hotfixes from files/patches before `vllm serve`.
 vllm_dspark_hotfixes_enabled: true
+# Opt-in Python hotfixes (default off — match MiaAI compose).
+dspark_enable_issue31_gpu_hotfix: false
+dspark_enable_assistant_final_hotfix: false
 
 # Model
 dspark_model: "deepseek-ai/DeepSeek-V4-Flash-0731"

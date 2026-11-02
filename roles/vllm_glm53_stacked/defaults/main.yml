@@ -1,0 +1,39 @@
+---
+# GLM-5.3-Flash NVFP4 on 2× DGX Spark — tonyd2wild sm121 vLLM, mp TP=2.
+# Mutual exclusion with NGC Qwen / Anemll DeepSeek via spark_llm_profile.
+
+vllm_glm53_install_dir: /opt/vllm-glm53
+vllm_glm53_config_dir: /etc/vllm-glm53
+vllm_glm53_patches_host_dir: /opt/vllm-glm53/patches
+
+vllm_glm53_image: "ghcr.io/tonyd2wild/vllm-glm53-flash:sm121-v8"
+vllm_glm53_pull_image: true
+
+vllm_glm53_container_name: "vllm-glm53-{{ inventory_hostname }}"
+vllm_glm53_hf_home: "{{ vllm_hf_home | default(spark_runtime_home ~ '/.cache/huggingface') }}"
+vllm_glm53_hf_container_home: /cache/huggingface
+vllm_glm53_shm_size: "32g"
+
+vllm_glm53_api_host: "0.0.0.0"
+vllm_glm53_api_port: 8000
+vllm_glm53_master_port: 29521
+
+vllm_glm53_recreate: false
+vllm_glm53_rdma_enabled: true
+vllm_glm53_rdma_device_path: /dev/infiniband
+
+glm53_model: "RedHatAI/GLM-5.3-Flash-NVFP4"
+glm53_served_model_name: "glm-5.3-flash"
+glm53_max_model_len: 262144
+glm53_max_num_seqs: 6
+glm53_gpu_memory_utilization: "0.85"
+glm53_mtp_num_tokens: 4
+glm53_tensor_parallel_size: 2
+glm53_hf_hub_offline: true
+glm53_block_size: 2304
+
+# API ready poll (leader). Shard load is ~15 min; 180×15s = 45 min ceiling.
+vllm_glm53_api_ready_retries: 180
+vllm_glm53_api_ready_delay_sec: 15
+
+vllm_glm53_extra_env: {}

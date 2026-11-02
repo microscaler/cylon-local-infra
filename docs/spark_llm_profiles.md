@@ -8,6 +8,7 @@ Mutually exclusive stacks on the 2× DGX Spark pair. Set `spark_llm_profile` in
 |---|---|---|---|
 | `qwen38` (default) | NGC Ray or torchrun (`vllm_stack_kind`) | `:8000` | `vllm-ngc-ray-*` / `vllm-ngc-torchrun-*` |
 | `deepseek_v4_flash` | Anemll DSpark mp TP=2 | `:8888` | `vllm-dspark-<host>` |
+| `glm53_flash` | tonyd2wild glm53-flash sm121 mp TP=2 | `:8000` | `vllm-glm53-<host>` |
 
 Only one profile owns both GPUs. Asserts in `roles/spark_assert` gate Ray/torchrun
 checks on `qwen38` and DSpark checks on `deepseek_v4_flash`.
@@ -20,6 +21,9 @@ just spark-profile-qwen
 
 # DeepSeek-V4-Flash — force recreate DSpark containers
 just spark-profile-deepseek
+
+# GLM-5.3-Flash NVFP4 — force recreate sm121 containers (tears down Qwen)
+just spark-profile-glm53
 ```
 
 Equivalent Ansible:
@@ -58,5 +62,19 @@ just spark-hf-prune         # delete unused hub trees
    `vllm-ngc-torchrun`.
 
 Back to Qwen: `just spark-profile-qwen`, then optional `just spark-hf-prune`.
+
+## GLM-5.3-Flash NVFP4 runbook (short)
+
+1. Prefetch `LibertAIDAI/GLM-5.3-Flash-NVFP4` (`hf_prefetch_models`). Poll:
+   `ssh nvidia1 'jq ".models[\"LibertAIDAI/GLM-5.3-Flash-NVFP4\"]" /var/lib/hf-prefetch/state.json'`
+2. `just spark-profile-glm53` (or set `spark_llm_profile: glm53_flash` + recreate).
+3. Verify leader: `curl -sS http://nvidia1:8000/health` then `/v1/models` —
+   expect `glm-5.3-flash`. Do not trust `/v1/models` alone during boot.
+4. Confirm no NGC/DeepSeek containers: `docker ps` must not show
+   `vllm-ngc-ray` / `vllm-ngc-torchrun` / `vllm-dspark`.
+
+First boot is `--max-model-len 262144`, `--moe-backend marlin`,
+`--language-model-only`, `--reasoning-parser glm45`. Official FP8 does
+not fit 2× GB10. Back to Qwen: `just spark-profile-qwen`.
 
 See also: [provision_sparks.md](provision_sparks.md) (HF sync / model switchover).

@@ -149,6 +149,28 @@
       changed_when: false
       failed_when: false
 
+    - name: Allow inbound TCP from Multipass/MetalLB bridge
+      ansible.builtin.command:
+        argv:
+          - ufw
+          - allow
+          - from
+          - "{{ firewall_trusted_bridge_cidr }}"
+          - to
+          - any
+          - port
+          - "{{ item | string }}"
+          - proto
+          - tcp
+          - comment
+          - "democratic-csi iSCSI from Multipass workers"
+      loop: "{{ firewall_trusted_bridge_tcp_ports }}"
+      when:
+        - firewall_trusted_bridge_cidr | default('') | length > 0
+        - firewall_trusted_bridge_tcp_ports | default([]) | length > 0
+      changed_when: false
+      failed_when: false
+
     # Superseded rule from earlier iterations (narrow TCP range); full interconnect allow below replaces it.
     - name: Remove legacy ufw rule (interconnect TCP 10000:61000) if present
       ansible.builtin.command:

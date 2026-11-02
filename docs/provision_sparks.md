@@ -4,8 +4,19 @@
 
 ```bash
 just spark-provision              # full reconcile + state assert
-just spark-provision-recreate     # full + force vLLM container recreate
+just spark-provision-recreate     # full + force recreate (active profile)
+just spark-profile-qwen           # NGC Qwen (:8000)
+just spark-profile-deepseek       # Anemll DeepSeek (:8888)
+just spark-hf-prune-check         # dry-run unused HF hub prune
+just spark-hf-prune               # delete unused hub trees
+just spark-uma-status             # read-only swappiness / swap / MemAvailable
+just spark-uma-apply              # persist vm.swappiness=0 (live-safe)
+just spark-uma-recover            # drop_caches + swapoff (hitches live engine)
+just spark-uma-recover-recreate   # reclaim + tagged Qwen Ray recreate
 ```
+
+LLM profiles (`qwen38` | `deepseek_v4_flash`): see
+[`docs/spark_llm_profiles.md`](spark_llm_profiles.md).
 
 Single Ansible playbook for **DGX Spark** hosts in inventory group **`sparks`**:
 
@@ -43,13 +54,16 @@ Production toggles live in **`inventory/group_vars/sparks.yml`** (override role 
 | Docker Engine | `spark_provision_docker` | `docker` |
 | Firewall (ufw) | `spark_provision_firewall` | `firewall` |
 | LAN IPv6 off | `spark_provision_lan_ipv6_sysctl` | `lan_ipv6_nm.yml` + `lan_ipv6_sysctl.yml` |
+| GB10 UMA swappiness | `spark_provision_uma_sysctl` | `uma_sysctl.yml` (`vm.swappiness=0`) |
+| GB10 UMA reclaim | `-e spark_uma_recover=true` | `uma_recover.yml` (opt-in only) |
 | **Wi-Fi off** | `spark_provision_wifi_disable` | `spark_wifi` |
 | /etc/hosts interconnect | `spark_provision_hosts` | `spark_hosts` |
 | HF prefetch (leader) | `spark_provision_hf` | `hf_prefetch_service` |
 | NGC image sync (leader) | `spark_provision_ngc_image_sync` | `ngc_image_service` |
 | vLLM autoupgrade (leader) | `spark_provision_vllm_autoupgrade` | `vllm_stack_autoupgrade` |
-| **vLLM Ray stack** | `vllm_stack_kind: ray` | `vllm_stacked_container` |
-| **vLLM torchrun stack** | `vllm_stack_kind: torchrun` | `vllm_torchrun_stacked` |
+| **vLLM Ray stack** | `spark_llm_profile: qwen38` + `vllm_stack_kind: ray` | `vllm_stacked_container` |
+| **vLLM torchrun stack** | `spark_llm_profile: qwen38` + `vllm_stack_kind: torchrun` | `vllm_torchrun_stacked` |
+| **DeepSeek DSpark** | `spark_llm_profile: deepseek_v4_flash` | `vllm_dspark_stacked` |
 | Observability | `spark_provision_observability` | `spark_observability` |
 | **State assert gate** | `spark_provision_assert` | `spark_assert` |
 
@@ -63,6 +77,50 @@ just spark-provision -- --skip-tags apt
 ```
 
 **Avoid** `--tags vllm_ngc_stack` without full provision — use `just spark-provision` instead.
+
+## Runbook — GB10 UMA decode collapse (swap / swappiness)
+
+On these 121 GiB UMA nodes the GPU weights and the Linux page cache share
+LPDDR5X. Default `vm.swappiness=60` will page `vLLM` into `/swap.img` if a
+large hf-prefetch (or any write storm) runs while serving. Decode then waits
+on disk: GPUs sit at high util and ~15 W, and tok/s decays over days with
+**no vLLM restart**.
+
+Do **not** prefetch a ~200 GiB unused checkpoint onto the same UMA as a live
+engine. `RedHatAI/GLM-5.3-Flash-NVFP4` staying in `hf_prefetch_models` is
+intentional for a later GLM try; it is also the 2026-08-30 write storm that
+started the 25 → 11 → 4.7 tok/s slide.
+
+Prepared, not yet applied (2026-09-07):
+
+```bash
+# 1. Read-only confirm: swappiness 60, swap in use
+just spark-uma-status
+
+# 2. Persist vm.swappiness=0 (does not drop caches; safe on a live engine)
+just spark-uma-apply
+
+# 3. After a quiet window: drop page caches + swapoff, then recreate Ray
+just spark-uma-recover-recreate
+```
+
+Split 3 if you want a pause between reclaim and recreate:
+
+```bash
+just spark-uma-recover
+just spark-uma-recover-recreate   # still safe; recover is idempotent
+```
+
+`just spark-uma-recover-recreate` is a **tagged** apply (`spark_uma`,
+`spark_uma_recover`, `vllm_ngc_stack`, `spark_assert`). It does **not** run
+full provision (avoids `spark_nfs_client` chown of `/mnt/ms02-hf-archive`).
+Applied **2026-09-07**: both hosts `vm.swappiness=0`, swap **0B**,
+`spark_assert_uma_swappiness: true`. Warm isolated decode **13.1 tok/s**
+(was 4.7). Do not prefetch a ~200 GiB unused hub tree while serving.
+
+`just spark-provision-recreate` is the full-playbook alternative and will
+also persist swappiness, but it is the NFS-chown footgun — prefer the tagged
+recipe for this incident.
 
 ## What the NGC stack produces
 

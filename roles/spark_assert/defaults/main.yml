@@ -16,3 +16,7 @@ spark_assert_hf_prefetch_model_ready: true
 
 # Observability: systemd timers/units active when observability phase ran.
 spark_assert_observability: true
+
+# GB10 UMA swappiness gate. Keep false until `just spark-uma-apply` has run;
+# `--tags spark_assert` alone must not fail the live fleet still at 60.
+spark_assert_uma_swappiness: false

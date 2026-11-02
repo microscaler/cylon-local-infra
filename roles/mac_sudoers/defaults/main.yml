@@ -20,6 +20,7 @@
 #   - TouchID for sudo (separate concern; lives in /etc/pam.d/sudo_local and
 #     requires pam_tid.so config — not managed here).
 #   - Full passwordless sudo (casibbald ALL=(ALL) NOPASSWD: ALL) — too wide.
+#     Spark hosts get that from roles/sudoers, not from this Mac role.
 #
 # Security posture: the blast radius of this drop-in is exactly the set of
 # binaries listed below, invoked by the named operator user. If any listed

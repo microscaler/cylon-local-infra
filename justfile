@@ -102,6 +102,22 @@ hf-kimi-watcher-logs:
 hf-kimi-watcher-poll:
     ssh ms02 'gcloud compute ssh hf-archive-downloader --zone=europe-west1-b --project=microscaler --tunnel-through-iap --quiet --command="sudo systemctl start --no-block hf-archive-watcher.service"'
 
+# ── GCE Massive Flat Files raw mirror (S3 → GCS; parquet is a later step) ─
+# Credentials: GCP Secret Manager in project microscaler (MASSIVE_S3_*),
+# read at runtime via gcloud. Never write an env file on the VM.
+
+massive-mirror-status:
+    ssh ms02 'gcloud compute ssh hf-archive-downloader --zone=europe-west1-b --project=microscaler --tunnel-through-iap --quiet --command="systemctl list-timers massive-flatfile-mirror.timer --no-pager; systemctl show massive-flatfile-mirror.service -p ActiveState -p SubState -p Result; /opt/massive-flatfile-mirror/massive_flatfile_mirror.py status"'
+
+massive-mirror-logs:
+    ssh ms02 'gcloud compute ssh hf-archive-downloader --zone=europe-west1-b --project=microscaler --tunnel-through-iap --quiet --command="sudo journalctl -u massive-flatfile-mirror.service -n 100 --no-pager"'
+
+massive-mirror-list:
+    ssh ms02 'gcloud compute ssh hf-archive-downloader --zone=europe-west1-b --project=microscaler --tunnel-through-iap --quiet --command="/opt/massive-flatfile-mirror/massive_flatfile_mirror.py list"'
+
+massive-mirror-sync:
+    ssh ms02 'gcloud compute ssh hf-archive-downloader --zone=europe-west1-b --project=microscaler --tunnel-through-iap --quiet --command="sudo systemctl start --no-block massive-flatfile-mirror.service"'
+
 # ── ms02 LAN reachability (HTTP probes; no SSH tunnel) ─────────────────────
 
 # HTTP-probe common ms02 services on the LAN. Green (2xx/3xx) = reachable; '000' = blocked or down.
@@ -687,9 +703,11 @@ ms02 +cmd:
 # Retired: spark-vllm-provision, cutover_roce.yml, refresh_hf_prefetch.yml — use spark-provision*.
 #
 # Prereqs: SSH to nvidia1/nvidia2; QSFP interconnect up.
-# Leader API: export SPARK_VLLM_API=http://192.168.1.104:8000
+# Leader API (Qwen :8000 / DeepSeek :8888):
+#   export SPARK_VLLM_API=http://192.168.1.110:8000
+# Profiles: docs/spark_llm_profiles.md  (qwen38 | deepseek_v4_flash)
 
-spark-vllm-api := env_var_or_default('SPARK_VLLM_API', 'http://192.168.1.104:8000')
+spark-vllm-api := env_var_or_default('SPARK_VLLM_API', 'http://192.168.1.110:8000')
 
 # Cylon nodes (inventory group cylon_nodes) serve vLLM from Kubernetes since 24 Oct 2026
 # (shared-gitops stacks cylon-gpu / cylon-serving); the Docker stack there is retired and the
@@ -721,20 +739,28 @@ spark-provision *extra:
     cd '{{ justfile_directory() }}'
     ansible-playbook playbooks/provision_sparks.yml -l sparks ${extra[@]+"${extra[@]}"}
 
-# Full reconcile + recreate vLLM containers for the active stack only (vllm_stack_kind in inventory).
+# Full reconcile + recreate containers for the active LLM profile.
 spark-provision-recreate: _docker-vllm-guard
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
+    profile="$(awk '/^spark_llm_profile:/ {print $2; exit}' inventory/group_vars/sparks.yml | tr -d ' \"')"
+    profile="${profile:-qwen38}"
     stack="$(awk '/^vllm_stack_kind:/ {print $2; exit}' inventory/group_vars/sparks.yml | tr -d ' \"')"
     stack="${stack:-ray}"
     extra=()
-    if [[ "$stack" == "torchrun" ]]; then
-      extra=(-e vllm_torchrun_stacked_recreate=true)
-      echo ">>> vllm_stack_kind=torchrun — recreating torchrun only (Ray will be torn down)"
+    if [[ "$profile" == "deepseek_v4_flash" ]]; then
+      extra=(-e spark_llm_profile=deepseek_v4_flash -e vllm_dspark_recreate=true)
+      echo ">>> profile=deepseek_v4_flash — recreating Anemll DSpark (NGC Ray/torchrun torn down)"
+    elif [[ "$profile" == "glm53_flash" ]]; then
+      extra=(-e spark_llm_profile=glm53_flash -e vllm_glm53_recreate=true)
+      echo ">>> profile=glm53_flash — recreating sm121 NVFP4 (NGC / DeepSeek torn down)"
+    elif [[ "$stack" == "torchrun" ]]; then
+      extra=(-e spark_llm_profile=qwen38 -e vllm_torchrun_stacked_recreate=true)
+      echo ">>> profile=qwen38 stack=torchrun — recreating torchrun only (Ray torn down)"
     else
-      extra=(-e vllm_stacked_container_recreate=true)
-      echo ">>> vllm_stack_kind=ray — recreating Ray only (torchrun will be torn down)"
+      extra=(-e spark_llm_profile=qwen38 -e vllm_stacked_container_recreate=true)
+      echo ">>> profile=qwen38 stack=ray — recreating Ray only (torchrun torn down)"
     fi
     ansible-playbook playbooks/provision_sparks.yml -l sparks "${extra[@]}" {{ docker-vllm-override }}
 
@@ -832,9 +858,11 @@ spark-profile-qwen *extra:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
+    echo ">>> spark_llm_profile=qwen38 — NGC recreate (DeepSeek torn down)"
     ansible-playbook playbooks/provision_sparks.yml -l sparks \
       -e spark_llm_profile=qwen38 \
       -e vllm_stacked_container_recreate=true \
+      -e vllm_torchrun_stacked_recreate=true \
       ${extra[@]+"${extra[@]}"}
 
 # Switch Sparks to DeepSeek-V4-Flash DSpark profile (recreate dspark containers).
@@ -842,9 +870,21 @@ spark-profile-deepseek *extra:
     #!/usr/bin/env bash
     set -euo pipefail
     cd '{{ justfile_directory() }}'
+    echo ">>> spark_llm_profile=deepseek_v4_flash — Anemll DSpark recreate (weights pull may take a long time)"
     ansible-playbook playbooks/provision_sparks.yml -l sparks \
       -e spark_llm_profile=deepseek_v4_flash \
       -e vllm_dspark_recreate=true \
+      ${extra[@]+"${extra[@]}"}
+
+# Switch Sparks to GLM-5.3-Flash NVFP4 (tears down NGC Qwen / DeepSeek).
+spark-profile-glm53 *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    echo ">>> spark_llm_profile=glm53_flash — sm121 NVFP4 recreate (weights + image pull may take a long time)"
+    ansible-playbook playbooks/provision_sparks.yml -l sparks \
+      -e spark_llm_profile=glm53_flash \
+      -e vllm_glm53_recreate=true \
       ${extra[@]+"${extra[@]}"}
 
 # ── Spark runtime ops (not provision — read-only / recovery) ────────────────
@@ -889,7 +929,7 @@ spark-vllm-lan-probe:
 spark-vllm-dashboard:
     #!/usr/bin/env bash
     set -euo pipefail
-    : "${SPARK_LEADER_LAN_IP:=192.168.1.104}"
+    : "${SPARK_LEADER_LAN_IP:=192.168.1.110}"
     : "${SPARK_RAY_DASHBOARD:=http://${SPARK_LEADER_LAN_IP}:8265}"
     echo "Ray dashboard: ${SPARK_RAY_DASHBOARD}"
     if command -v open >/dev/null; then
@@ -1081,6 +1121,15 @@ spark-kernel-apply host="sparks":
     cd '{{ justfile_directory() }}'
     ansible-playbook playbooks/provision_sparks.yml --tags kernel -l '{{ host }}'
 
+# Set the management NIC to cylon_node_lan_ip. Drops SSH when the address changes.
+#   just spark-lan-address nvidia1,nvidia2
+spark-lan-address host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    h="{{host}}"; h="${h#host=}"
+    ansible-playbook playbooks/spark_lan_address.yml -l "${h}"
+
 # Dry-run the kernel role. Shows what GRUB_DEFAULT / holds / OTA mask
 # would change, without writing.
 spark-kernel-check host="sparks":
@@ -1101,6 +1150,55 @@ spark-kernel-pin host ver:
     cd '{{ justfile_directory() }}'
     ansible-playbook playbooks/provision_sparks.yml --tags kernel \
       -l '{{ host }}' -e 'spark_kernel_pin={{ ver }}'
+
+# Persist vm.swappiness=0 on Sparks. Safe on a live engine (no drop_caches).
+spark-uma-apply *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks \
+      --tags spark_uma \
+      -e spark_provision_assert=false \
+      ${extra[@]+"${extra[@]}"}
+
+# UMA reclaim only: swappiness persist + drop_caches + swapoff/swapon.
+# Hitches the live engine. Does not recreate vLLM.
+spark-uma-recover *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks \
+      --tags spark_uma,spark_uma_recover \
+      -e spark_uma_recover=true \
+      -e spark_provision_assert=false \
+      ${extra[@]+"${extra[@]}"}
+
+# Reclaim then tagged Qwen Ray recreate. Avoids full provision / HF NFS chown.
+spark-uma-recover-recreate *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible-playbook playbooks/provision_sparks.yml -l sparks \
+      --tags spark_uma,spark_uma_recover,vllm_ngc_stack,spark_assert \
+      -e spark_uma_recover=true \
+      -e spark_llm_profile=qwen38 \
+      -e vllm_stacked_container_recreate=true \
+      -e spark_assert_uma_swappiness=true \
+      ${extra[@]+"${extra[@]}"}
+
+# Read-only: swappiness, swap, MemAvailable. Does not mutate hosts.
+spark-uma-status host="sparks":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    ansible '{{ host }}' -m shell -a '
+      echo "=== swappiness ==="
+      cat /proc/sys/vm/swappiness
+      echo "=== memory ==="
+      free -h
+      echo "=== sysctl drop-in ==="
+      cat /etc/sysctl.d/99-spark-uma.conf 2>/dev/null || echo "(absent)"
+    ' -become
 
 # Lock host GPU graphics clocks (roles/spark_gpu_clock). Default 2000 MHz from inventory.
 spark-gpu-clock-apply host="sparks":
@@ -1454,7 +1552,7 @@ cylon-vllm-restart:
 
 #   just cylon-model-switch model=27b
 # model = flash-next (nvidia/Qwen3.8-Flash-Next-NVFP4), 27b (Qwen/Qwen3.8-27B-FP8) or none. Only
-# one fits; whichever runs answers every alias on http://192.168.1.104:8000/v1 and the gateway.
+# one fits; whichever runs answers every alias on http://192.168.1.110:8000/v1 and the gateway.
 # A Git commit to shared-gitops main (serving/active-model.yaml) + Flux reconcile, no kubectl edit.
 # Pick the model group serving on spark1/spark2 (flash-next | 27b | none).
 cylon-model-switch model:

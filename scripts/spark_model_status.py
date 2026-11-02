@@ -3,7 +3,7 @@
 
 Status (default):
   python3 scripts/spark_model_status.py
-  SPARK_VLLM_API=http://192.168.1.104:8000 python3 scripts/spark_model_status.py --json
+  SPARK_VLLM_API=http://192.168.1.110:8000 python3 scripts/spark_model_status.py --json
 
 Deploy HF prefetch config from local inventory, then one-shot reconcile on leader:
   python3 scripts/spark_model_status.py cutover --repo ./
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 # Defaults aligned with roles/hf_prefetch_service/defaults/main.yml
-DEFAULT_VLLM_BASE = os.environ.get("SPARK_VLLM_API", "http://192.168.1.104:8000")
+DEFAULT_VLLM_BASE = os.environ.get("SPARK_VLLM_API", "http://192.168.1.110:8000")
 DEFAULT_PREFETCH_PATH = "/var/lib/hf-prefetch/state.json"
 DEFAULT_HF_PREFETCH_INSTALL = "/opt/hf-prefetch/hf_prefetch_service.py"
 DEFAULT_HF_PREFETCH_CONFIG = "/etc/hf-prefetch/config.yaml"
@@ -532,7 +532,7 @@ Commands (default: status):
   sync-hermes         ansible-playbook playbooks/sync_hermes_ms02.yml — patch Hermes .env on ms02.
 
 Environment:
-  SPARK_VLLM_API          Base URL for status probes (default http://192.168.1.104:8000)
+  SPARK_VLLM_API          Base URL for status probes (default http://192.168.1.110:8000)
   SPARK_SSH_HOST          Leader SSH alias (default nvidia1)
   SPARK_ANSIBLE_INVENTORY Optional ansible -i path
 

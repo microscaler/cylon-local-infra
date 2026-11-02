@@ -1180,6 +1180,84 @@ serve `bash -lc` line brace-expands). API restart only; Ray kept. vLLM log:
 `~/.hermes/config.yaml.20260819-180614.bak`); running Hermes PIDs still need
 a restart. No long-context load. 1M (factor 4.0) still opt-in.
 
+## [2026-08-29] ingest | GLM-5.3-Flash GB10 sizing
+`zai-org/GLM-5.3-Flash` is 320B/18B-A native FP8 (~306–331 GiB), arch
+`glm5_next`, not in NGC 26.03. Official FP8 needs **4× GB10** (3× is
+weight-only tight). Community NVFP4 (~181 GiB) is **proven on 2× Spark**
+TP=2 @ 262k. Filed [sources/glm53-flash.md](./sources/glm53-flash.md),
+[entities/model-glm53-flash.md](./entities/model-glm53-flash.md),
+[concepts/glm53-flash-on-gb10.md](./concepts/glm53-flash-on-gb10.md).
+Not served; do not flip `vllm_default_model`.
+
+## [2026-08-29] ops | GLM-5.3-Flash — 4 Sparks optional
+Two more GB10s exist, blocked on external cooling. **2× NVFP4 is enough
+to serve.** 4× is the upgrade for official FP8 / 1M KV / TP=4 ~68 tok/s,
+not a gate to first boot.
+
+## [2026-08-29] ops | GLM-5.3-Flash NVFP4 deploy started
+Added profile `glm53_flash` (`roles/vllm_glm53_stacked`, sm121-v8, marlin,
+language-model-only, 262k). Prefetch of `LibertAIDAI/GLM-5.3-Flash-NVFP4`
+queued on nvidia1; live profile stays **qwen38** until `state.json` is
+`ready` and `just spark-profile-glm53` cuts over.
+
+## [2026-08-29] run | GLM-5.3 first boot aborted — back to Qwen, DeepSeek queued
+Operator: GLM-5.3 NVFP4 not stable enough. Killed the health-wait playbook
+and `vllm-glm53-*` mid-load. Hub tree was **not** already holding
+`deepseek-ai/DeepSeek-V4-Flash-0731` (nor the Anemll image). Deleted the
+182G GLM hub on both Sparks so nvidia2's 168G free could fit ~167G
+DeepSeek. Inventory `spark_llm_profile: deepseek_v4_flash`; prefetch
+downloading at ~13 MB/s. Live serve restored to Qwen3.8-27B-FP8 Ray
+`:8000` (smoke `QWEN38_BACK`). Cut over DSpark `:8888` only after
+`state.json` is `ready` + peer rsync. Do not run untagged provision
+(NFS chown).
+
+## [2026-08-29] ingest | DeepSeek-V4-Flash-0731 entity
+Filed [entities/model-deepseek-v4-flash.md](./entities/model-deepseek-v4-flash.md).
+Official checkpoint ~155 GiB / 167 GB, MIT, Anemll `dspark-vllm-gx10:0.1.1`
+mp TP=2 on `:8888`.
+
+## [2026-08-30] run | Park DeepSeek + GLM — production stays Qwen3.8
+Operator: newer checkpoints too new to use. `spark_llm_profile` back to
+`qwen38`. Removed DeepSeek/GLM from `hf_prefetch_models` + keep list;
+deleted 156G DeepSeek hub on both Sparks and the sm121-v8 GLM image.
+Prefetch now TinyLlama + Qwen3.8 only. Live Ray `:8000` smoke
+`QWEN38_OK` at 524288. Roles stay in-tree; do not prefetch either
+model unless asked.
+
+## [2026-08-30] ingest | tonyd2wild GLM repo — RedHatAI default + what we missed
+[tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark](https://github.com/tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark)
+now defaults to `RedHatAI/GLM-5.3-Flash-NVFP4` (`compressed-tensors`).
+`LibertAIDAI/…` (what we prefetched) is ModelOpt and emits corrupted
+token IDs (vLLM #54150). README also: no `--kv-cache-memory` pin,
+`vm.swappiness=0`, poll `/health` ~15 min, edit fabric before using
+their launchers (theirs `192.168.192.0/24`, ours `169.254.0.0/16`). Our 2026-08-29 boot
+was aborted mid-health on LibertAIDAI + v8; we never proved the engine
+dead. Update [sources/glm53-flash.md](./sources/glm53-flash.md).
+
+## [2026-08-30] ops | Prefetch RedHatAI/GLM-5.3-Flash-NVFP4 (Qwen stays live)
+Queued `RedHatAI/GLM-5.3-Flash-NVFP4` on hf-prefetch (resume). Profile
+stays `qwen38`. `:8000` still 200. Do not cut over until `state.json`
+is `ready` + nvidia2 rsync. Tonyd launcher fabric rewrite:
+head `169.254.102.149`, worker `169.254.37.109`, `enp1s0f0np0`,
+`NCCL_IB_HCA=rocep1s0f0`, `NCCL_IB_GID_INDEX=3`,
+`NCCL_IB_ADDR_RANGE=169.254.0.0/16`.
+
+## [2026-09-07] ops | GB10 UMA swappiness applied + Qwen Ray recreated
+Same Qwen Ray process had decayed >25 → 11 → 4.7 tok/s with no restart
+(`vm.swappiness=60`, 9.2 GiB swap on nvidia1). Operator stopped inference;
+applied `spark_uma` + recover + tagged `vllm_ngc_stack` recreate. Both
+hosts now `swappiness=0`, swap **0B**. `/health` 200. Warm isolated
+stream: TTFT 0.18 s, **13.1 tok/s** decode (was 4.7). Assert gate on.
+See [concepts/gb10-uma-swappiness.md](./concepts/gb10-uma-swappiness.md).
+
+## [2026-09-15] ops | Massive Flat Files raw mirror (parquet later)
+Landed `scripts/massive_flatfile_mirror.py` to copy every accessible
+Massive S3 prefix into `gs://microscaler-massive/raw/` on
+`hf-archive-downloader`. 403 prefixes are skipped. Runtime creds come
+from GCP Secret Manager (stdout only; no env file). Parquet is a later
+`parquet/` prefix. See
+[concepts/massive-flatfile-mirror.md](./concepts/massive-flatfile-mirror.md).
+
 ## [2026-10-24] incident | nvidia1 wedged by an image pull beside a resident model
 15:26 EEST: started a 10 GiB `k3s ctr images pull` (vLLM nightly) on nvidia1 while the
 Flash-Next HF download ran and the 27B group was still resident (~0 GiB MemAvailable).

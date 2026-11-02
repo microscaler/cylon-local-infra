@@ -45,19 +45,16 @@ spark_apt_cache_valid_time: 0
 spark_apt_autoremove: false
 
 # --- Kernel pin / apt-mark hold / OTA service mask (roles/spark_kernel) ---
-# Fleet-wide pin on the 4K-page nvidia image (NOT *-nvidia-64k). Rolled
-# forward from 6.17.0-1008-nvidia after OTA shipped 6.17.0-1018.18 (May 2026).
-# Notable fixes in 1008→1018: DGX Spark iGPU IOMMU quirk (LP #2150487), RoCE
-# stale GIDs on netdev events (1017 / LP #2148311), r8169 vs r8127 Spark
-# Ethernet contention (LP #2144345). See apt changelog on either Spark:
-#   apt changelog linux-image-unsigned-6.17.0-1018-nvidia-64k
-# Apply + reboot: `just spark-kernel-apply` then `just spark-reboot`.
+# Fleet-wide pin on the 4K-page nvidia image (NOT *-nvidia-64k).
+# 7.0.0-1024-nvidia is the image nvidia3 boots and the newest 7.0 image in
+# apt on every Spark (580-open modules). nvidia1/nvidia2 were on
+# 6.17.0-1018-nvidia; nvidia4 was running 7.0.0-1019-nvidia with 1024
+# already installed. Apply + reboot hosts that are not yet running it:
+#   just spark-kernel-apply && just spark-reboot
 #
-# Per-host pins in inventory/host_vars/<host>.yml override this if needed
-# for asymmetric A/B (e.g. one host on 1008 while the other trials 1018).
-#
+# Per-host pins in inventory/host_vars/<host>.yml override this if needed.
 # Release pin entirely: spark_kernel_pin: "" (HWE meta drives GRUB again).
-spark_kernel_pin: "6.17.0-1018-nvidia"
+spark_kernel_pin: "7.0.0-1024-nvidia"
 spark_kernel_apt_hold: true
 spark_kernel_disable_auto_apt_upgrade: true
 # spark_kernel_show_grub_menu: false       # set true to expose the GRUB menu (5s) for next-boot override
@@ -68,6 +65,21 @@ spark_kernel_disable_auto_apt_upgrade: true
 #   spark_gpu_lock_clocks_enabled: false
 spark_gpu_lock_clocks_enabled: true
 spark_gpu_locked_graphics_clock_mhz: 2000
+
+# --- GB10 UMA swappiness (roles/spark_provision/tasks/uma_sysctl.yml) ---
+# Default vm.swappiness=60 pages vLLM/UVM into /swap.img on these 121 GiB
+# nodes. Observed 2026-09-07: same Qwen Ray process decayed >25 → 11 → 4.7
+# tok/s after RedHatAI GLM (~198 GiB) prefetched while serving. Persist 0
+# with `just spark-uma-apply`. Reclaim + recreate is a separate, hitching
+# step: `just spark-uma-recover` then `just spark-uma-recover-recreate`.
+# Do not set spark_uma_recover: true here — drop_caches stalls a live engine.
+# Applied 2026-09-07: swappiness=0 on both Sparks. Keep the assert on.
+spark_provision_uma_sysctl: true
+spark_uma_swappiness: 0
+spark_uma_recover: false
+spark_uma_drop_caches_on_recover: true
+spark_uma_swapoff_on_recover: true
+spark_assert_uma_swappiness: true
 
 # Docker: use the engine from the DGX / NVIDIA platform image. Do NOT apt-install docker.io.
 docker_install_packages: false
@@ -102,6 +114,15 @@ docker_daemon_config:
 cuda_keyring_url: "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/cuda-keyring_1.1-1_all.deb"
 cuda_toolkit_package: "cuda-toolkit-13-0"
 cuda_extra_packages: []
+# Plays in playbooks/nccl_sparks.yml sit outside roles/nccl_sparks, so they
+# cannot see that role's defaults. Keep the same paths here.
+nccl_test_user: "{{ spark_runtime_user }}"
+nccl_build_user_home: "{{ spark_runtime_home }}"
+nccl_home: "{{ nccl_build_user_home }}/nccl"
+nccl_build_home: "{{ nccl_home }}/build"
+nccl_tests_home: "{{ nccl_build_user_home }}/nccl-tests"
+cuda_home: "/usr/local/cuda"
+mpi_home: "/usr/lib/aarch64-linux-gnu/openmpi"
 
 # --- Spark interconnect (QSFP Direct-Attach-Copper to peer Spark) ---
 # The Spark has ONE ConnectX-7 SuperNIC chip (shared Base GUID 30c59903003fe1cf
@@ -202,10 +223,12 @@ vllm_stack_kind: ray   # ray | torchrun  (only used when spark_llm_profile=qwen3
 # Active LLM profile on the Sparks (mutually exclusive — one stack owns both GPUs).
 #   qwen38            → NGC Ray/torchrun, :8000, Qwen/Qwen3.8-27B-FP8
 #   deepseek_v4_flash → Anemll vLLM mp TP=2, :8888, DeepSeek-V4-Flash-0731
+#   glm53_flash       → tonyd2wild glm53-flash sm121, :8000, NVFP4 TP=2
 # Switch: set profile + `just spark-provision-recreate` (or profile-specific just recipes).
-# Qwen inventory (vllm_default_model / YaRN / parsers) is preserved when on DeepSeek.
-spark_llm_profile: qwen38   # | deepseek_v4_flash
+# Qwen inventory (vllm_default_model / YaRN / parsers) is preserved when off Qwen.
+spark_llm_profile: qwen38   # | deepseek_v4_flash | glm53_flash
 spark_provision_vllm_dspark_stacked: true
+spark_provision_vllm_glm53_stacked: true
 
 # Image tag: pinned to 26.03-py3 (26.04+ drops bundled `ray`; see 2026-04-29 rollback run).
 vllm_stacked_container_image: "nvcr.io/nvidia/vllm:26.03-py3"
@@ -563,6 +586,9 @@ hf_prefetch_models:
   - repo: nvidia/Qwen3.8-Flash-Next-NVFP4
     revision: fc694b54fb0174e0913e6adf86691ef85a4ead47
   # Parked (re-add to prefetch + skip prune keep to restore):
+  # - RedHatAI/GLM-5.3-Flash-NVFP4              # pruned 2026-10-24 (room for Qwen3.8-Flash-Next)
+  # - deepseek-ai/DeepSeek-V4-Flash-0731        # too new — ditched 2026-08-30
+  # - LibertAIDAI/GLM-5.3-Flash-NVFP4           # ModelOpt token corruption (vLLM #54150)
   # - Qwen/Qwen3.6-35B-A3B-FP8
   # - Qwen/Qwen3-Coder-30B-A3B-Instruct
   # - Qwen/Qwen3-Coder-Next-FP8
@@ -577,6 +603,15 @@ hf_cache_keep_models:
   - TinyLlama/TinyLlama-1.1B-Chat-v1.0
   - Qwen/Qwen3.8-27B-FP8
   - nvidia/Qwen3.8-Flash-Next-NVFP4   # revision fc694b54fb0174e0913e6adf86691ef85a4ead47 (keep list is per repo)
+
+# GLM-5.3-Flash NVFP4 (roles/vllm_glm53_stacked) — spark_llm_profile=glm53_flash
+# tonyd launcher IPs are 192.168.192.2/4 + NCCL_IB_ADDR_RANGE=192.168.192.0/24.
+# Ours: nvidia1 169.254.102.149 / nvidia2 169.254.37.109 on enp1s0f0np0,
+# NCCL_IB_HCA=rocep1s0f0, NCCL_IB_GID_INDEX=3, ADDR_RANGE=169.254.0.0/16.
+glm53_model: "RedHatAI/GLM-5.3-Flash-NVFP4"
+glm53_served_model_name: "glm-5.3-flash"
+vllm_glm53_api_port: 8000
+vllm_glm53_master_port: 29521
 
 # DeepSeek-V4-Flash (roles/vllm_dspark_stacked) — used when spark_llm_profile=deepseek_v4_flash
 dspark_model: "deepseek-ai/DeepSeek-V4-Flash-0731"

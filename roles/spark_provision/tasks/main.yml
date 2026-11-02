@@ -76,6 +76,18 @@
   tags: [spark, network, sysctl, lan_ipv6]
   when: spark_provision_lan_ipv6_sysctl | default(true) | bool
 
+- name: Phase — GB10 UMA swappiness (persist vm.swappiness=0)
+  ansible.builtin.import_tasks: uma_sysctl.yml
+  tags: [spark, network, sysctl, spark_uma]
+  when: spark_provision_uma_sysctl | default(true) | bool
+
+- name: Phase — GB10 UMA swap recover (opt-in drop_caches + swapoff)
+  ansible.builtin.import_tasks: uma_recover.yml
+  tags: [spark, spark_uma_recover]
+  when:
+    - spark_provision_uma_sysctl | default(true) | bool
+    - spark_uma_recover | default(false) | bool
+
 - name: Phase — /etc/hosts QSFP interconnect aliases (gx10-*, nvidia*)
   ansible.builtin.include_role:
     name: spark_hosts
@@ -133,22 +145,25 @@
   tags: [spark, vllm_autoupgrade]
   when: spark_provision_vllm_autoupgrade | default(false) | bool
 
-- name: Phase — tear down inactive vLLM stack (Qwen Ray/torchrun ↔ DeepSeek mutual exclusion)
+- name: Phase — tear down inactive vLLM stack (Qwen ↔ DeepSeek ↔ GLM-5.3)
   ansible.builtin.import_tasks: vllm_stack_teardown_inactive.yml
   tags:
     - spark
     - vllm_ngc_stack
     - vllm_torchrun_stack
     - vllm_dspark_stack
+    - vllm_glm53_stack
     - stack_ngc
     - stack_torchrun
     - stack_dspark
+    - stack_glm53
     - vllm_container
     - spark_assert
   when:
     - spark_provision_vllm_stacked_container | default(true) | bool
       or spark_provision_vllm_torchrun_stacked | default(true) | bool
       or spark_provision_vllm_dspark_stacked | default(true) | bool
+      or spark_provision_vllm_glm53_stacked | default(true) | bool
 
 - name: Phase — NGC stacked vLLM (Docker Ray + `vllm serve`) — Qwen profile
   ansible.builtin.include_role:
@@ -193,6 +208,20 @@
   when:
     - spark_provision_vllm_dspark_stacked | default(true) | bool
     - (spark_llm_profile | default('qwen38')) == 'deepseek_v4_flash'
+
+- name: Phase — GLM-5.3-Flash NVFP4 (sm121 vLLM mp TP=2)
+  ansible.builtin.include_role:
+    name: vllm_glm53_stacked
+    apply:
+      tags:
+        - spark
+        - vllm_glm53_stack
+        - stack_glm53
+        - vllm_container
+  tags: [spark, vllm_glm53_stack, stack_glm53, vllm_container]
+  when:
+    - spark_provision_vllm_glm53_stacked | default(true) | bool
+    - (spark_llm_profile | default('qwen38')) == 'glm53_flash'
 
 - name: Phase — diagnostics (Docker + HF cache probes)
   ansible.builtin.include_role:

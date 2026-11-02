@@ -9,7 +9,8 @@
 #
 #   ansible-playbook playbooks/nccl_sparks.yml                    # build + test
 #   ansible-playbook playbooks/nccl_sparks.yml --skip-tags nccl_test   # build only
-#   ansible-playbook playbooks/nccl_sparks.yml -e nccl_interface=enp1s0f1np1
+#   ansible-playbook playbooks/nccl_sparks.yml -l nvidia3,nvidia4 -e nccl_interface=enp1s0f1np1
+# Pair SSH and all_gather use the hosts in this play (so --limit selects the pair).
 #   ansible-playbook playbooks/nccl_sparks.yml --tags discover_sparks  # deploy discover-sparks script + avahi-utils
 #
 # Requires nccl_test_user (default nvidia) to exist — run playbooks/provision_sparks.yml first, or rely on the play below.
@@ -140,7 +141,7 @@
         path: "/home/{{ nccl_test_user }}/.ssh/authorized_keys"
         marker: "# {mark} ANSIBLE MANAGED nccl_sparks cluster"
         block: |
-          {% for h in groups['sparks'] | sort %}
+          {% for h in ansible_play_hosts_all | sort %}
           {{ hostvars[h].nccl_cluster_pubkey_line }}
           {% endfor %}
         create: true
@@ -171,7 +172,7 @@
   tasks:
     - name: Resolve peer Spark for interconnect SSH
       ansible.builtin.set_fact:
-        nccl_peer_spark: "{{ (groups['sparks'] | sort)[1] if inventory_hostname == (groups['sparks'] | sort)[0] else (groups['sparks'] | sort)[0] }}"
+        nccl_peer_spark: "{{ (ansible_play_hosts_all | sort)[1] if inventory_hostname == (ansible_play_hosts_all | sort)[0] else (ansible_play_hosts_all | sort)[0] }}"
 
     - name: Probe passwordless SSH to peer (interconnect) — remote ls
       ansible.builtin.command:
@@ -265,7 +266,7 @@
           {{ nccl_test_user }}@{{ hostvars[sparks_ordered[1]].nccl_interconnect_ip }} true
       when: inventory_hostname == sparks_ordered[0]
       vars:
-        sparks_ordered: "{{ groups['sparks'] | sort }}"
+        sparks_ordered: "{{ ansible_play_hosts_all | sort }}"
       become: true
       become_user: "{{ nccl_test_user }}"
       register: nccl_ssh_check
@@ -280,15 +281,23 @@
         export UCX_NET_DEVICES={{ nccl_interface }}
         export NCCL_SOCKET_IFNAME={{ nccl_interface }}
         export OMPI_MCA_btl_tcp_if_include={{ nccl_interface }}
-        mpirun -np 2 -H {{ hostvars[sparks_ordered[0]].nccl_interconnect_ip }}:1,{{ hostvars[sparks_ordered[1]].nccl_interconnect_ip }}:1 \
+        export NCCL_NET_PLUGIN=none
+        export NCCL_IB_DISABLE=0
+        export NCCL_IB_HCA={{ nccl_ib_hca }}
+        export NCCL_IB_GID_INDEX={{ spark_nccl_ib_gid_index | default('3') }}
+        export NCCL_P2P_DISABLE=1
+        export NCCL_SHM_DISABLE=1
+        timeout 300 mpirun -np 2 -H {{ hostvars[sparks_ordered[0]].nccl_interconnect_ip }}:1,{{ hostvars[sparks_ordered[1]].nccl_interconnect_ip }}:1 \
           --mca plm_rsh_agent "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o IdentityFile=/home/{{ nccl_test_user }}/.ssh/{{ hostvars[sparks_ordered[0]].nccl_key_basename }}" \
-          -x LD_LIBRARY_PATH \
+          -x LD_LIBRARY_PATH -x NCCL_HOME -x NCCL_SOCKET_IFNAME -x NCCL_NET_PLUGIN \
+          -x NCCL_IB_DISABLE -x NCCL_IB_HCA -x NCCL_IB_GID_INDEX \
+          -x NCCL_P2P_DISABLE -x NCCL_SHM_DISABLE \
           {{ nccl_tests_home }}/build/all_gather_perf
       args:
         executable: /bin/bash
       when: inventory_hostname == sparks_ordered[0]
       vars:
-        sparks_ordered: "{{ groups['sparks'] | sort }}"
+        sparks_ordered: "{{ ansible_play_hosts_all | sort }}"
       become: true
       become_user: "{{ nccl_test_user }}"
       register: nccl_test_out
@@ -297,6 +306,6 @@
     - name: Show NCCL test output
       ansible.builtin.debug:
         var: nccl_test_out.stdout_lines
-      when: inventory_hostname == (groups['sparks'] | sort)[0]
+      when: inventory_hostname == (ansible_play_hosts_all | sort)[0]
       tags:
         - nccl_test

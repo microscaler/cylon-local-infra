@@ -1,9 +1,58 @@
 # Progress
 
+## Session 2026-09-01 — finish rerp Failed HelmReleases
+
+**Missed:** `rerp/general-ledger` + `invoice` had suspend cleared; Ready=RollbackFailed. Re-suspended then **deleted** (KS `rerp-accounting-services` already suspended so they will not recreate). Deploys left at 0/0. Manifests in rerp repo already `suspend: true` (still unpushed).
+
+## Session 2026-09-01 — finish hauliage ImageRepository suspend
+
+**Problem:** Live `spec.suspend: true` was cleared by GitOpsSet (template had no suspend); Failed Ready condition stuck.
+
+**Fix:** Suspended `cluster-control` + `platform-gitopssets`; set GitOpsSet ImageRepository/Policy/IUA template `suspend: true`; deleted + recreated all 24 hauliage ImageRepos so they are born suspended (no Failed condition). Re-suspended hauliage/rerp KS.
+
+**Pending push:** inventory + `${{ .Repeat.suspend }}` template; then unsuspend control KS. Until then sesame/pw image automation also suspended.
+
+## Session 2026-09-01 — suspend hauliage ImageRepositories
+
+**Done (live):** All 24 hauliage-labeled ImageRepository + matching ImagePolicy + `hauliage-dev-images` IUA set `spec.suspend: true` (also searates-terminal-mock). Failures were `NAME_UNKNOWN` (images not in registry while haulage paused). Also suspended rerp ImageRepos/IUA for consistency.
+
+**Git (unpushed):** `product-components.yaml` image/automation `suspend` flags; GitOpsSet template emits `suspend` on ImageRepository/ImagePolicy/ImageUpdateAutomation.
+
+## Session 2026-09-01 — platform-gitopssets HealthCheckFailed
+
+**Root cause:** `wait: true` on `platform-gitopssets` blocked on GitOpsSet `product-components` InProgress/False. GitOpsSet error since ~2026-08-14: PriceWhisperer resources labeled for the set but missing from inventory → create failed with `already exists` (product-pricewhisperer, pricewhisperer-core, website/trader/platform Image* + IUA).
+
+**Fix (live):** delete orphans; force-remove `pricewhisperer-core` Flux finalizer (stuck terminating); reconcile GitOpsSet → `128 resources created` Ready; `platform-gitopssets` Ready (`Applied revision: main@sha1:db814eb…`).
+
+**Follow-ups:** PW `ib-gateway-paper` still unhealthy; shared-gitops/rerp suspend commits still unpushed.
+
+## Session 2026-09-01 — suspend failed RERP HelmReleases
+
+**Done (cluster):**
+- `kubectl`/`MCP`: `rerp/general-ledger` and `rerp/invoice` HelmRelease `spec.suspend: true`
+- Manifests edited in rerp:
+  - `deployment-configuration/profiles/dev/rerp/accounting/services/general-ledger.yaml`
+  - `deployment-configuration/profiles/dev/rerp/accounting/services/invoice.yaml`
+
+**Not done (git):** agent Shell broken (`spawn EBADF`). Run on ms02:
+
+```bash
+ssh -o ControlMaster=no ms02 'cd ~/Workspace/microscaler/rerp && git add deployment-configuration/profiles/dev/rerp/accounting/services/general-ledger.yaml deployment-configuration/profiles/dev/rerp/accounting/services/invoice.yaml && git commit -m "Suspend failing general-ledger and invoice HelmReleases." && git push -u origin HEAD && git rev-parse HEAD'
+
+ssh -o ControlMaster=no ms02 'cd ~/Workspace/microscaler/shared-gitops-k8s-cluster && git status -sb && git add -A && git commit -m "Suspend hauliage/rerp Flux sync and ship Flux Status Web UI." && git push -u origin HEAD && git rev-parse HEAD'
+```
+
 ## Done (interim snapshot)
 
 - **Parity doc** `docs/spark-parity-pre-stack.md` — referenced as gate before stacking; updated for **`provision_sparks.yml`**.
 - **Canonical Spark playbook:** `playbooks/provision_sparks.yml` + role **`spark_provision`** (sudoers, apt, docker, firewall, cuda, vllm, optional stack, HF, optional docker vLLM, diagnostics).
+
+- **2026-08-27 (Spark DeepSeek + HF prune):** Added first-party Ansible — role
+  `hf_cache_prune` / `playbooks/prune_hf_cache.yml`; role `vllm_dspark_stacked`
+  (Anemll image, mp TP=2, own `dspark-serve.sh.j2`, vendored hotfixes); inventory
+  `spark_llm_profile` + keep list; mutual teardown + `spark_assert` profile gates;
+  just recipes `spark-hf-prune*`, `spark-profile-qwen|deepseek`; docs
+  `spark_llm_profiles.md`. Qwen inventory preserved for switch-back.
 - **vLLM single-node path:** `roles/vllm` (`serve.yml`, `vllm.service`, `run-vllm-api.sh`) — toggled via **`spark_provision_vllm_serve`** / **`vllm_sparks_deploy_single_node_service`**.
 - **Two-node stack automation:** same playbook, **`spark_provision_vllm_stack`** (interconnect facts → stop single-node `vllm` on leader → Ray head → Ray worker → `vllm-stacked`).
 - **Verify Ray:** `spark_provision_verify_ray` + **`provision_sparks.yml --tags verify`** (`ray status` from leader with `RAY_ADDRESS`).
@@ -25,6 +74,39 @@
 4. If API missing: `journalctl` on leader/follower per `docs/vllm-multi-node.md`.
 
 ## Session notes
+
+- **2026-09-15 (Massive raw mirror):** Python syncer + tests +
+  `just massive-mirror-*`. Dest `gs://microscaler-massive/raw/`.
+  Creds from GCP Secret Manager at runtime (no env file). Parquet later.
+  VM install + first sync not done.
+- **2026-09-14 (Mac/Parallels WAN):** Recent ms02 UFW 3260 / Ansible
+  persist did not steal Mac default route. USB `en20` (service #1)
+  flapped 10baseT → inactive; that is the likely shared failure for
+  Mac + Parallels Shared NAT.
+- **2026-09-14 (what to persist):** iSCSI 3260 already lives in
+  shared-gitops `multipass_bridge_firewall` (`just cluster-edge-apply`).
+  cylon-local now also has `firewall_trusted_bridge_*` (3260 only).
+  Other live-not-in-cylon-local: Tilt Anywhere UFW forwards; LIO
+  `target.service` failed on boot (rtslib restore succeeded). Do not
+  duplicate the full CSI set here.
+- **2026-09-14 (what to persist):** iSCSI 3260 already lives in
+  shared-gitops `multipass_bridge_firewall` (`just cluster-edge-apply`).
+  cylon-local now also has `firewall_trusted_bridge_*` (3260 only).
+  Other live-not-in-cylon-local: Tilt Anywhere UFW forwards; LIO
+  `target.service` failed on boot (rtslib restore succeeded).
+- **2026-09-07 (UMA applied):** Tagged recover + Qwen Ray recreate.
+  swappiness 0, swap 0B both hosts, assert gate on. Warm decode 13.1
+  tok/s (was 4.7). Playbook recap nvidia1 55/11 nvidia2 43/10, failed=0.
+- **2026-08-30 (back to Qwen3.8):** DeepSeek/GLM parked as too new. Profile
+  `qwen38`. Hub trees deleted (156G DeepSeek both hosts); GLM sm121 image
+  removed. Prefetch is TinyLlama + Qwen3.8. Live `:8000` smoke `QWEN38_OK`.
+- **2026-08-29 (GLM ditched, DeepSeek queued):** GLM `/health` wait killed;
+  `vllm-glm53-*` removed; 182G GLM hub deleted (nvidia2 only had 168G free).
+  DeepSeek was not on disk. Prefetch of `DeepSeek-V4-Flash-0731` started
+  (~13 MB/s). Qwen3.8 Ray restored on `:8000` (assert + smoke pass). Inventory
+  intent is `deepseek_v4_flash`. Anemll image pull in flight.
+
+## Session notes (older)
 
 - **2026-08-25 (Zot retention drift diagnosed):** Confirmed Zot is separate
   from the 208 GiB host Docker dataset: it uses Kubernetes ZVOL `pvc-b901...`
@@ -207,3 +289,83 @@
 - **APT:** `provision_sparks.yml` with `spark_apt_upgrade_mode=full` **completed** by operators — treat as parity maintenance; reboot if upgrades demanded it, then restack as above.
 
 - **2026-05-20 (torchrun HF cache):** nvidia1 `models--Qwen--Qwen3.6-35B-A3B-FP8` was **root-owned** under `/home/nvidia/.cache/huggingface/hub` (broken offline load for non-root / container). **Fix:** `chown -R nvidia:nvidia` on that tree; **hf-prefetch** state `ready` (~37GB); snapshot `95a723…` has `config.json` + 42 FP8 shards on **nvidia1+nvidia2**. `get_model_path` + `snapshot_download` OK offline in torchrun env after fix. **Stack:** `just spark-provision --tags hf_prefetch,spark_assert` run; torchrun relaunch via `-e vllm_stack_kind=torchrun` + `vllm_torchrun_stack` (inventory on disk still `ray` until committed). **API:** `/v1/models` **not 200** yet — leader torchrun container up, log at pip/fastsafetensors + weight load. Use `just spark-vllm-logs-serve` after setting `vllm_stack_kind: torchrun`.
+- **2026-09-09 (Zot/iSCSI recovery):** Zot was down after all Multipass
+  workers rebooted at 02:37. The ms02 LIO target listened on 3260 but did not
+  answer worker SYNs, and democratic-csi retained hung NodeStageVolume locks.
+  Confirmed Zot's current 60 GiB PVC (`pvc-ca98...`) was not full: 9.2 GiB
+  ext4 used (16%). Reloaded UFW, restarted `rtslib-fb-targetctl` with zero
+  sessions, rolled the CSI node DaemonSet, and recreated Zot. Registry
+  endpoints and Flux `stack-cluster` recovered. The checked-in policy was
+  found to retain five dynamic builds, not two. Updated the local GitOps source
+  (uncommitted) to keep the two newest `dev-*`/`tilt-*` tags plus stable aliases.
+  A temporary count=2 startup GC pruned some excess tags, then Flux correctly
+  reverted live state to committed count=5. Durable policy repair still needs
+  an explicit commit/push. Remaining Airflow/Hauliage/RERP pull failures are
+  missing tags on the current Zot PVC and require image rebuilds/pushes.
+- **2026-09-14 (PostgreSQL replica reseed):** Both Bitnami PostgreSQL 15
+  replicas were ~24 days behind and could not retrieve removed WAL segments
+  (`1/A2...` and `1/A0...` versus primary `65/AA...`). Rebuilt them
+  sequentially in place: scaled each Deployment to zero, used a one-shot
+  BusyBox pod to remove only the PVC's `/data/data`, then scaled up and allowed
+  `pg_basebackup` to clone from the primary. Preserved both existing 10 GiB
+  ZFS/iSCSI PVCs. Final primary `pg_stat_replication`: two asynchronous
+  `streaming` walreceivers, both flush/replay at `65/AF098568`, zero byte lag.
+  Replica logs confirm completed base backups and clean WAL streaming. The
+  primary Service remains hard-selected to `app=postgres-primary`; failover is
+  manual despite restored standby copies.
+- **2026-09-25 (NFS route blip):** `just nfs-up-resvport` reported no route
+  to `192.168.1.189:2049`. Server exports, listeners, and the LAN UFW 2049
+  rule were intact. After the Mac route returned on `en0`, the resvport mount
+  and a remote directory read succeeded.
+- **2026-09-26 (GitHub runner pool):** Uncordoned `k8s-runner-1` and
+  `k8s-runner-2` (VMs were already running; nodes had been
+  `SchedulingDisabled` since 2026-08-28). Runners 3–5 stay cordoned. ARC
+  runner `microscaler-5t4qk-runner-4xp8g` is 2/2 on runner-1; listener and
+  `dind-registry-proxy` are Running. iSCSI 3260 was dropped because live
+  `ufw-user-input` was empty; `ufw reload` restored it and Zot remounted.
+  DinD now uses `--insecure-registry` for `10.177.76.220:5000`, and Zot
+  `http.compat` is `docker2s2` so `docker push` of Docker manifest v2 is
+  accepted. Proved push and pull of a scratch probe image, then deleted the
+  tag. All five runner nodes got the HTTP containerd mirror for that
+  registry. Both GitOps edits are unpushed; Flux will revert them. The Zot
+  manifest still also carries the uncommitted 2-tag retention edit.
+- **2026-10-01 (Zot iSCSI mount lock):** Zot pod was Unknown with
+  `operation locked` on `pvc-ca98cc93` (zfs-iscsi, not NFS). Live iptables
+  was missing the configured TCP 3260 allow from `10.177.76.0/24`, so
+  `iscsiadm` logins timed out. `ufw reload` restored the rule; force-deleted
+  CSI node pods stuck on zombie `iscsiadm`. Zot `zot-54b4db8ddd-xjwzp` is
+  Running on `k8s-cp-1` and `/v2/` returns 200.
+- **2026-11-02 (vLLM did not return after ms02 power loss):** spark1, spark2, and spark4 are off the LAN. Flash-Next stayed Terminating because a graceful delete never finishes without the kubelet, and LeaderWorkerSet will not replace that ordinal. Pods were force-deleted and are Pending. `fabric-hosts` is on `shared-gitops` `main` (`2926698`) and Flux applied it. After the hosts returned, Flash-Next crash-looped on a RoCE GID mismatch (spark1 index 4, spark2 index 3). `7aa69ca` pins the leader to 4. A Hermes-style gateway completion then returned `pong`.
+- **2026-10-31 (NCCL on nvidia3/nvidia4):** `playbooks/nccl_sparks.yml -l nvidia3,nvidia4` built NCCL `v2.28.9-1` and `all_gather_perf` passed (0 wrong, bus bandwidth 11.88 GB/s). Cable is Cage B. Link-local is `169.254.211.40` (nvidia3) and `169.254.196.121` (nvidia4) on `enp1s0f1np1`. Test HCA is `rocep1s0f1` only; `roceP2p1s0f1` has no IPv4. Intended serving is DeepSeek-V4.1-Flash-1017 on sparks 3–6, with 7–8 reserved for vector 1 training. nvidia5–8 are not inventoried yet.
+- **2026-10-31 (fleet kernel + nvidia1/nvidia2 addresses):** All four Sparks
+  run `7.0.0-1024-nvidia`. nvidia1 is `192.168.1.110` (`spark1`), nvidia2
+  is `192.168.1.120` (`spark2`). Mac `/etc/hosts` is still the old pair
+  until `playbooks/mac_workstation.yml` is applied. `roles/mac_sudoers`
+  now grants the operator `NOPASSWD: ALL` so that apply does not keep
+  asking for a password; the sudoers tag itself still needs the password
+  once, because the drop-in is not on disk yet.
+- **2026-10-31 (nvidia3/nvidia4 joined):** LAN is `192.168.1.130` (`spark3`,
+  kernel `7.0.0-1024-nvidia`) and `192.168.1.140` (`spark4`, kernel
+  `7.0.0-1019-nvidia`). Provision `failed=0`. Docker 29.6.2 client was
+  installed but the daemon was dead (`buildkit: invalid database`, then
+  start-limit). Cleared `/var/lib/docker/buildkit` and taught `roles/docker`
+  to recover that before asserting the engine. Both nodes are Ready on
+  k3s `v1.36.2+k3s1` with the GPU NoSchedule taint, slots 3 and 4, fabric
+  `crs804`. `just cylon-node-up` still exits 2: the derived vLLM image is
+  not in containerd, and the NGC base is not in Docker (only
+  dcgm-exporter). `nvidia1`/`nvidia2` stay on `.104`/`.229`. QSFP host
+  aliases stay off until those links have addresses.
+- **2026-09-14 (OpenSearch TTL recovery):** OpenSearch reached flood stage at
+  56/59 GiB (95%), applying read-only blocks and causing Data Prepper HTTP 429
+  plus buffer exhaustion. The seven-day ISM policies existed but could not
+  advance while `.opendistro-ism-config` was blocked. Deleted expired daily
+  metrics/log indices from 2026-08-29 through 2026-09-04. Raw span retention
+  was structurally ineffective because its delete transition followed a
+  size-only 50 GiB rollover; manually rolled `otel-v1-apm-span` to `000021`
+  and deleted expired non-write `000001`/`000020` (11.8 GiB). Cleared all
+  flood blocks. Final disk use is about 1/59 GiB (3%); fresh metrics/logs are
+  indexing and the DataPersistence query sees 90 recent PostgreSQL metrics.
+  Added an uncommitted TDD fix in `shared-gitops-k8s-cluster` to roll spans
+  daily or at 5 GiB; targeted test passes. Full test file has an unrelated
+  existing heap expectation mismatch. The fix requires explicit commit/push
+  before the ten-minute provisioner stops restoring the old policy.

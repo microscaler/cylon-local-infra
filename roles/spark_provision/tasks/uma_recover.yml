@@ -1,0 +1,29 @@
+---
+# One-shot UMA reclaim. Does not recreate vLLM — pair with a tagged
+# vllm_ngc_stack recreate (`just spark-uma-recover-recreate`).
+# drop_caches / swapoff hitch a live engine; keep spark_uma_recover false
+# on ordinary provision.
+
+- name: Sync disks and drop host page caches (UMA reclaim)
+  ansible.builtin.shell:
+    cmd: sync && echo 3 > /proc/sys/vm/drop_caches
+  when:
+    - spark_uma_recover | default(false) | bool
+    - spark_uma_drop_caches_on_recover | default(true) | bool
+  changed_when: true
+
+- name: Disable swap to pull swapped vLLM pages back into RAM
+  ansible.builtin.command:
+    argv: [swapoff, -a]
+  when:
+    - spark_uma_recover | default(false) | bool
+    - spark_uma_swapoff_on_recover | default(true) | bool
+  changed_when: true
+
+- name: Re-enable swap (swappiness=0 keeps it unused)
+  ansible.builtin.command:
+    argv: [swapon, -a]
+  when:
+    - spark_uma_recover | default(false) | bool
+    - spark_uma_swapoff_on_recover | default(true) | bool
+  changed_when: true
