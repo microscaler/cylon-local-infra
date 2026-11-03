@@ -99,6 +99,15 @@
       no_log: true
       notify: Restart k3s-agent
 
+    - name: Mirror the ms02 zot registry (k3s reads registries.yaml at start)
+      ansible.builtin.template:
+        src: registries.yaml.j2
+        dest: /etc/rancher/k3s/registries.yaml
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart k3s-agent
+
     - name: Ensure the containerd config drop-in directory
       ansible.builtin.file:
         path: /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d

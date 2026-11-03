@@ -28,12 +28,26 @@ k3s_agent_node_name: "{{ cylon_node_name | default(inventory_hostname) }}"
 k3s_agent_node_ip: "{{ cylon_node_lan_ip }}"
 k3s_agent_flannel_iface: "{{ cylon_lan_iface | default('enP7s7') }}"
 
-k3s_agent_node_labels:
+k3s_agent_node_labels: "{{ k3s_agent_base_labels + (cylon_node_extra_labels | default([])) }}"
+k3s_agent_base_labels:
   - "nvidia.com/gpu.product=GB10"
   - "cylon.microscaler.io/fabric=crs804"
   - "cylon.microscaler.io/slot={{ cylon_node_slot }}"
-k3s_agent_node_taints:
+k3s_agent_node_taints: "{{ k3s_agent_base_taints + (cylon_node_extra_taints | default([])) }}"
+k3s_agent_base_taints:
   - "nvidia.com/gpu=present:NoSchedule"
+# Per-host dedication (host_vars): e.g. cylon_node_extra_labels ["cylon.microscaler.io/workload=training"]
+# with the matching cylon_node_extra_taints ["cylon.microscaler.io/workload=training:NoSchedule"].
+
+# The ms02 zot registry (plain HTTP on the Multipass bridge). Same mirrors as the Multipass
+# k3s nodes' cloud-init (shared-gitops multipass/cloud-init-k3s-agent.yaml), so images pushed
+# by CI/dev builds pull on the Sparks too.
+k3s_agent_zot_endpoint: "http://10.177.76.220:5000"
+k3s_agent_registry_mirrors:
+  - "10.177.76.220:5000"
+  - "registry.registry.svc.cluster.local:5000"
+  - "registry.shared-k8s.local:5000"
+  - "localhost:5001"
 
 # OOM priority of the agent (kubelet + embedded containerd). Unset (~) = k3s/kubelet default
 # (-999), now that vLLM runs as pods it manages (24 Oct 2026). While vLLM ran as Docker

@@ -1,0 +1,68 @@
+---
+# One image: context → docker build (native arm64) → k3s containerd → pin → push to zot.
+- name: "{{ img_name }}: image ref"
+  ansible.builtin.set_fact:
+    img_ref: "{{ cylon_workload_registry }}/cylon/{{ img_name }}:{{ img_tag }}"
+    img_dir: "{{ cylon_workload_build_root }}/{{ img_name }}/{{ img_tag }}"
+
+- name: "{{ img_name }}: already in k3s containerd?"
+  ansible.builtin.shell: k3s ctr -n k8s.io images ls -q | grep -Fx '{{ img_ref }}'
+  args:
+    executable: /bin/bash
+  register: img_ctr
+  changed_when: false
+  failed_when: false
+
+- name: "{{ img_name }}: build"
+  when: img_ctr.rc != 0
+  block:
+    - name: "{{ img_name }}: build directory"
+      ansible.builtin.file:
+        path: "{{ img_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: "{{ img_name }}: context (role files)"
+      ansible.builtin.copy:
+        src: "{{ img_context_src }}"
+        dest: "{{ img_dir }}/"
+        mode: "0644"
+      when: img_context_src | length > 0
+
+    - name: "{{ img_name }}: context (git archive)"
+      ansible.builtin.unarchive:
+        src: "{{ img_archive }}"
+        dest: "{{ img_dir }}"
+      when: img_archive | length > 0
+
+    - name: "{{ img_name }}: docker build (torch cu130 wheels over the WAN on first build)"
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'build', '-t', img_ref, '-f', img_dir ~ '/' ~ img_dockerfile] + img_build_args + [img_dir] }}"
+      async: 5400
+      poll: 20
+
+    - name: "{{ img_name }}: import into k3s containerd"
+      ansible.builtin.shell: |
+        set -o pipefail
+        docker save '{{ img_ref }}' | k3s ctr -n k8s.io images import -
+      args:
+        executable: /bin/bash
+      async: 3600
+      poll: 15
+
+- name: "{{ img_name }}: pin against kubelet image GC"
+  ansible.builtin.command:
+    argv: [k3s, ctr, -n, k8s.io, images, label, "{{ img_ref }}", io.cri-containerd.pinned=pinned]
+  changed_when: false
+
+- name: "{{ img_name }}: push to zot (plain HTTP)"
+  ansible.builtin.command:
+    argv: [k3s, ctr, -n, k8s.io, images, push, --plain-http, "{{ img_ref }}"]
+  register: img_push
+  changed_when: false
+  async: 3600
+  poll: 15
+
+- name: "{{ img_name }}: built"
+  ansible.builtin.debug:
+    msg: "{{ img_ref }}"

@@ -1,0 +1,12 @@
+---
+# Build the dedicated cylon nodes' workload images on the nodes themselves (arm64),
+# import + pin in k3s containerd, push to zot. host_vars cylon_workload_images picks them.
+#
+#   just cylon-images                    # every cylon node with images
+#   just cylon-images host=nvidia4       # one node
+- name: Cylon workload images
+  hosts: cylon_nodes
+  gather_facts: false
+  become: true
+  roles:
+    - cylon_workload_images

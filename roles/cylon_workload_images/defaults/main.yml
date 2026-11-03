@@ -1,0 +1,19 @@
+---
+# Workload images for the dedicated cylon nodes, built natively (arm64) with Docker on the
+# node, imported into k3s containerd, pinned against image GC and pushed to the ms02 zot
+# registry (plain HTTP via `k3s ctr push`, so Docker needs no insecure-registry change).
+# Pods reference the zot name with imagePullPolicy IfNotPresent.
+cylon_workload_registry: "10.177.76.220:5000"
+cylon_workload_build_root: /opt/cylon/images
+
+# Which images a host builds (host_vars): any of timesfm, vector_one_train.
+cylon_workload_images: []
+
+# TimesFM forecast API (files/timesfm). Bump the tag when the server or Dockerfile changes;
+# shared-gitops cylon-infra/timeseries names the same tag.
+cylon_timesfm_image_tag: "r1"
+cylon_timesfm_ref: "master"
+
+# vector-one training image: build context is `git archive` of this checkout's HEAD on the
+# controller (the Mac); the tag is the short commit sha.
+cylon_vector_one_repo: "{{ lookup('env', 'HOME') }}/Workspace/local/vector-one/vector_one"

@@ -10,3 +10,7 @@ spark_provision_hosts: false
 cylon_node_name: spark3
 cylon_node_slot: 3
 cylon_node_lan_ip: "192.168.1.130"
+# Dedicated to time-series inference (TimesFM; shared-gitops cylon-infra/timeseries).
+cylon_node_extra_labels: ["cylon.microscaler.io/workload=ts-inference"]
+cylon_node_extra_taints: ["cylon.microscaler.io/workload=ts-inference:NoSchedule"]
+cylon_workload_images: [timesfm]

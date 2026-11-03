@@ -1585,3 +1585,68 @@ cylon-vllm-rollforward:
 # Nodes, taints and labels of the cylon nodes as the cluster sees them.
 cylon-nodes-status:
     ssh ms02 "kubectl get nodes -l nvidia.com/gpu.product=GB10 -o wide -L cylon.microscaler.io/slot,cylon.microscaler.io/fabric; kubectl get nodes -l nvidia.com/gpu.product=GB10 -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints"
+
+# ── Dedicated cylon nodes: spark3 = time-series inference, spark4 = vector-one training ──
+# Labels/taints cylon.microscaler.io/workload=ts-inference|training (host_vars nvidia3/4).
+# Manifests: shared-gitops gitops/root/components/cylon-infra/{timeseries,training}.
+
+# Build the nodes' workload images natively (arm64) on the node, import + pin in k3s
+# containerd, push to zot (roles/cylon_workload_images). Idempotent per tag.
+#   just cylon-images            # nvidia3 (timesfm) + nvidia4 (vector-one-train @ HEAD)
+#   just cylon-images nvidia4
+cylon-images host="cylon_nodes":
+    cd '{{ justfile_directory() }}' && ansible-playbook playbooks/cylon_workload_images.yml -l "{{ host }}"
+
+# One vector-one training run on spark4, from the vector-one checkout's HEAD (image built
+# first if that commit has none). Datasets and checkpoints land on spark4's local PV
+# (/var/lib/cylon/training → /data/{datasets,runs/<run>}).
+#   just v1-train                                  # synthetic chart-pattern set, 5 epochs
+#   just v1-train epochs=1 per_case=2 walks=4      # smoke run
+#   just v1-train mode=file dataset=my-set         # /data/datasets/my-set.npz
+v1-train epochs="5" per_case="20" walks="50" mode="synth" dataset="" batch="512":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{ justfile_directory() }}'
+    kv() { local v="$1"; echo "${v#*=}"; }
+    epochs=$(kv "{{ epochs }}"); per_case=$(kv "{{ per_case }}"); walks=$(kv "{{ walks }}")
+    mode=$(kv "{{ mode }}"); dataset=$(kv "{{ dataset }}"); batch=$(kv "{{ batch }}")
+    repo="$HOME/Workspace/local/vector-one/vector_one"
+    sha=$(git -C "$repo" rev-parse --short=12 HEAD)
+    [ -z "$(git -C "$repo" status --porcelain -uno -- vector_one docker pyproject.toml)" ] \
+      || echo "⚠ vector-one has uncommitted changes; the run uses commit $sha"
+    ansible-playbook playbooks/cylon_workload_images.yml -l nvidia4
+    run="v1-$(date -u +%Y%m%d-%H%M%S)-${sha:0:7}"
+    ssh ms02 "kubectl -n cylon create job $run --from=cronjob/vector-one-train --dry-run=client -o json" \
+      | RUN="$run" SHA="$sha" MODE="$mode" DATASET="$dataset" PER_CASE="$per_case" WALKS="$walks" EPOCHS="$epochs" BATCH="$batch" \
+        python3 -c 'import json,os,sys
+    j=json.load(sys.stdin); c=j["spec"]["template"]["spec"]["containers"][0]
+    c["image"]=c["image"].rsplit(":",1)[0]+":"+os.environ["SHA"]
+    env={"RUN_ID":os.environ["RUN"],"MODE":os.environ["MODE"],"DATASET":os.environ["DATASET"],"PER_CASE":os.environ["PER_CASE"],"WALKS":os.environ["WALKS"],"EPOCHS":os.environ["EPOCHS"],"BATCH":os.environ["BATCH"]}
+    c["env"]=[{"name":e["name"],"value":env.get(e["name"],e.get("value",""))} for e in c["env"]]
+    print(json.dumps(j))' \
+      | ssh ms02 "kubectl apply -f -"
+    echo "run $run — logs: just v1-train-logs $run"
+
+# Follow a training run's log (default: the newest).
+v1-train-logs run="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    r="{{ run }}"; r="${r#run=}"
+    [ -n "$r" ] || r=$(ssh ms02 "kubectl -n cylon get jobs -l app.kubernetes.io/name=vector-one-train --sort-by=.metadata.creationTimestamp -o name | tail -1")
+    ssh ms02 "kubectl -n cylon logs -f ${r/job.batch\//job/} --request-timeout=0"
+
+# Runs and their state.
+v1-train-status:
+    ssh ms02 "kubectl -n cylon get jobs,pods -l app.kubernetes.io/name=vector-one-train -o wide"
+
+# TimesFM forecast API on spark3: health + a sample forecast from each served model.
+ts-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ssh ms02 'kubectl -n cylon get deploy,pods,svc -l app.kubernetes.io/name=timesfm -o wide
+    kubectl -n cylon run ts-probe-$RANDOM --rm -i --restart=Never --image=curlimages/curl:8.11.1 --quiet -- sh -c "
+      curl -s http://timesfm.cylon:8080/health; echo
+      for m in timesfm-2.5 timesfm-3.0; do
+        curl -s -X POST http://timesfm.cylon:8080/v1/forecast -H content-type:application/json \
+          -d \"{\\\"model\\\":\\\"\$m\\\",\\\"horizon\\\":6,\\\"series\\\":[[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]]}\"; echo
+      done"'

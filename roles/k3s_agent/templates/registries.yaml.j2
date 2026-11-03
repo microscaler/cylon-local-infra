@@ -1,0 +1,13 @@
+# Managed by cylon-local-infra roles/k3s_agent — the ms02 zot registry over plain HTTP.
+mirrors:
+{% for m in k3s_agent_registry_mirrors %}
+  "{{ m }}":
+    endpoint:
+      - "{{ k3s_agent_zot_endpoint }}"
+{% endfor %}
+configs:
+{% for m in k3s_agent_registry_mirrors %}
+  "{{ m }}":
+    tls:
+      insecure_skip_verify: true
+{% endfor %}

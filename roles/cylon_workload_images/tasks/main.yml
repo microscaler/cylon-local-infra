@@ -1,0 +1,53 @@
+---
+- name: Cylon workload images
+  tags: [cylon_workload_images]
+  block:
+    - name: TimesFM image
+      ansible.builtin.include_tasks: build.yml
+      vars:
+        img_name: timesfm
+        img_tag: "{{ cylon_timesfm_image_tag }}"
+        img_context_src: "{{ role_path }}/files/timesfm/"
+        img_archive: ""
+        img_build_args: ["--build-arg", "TIMESFM_REF={{ cylon_timesfm_ref }}"]
+        img_dockerfile: Dockerfile
+      when: "'timesfm' in cylon_workload_images"
+
+    - name: vector-one training image
+      when: "'vector_one_train' in cylon_workload_images"
+      block:
+        # Backs the static local PV cylon/vector-one-training (shared-gitops cylon-infra/training).
+        - name: Training data + checkpoints directory (local PV path)
+          ansible.builtin.file:
+            path: /var/lib/cylon/training
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: vector-one HEAD sha (controller)
+          ansible.builtin.command:
+            argv: [git, -C, "{{ cylon_vector_one_repo }}", rev-parse, --short=12, HEAD]
+          delegate_to: localhost
+          become: false
+          register: cylon_v1_sha
+          changed_when: false
+          check_mode: false
+
+        - name: git archive of that commit (controller)
+          ansible.builtin.command:
+            argv: [git, -C, "{{ cylon_vector_one_repo }}", archive, --format=tar.gz,
+                   "-o", "/tmp/vector-one-{{ cylon_v1_sha.stdout }}.tar.gz", "{{ cylon_v1_sha.stdout }}"]
+            creates: "/tmp/vector-one-{{ cylon_v1_sha.stdout }}.tar.gz"
+          delegate_to: localhost
+          become: false
+
+        - name: Build vector-one-train
+          ansible.builtin.include_tasks: build.yml
+          vars:
+            img_name: vector-one-train
+            img_tag: "{{ cylon_v1_sha.stdout }}"
+            img_context_src: ""
+            img_archive: "/tmp/vector-one-{{ cylon_v1_sha.stdout }}.tar.gz"
+            img_build_args: ["--build-arg", "GIT_SHA={{ cylon_v1_sha.stdout }}"]
+            img_dockerfile: docker/train.Dockerfile
