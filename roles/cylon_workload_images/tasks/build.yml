@@ -55,13 +55,31 @@
     argv: [k3s, ctr, -n, k8s.io, images, label, "{{ img_ref }}", io.cri-containerd.pinned=pinned]
   changed_when: false
 
-- name: "{{ img_name }}: push to zot (plain HTTP)"
+# Best effort: the pods run from the node-local pinned image (IfNotPresent). zot drops the
+# single ~5.7 GiB torch layer upload after ~60 s (3 Nov 2026), so a failed push only warns.
+- name: "{{ img_name }}: already in zot?"
+  ansible.builtin.uri:
+    url: "http://{{ cylon_workload_registry }}/v2/cylon/{{ img_name }}/manifests/{{ img_tag }}"
+    method: HEAD
+    headers:
+      Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json
+    status_code: [200, 404]
+  register: img_zot
+  failed_when: false
+
+- name: "{{ img_name }}: push to zot (plain HTTP, best effort)"
+  when: img_zot.status | default(0) != 200
   ansible.builtin.command:
     argv: [k3s, ctr, -n, k8s.io, images, push, --plain-http, "{{ img_ref }}"]
   register: img_push
   changed_when: false
+  failed_when: false
   async: 3600
   poll: 15
+
+- name: "{{ img_name }}: push result"
+  ansible.builtin.debug:
+    msg: "{{ 'in zot' if img_push is skipped else 'pushed to zot' if img_push.rc | default(1) == 0 else 'zot push failed (node-local image is used): ' ~ (img_push.stderr | default('') | regex_search('ctr: .{0,160}') | default('?')) }}"
 
 - name: "{{ img_name }}: built"
   ansible.builtin.debug:
