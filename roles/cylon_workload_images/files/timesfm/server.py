@@ -79,12 +79,12 @@ class _TimesFM30:
 
 LOADERS = {"timesfm-2.5": _TimesFM25, "timesfm-3.0": _TimesFM30}
 MODELS: dict[str, object] = {}
+WANTED = [k.strip() for k in os.environ.get("TIMESFM_MODELS", "timesfm-2.5").split(",") if k.strip()]
 LOCKS: dict[str, threading.Lock] = {}
 
 
 def load_models() -> None:
-    wanted = [k.strip() for k in os.environ.get("TIMESFM_MODELS", "timesfm-2.5").split(",") if k.strip()]
-    for key in wanted:
+    for key in WANTED:
         t0 = time.time()
         MODELS[key] = LOADERS[key]()
         LOCKS[key] = threading.Lock()
@@ -104,11 +104,15 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        # /health = the process answers (liveness/startup; true while weights download).
+        # /ready  = every model in TIMESFM_MODELS is loaded (readiness).
         if self.path in ("/health", "/healthz", "/ready"):
-            ok = bool(MODELS)
-            self._send(200 if ok else 503, {
-                "status": "ok" if ok else "loading",
+            ready = len(MODELS) == len(WANTED)
+            code = 503 if (self.path == "/ready" and not ready) else 200
+            self._send(code, {
+                "status": "ok" if ready else "loading",
                 "models": sorted(MODELS),
+                "wanted": WANTED,
                 "cuda": torch.cuda.is_available(),
                 "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
             })

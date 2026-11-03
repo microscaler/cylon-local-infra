@@ -11,7 +11,7 @@ cylon_workload_images: []
 
 # TimesFM forecast API (files/timesfm). Bump the tag when the server or Dockerfile changes;
 # shared-gitops cylon-infra/timeseries names the same tag.
-cylon_timesfm_image_tag: "r2"
+cylon_timesfm_image_tag: "r3"
 # A local Docker image that already holds torch (cu130) to build FROM instead of
 # python:3.12-slim + a torch download (host_vars; see nvidia3).
 cylon_workload_torch_base: ""
