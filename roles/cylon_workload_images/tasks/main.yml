@@ -9,7 +9,7 @@
         img_tag: "{{ cylon_timesfm_image_tag }}"
         img_context_src: "{{ role_path }}/files/timesfm/"
         img_archive: ""
-        img_build_args: ["--build-arg", "TIMESFM_REF={{ cylon_timesfm_ref }}"]
+        img_build_args: "{{ ['--build-arg', 'TIMESFM_REF=' ~ cylon_timesfm_ref] + (['--build-arg', 'BASE=' ~ cylon_workload_torch_base] if cylon_workload_torch_base | length > 0 else []) }}"
         img_dockerfile: Dockerfile
       when: "'timesfm' in cylon_workload_images"
 

@@ -14,3 +14,7 @@ cylon_node_lan_ip: "192.168.1.130"
 cylon_node_extra_labels: ["cylon.microscaler.io/workload=ts-inference"]
 cylon_node_extra_taints: ["cylon.microscaler.io/workload=ts-inference:NoSchedule"]
 cylon_workload_images: [timesfm]
+# nvidia3's LAN port negotiates 10 Mb/s (3 Nov 2026), so torch (~4 GB) is not downloaded
+# here: the vector-one-train image from nvidia4 (python 3.12 + torch 2.14.1+cu130) is
+# copied over the QSFP fabric into nvidia3's Docker and used as the build base.
+cylon_workload_torch_base: "10.177.76.220:5000/cylon/vector-one-train:c43df5291e68"

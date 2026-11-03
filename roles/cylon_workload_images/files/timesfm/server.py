@@ -64,19 +64,16 @@ class _TimesFM30:
     repo = "google/timesfm-3.0-pytorch"
 
     def __init__(self) -> None:
-        from timesfm3 import ModelConfig, TimesFM3Evaluator
+        import timesfm
 
-        self.m = TimesFM3Evaluator(
-            ModelConfig(checkpoint_path=self.repo, per_core_batch_size=64, device="cuda")
-        )
+        self.m = timesfm.TimesFM3Forecaster.from_pretrained(self.repo, device="cuda")
 
     def forecast(self, series, horizon, quantiles):
-        outs = list(
-            self.m.predict_batch(series, horizon=horizon, return_quantiles=quantiles,
-                                 use_symmetric_averaging=False)
-        )
-        point = np.stack([np.asarray(o.forecast)[:horizon] for o in outs])
-        qs = np.stack([np.asarray(o.quantiles)[:horizon] for o in outs]) if quantiles else None
+        outs = list(self.m.predict_batch(series, horizon=horizon, return_quantiles=quantiles))
+        point = np.stack([np.asarray(o.forecast).reshape(-1)[:horizon] for o in outs])
+        qs = None
+        if quantiles:
+            qs = np.stack([np.asarray(o.quantiles).reshape(-1, np.asarray(o.quantiles).shape[-1])[:horizon] for o in outs])
         return point, qs
 
 
