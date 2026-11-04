@@ -1550,12 +1550,13 @@ cylon-vllm-status:
 cylon-vllm-restart:
     ssh ms02 "kubectl -n cylon delete pod -l app.kubernetes.io/name=vllm,cylon.microscaler.io/role=leader --wait=false"
 
-#   just cylon-model-switch model=27b
+#   just cylon-model-switch                # flash-next, the primary (default)
+#   just cylon-model-switch 27b            # the parked alternate (positional; `model=27b` reaches the script verbatim)
 # model = flash-next (nvidia/Qwen3.8-Flash-Next-NVFP4), 27b (Qwen/Qwen3.8-27B-FP8) or none. Only
 # one fits; whichever runs answers every alias on http://192.168.1.110:8000/v1 and the gateway.
 # A Git commit to shared-gitops main (serving/active-model.yaml) + Flux reconcile, no kubectl edit.
-# Pick the model group serving on spark1/spark2 (flash-next | 27b | none).
-cylon-model-switch model:
+# Pick the model group serving on spark1/spark2 (flash-next [primary, default] | 27b | none).
+cylon-model-switch model="flash-next":
     ssh ms02 bash -s -- {{ model }} < '{{ justfile_directory() }}/scripts/cylon-model-switch.sh'
 
 # Emergency only: serve from the retired Docker stack again (containers/image kept for a few

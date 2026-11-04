@@ -1,5 +1,6 @@
 # Cylon nodes: Sparks joined to ms02's k3s whose vLLM is served by Kubernetes
-# (shared-gitops stacks cylon-gpu / cylon-serving: LeaderWorkerSet cylon/qwen38-27b,
+# (shared-gitops stacks cylon-gpu / cylon-serving: LeaderWorkerSet cylon/qwen38-flash-next as the
+# primary, cylon/qwen38-27b parked as the alternate,
 # gateway cylon/llm-gateway). Cut over 24 Oct 2026; design §17 Phase 4.
 #
 # Overrides group_vars/sparks.yml (ansible_group_priority in hosts.yml): the Docker serving

@@ -1,9 +1,10 @@
 # Runbook — Spark recovery after abrupt power-off
 
 **Since 24 Oct 2026 vLLM on nvidia1/nvidia2 is served from Kubernetes** (ms02 k3s; shared-gitops stacks
-`cylon-gpu` / `cylon-serving`: LeaderWorkerSet `cylon/qwen38-27b`, gateway `cylon/llm-gateway` on 10.177.76.236;
+`cylon-gpu` / `cylon-serving`: LeaderWorkerSet `cylon/qwen38-flash-next` (primary; `cylon/qwen38-27b` is the
+parked alternate), gateway `cylon/llm-gateway` on 10.177.76.236;
 design doc §5.6/§17). There is nothing to restart by hand: when a Spark comes back, kubelet rejoins and the
-LeaderWorkerSet rebuilds the pair (any pod failure recreates the whole group), serving again in ~2–3 min.
+LeaderWorkerSet rebuilds the pair (any pod failure recreates the whole group), serving again in ~9 min for Flash-Next (~2–3 min for 27B).
 
 ```bash
 # 1. Power the Spark back on at the wall / button. Then:
