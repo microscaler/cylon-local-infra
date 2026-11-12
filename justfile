@@ -621,8 +621,9 @@ mac-mini-provision-check host *extra:
     read -r name ip < <(just _mac-mini-resolve "{{host}}")
     ansible-playbook playbooks/mac_dev.yml -l "$name" --ask-become-pass --check --diff {{extra}}
 
-# Smoke test ON the mini: toolchain versions, Docker, agents, Tailscale, and a
-# clone + build (+ amd64 musl cross-build run under Docker) of a small public crate.
+# (Checks: toolchain versions, Docker, Claude, Hermes, Tailscale, a public crate
+# clone + build, and an amd64 musl cross-build run under Docker.)
+# Smoke test ON the mini (toolchains, Docker, agents, Tailscale, crate build).
 mac-mini-check host:
     #!/usr/bin/env bash
     set -uo pipefail
