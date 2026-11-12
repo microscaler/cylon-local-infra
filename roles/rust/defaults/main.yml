@@ -1,0 +1,52 @@
+---
+# rust — rustup + a fallback toolchain. Every repo's rust-toolchain.toml wins:
+# rustup reads it per directory (and auto-installs that toolchain), so the
+# default below only applies outside a repo. Never set RUSTUP_TOOLCHAIN.
+
+rust_user: "{{ ansible_user | default('casibbald') }}"
+rust_user_home: "/Users/{{ rust_user }}"
+rust_cargo_home: "{{ rust_user_home }}/.cargo"
+rust_rustup_home: "{{ rust_user_home }}/.rustup"
+rust_rustup: "{{ rust_cargo_home }}/bin/rustup"
+rust_cargo: "{{ rust_cargo_home }}/bin/cargo"
+
+# rustup-init from the versioned archive, checked against its .sha256.
+rust_rustup_version: "1.29.2"
+rust_rustup_host: aarch64-apple-darwin
+rust_rustup_init_url: "https://static.rust-lang.org/rustup/archive/{{ rust_rustup_version }}/{{ rust_rustup_host }}/rustup-init"
+
+# Fallback default = the fleet pin in BRRTRouter/PW/rerp/sesame-idam/lifeguard/
+# microscaler-observability rust-toolchain.toml (and the octopilot buildpack).
+rust_default_toolchain: "1.99.0"
+# Other pinned channels repos ask for (cylon, mayfly, cylon-guard-validate: 1.97.0).
+# Nightly-pinned repos (fleetingdns, obsctl, tinkerbell) are installed on first
+# use by rustup from their rust-toolchain.toml.
+rust_extra_toolchains: ["1.97.0"]
+rust_components: [clippy, rustfmt, rust-src, llvm-tools]  # llvm-tools: cargo-llvm-cov
+# Targets the repos build for (rust-toolchain.toml files do not list them for
+# 1.99.0, so add them to the pinned toolchains): musl workers for the amd64
+# GKE cluster (PW Tilt, BRRTRouter), arm64 musl, glibc Linux.
+rust_targets:
+  - x86_64-unknown-linux-musl
+  - aarch64-unknown-linux-musl
+  - x86_64-unknown-linux-gnu
+  - aarch64-unknown-linux-gnu
+
+# cargo subcommands the repos' justfiles / CI call, at pinned versions.
+rust_cargo_tools:
+  - { name: cargo-nextest, version: "0.9.151" }   # BRRTRouter, PW, rerp, … (CI: taiki-e nextest)
+  - { name: cargo-llvm-cov, version: "0.9.1" }    # BRRTRouter, DCops, lifeguard, sesame-idam, cylon
+  - { name: cargo-zigbuild, version: "0.24.1" }   # BRRTRouter pet_store musl build
+  - { name: cargo-audit, version: "0.23.0" }      # DCops, lifeguard
+  - { name: sea-orm-cli, version: "2.0.4" }       # lifeguard
+
+# sccache as rustc-wrapper (CARGO_HOME config — a repo's own .cargo/config.toml
+# still wins). Local disk cache.
+rust_sccache: /opt/homebrew/bin/sccache
+rust_sccache_cache_size: "60G"
+
+# Linkers for the musl targets (filosottile/musl-cross from the Brewfile).
+rust_cross_linkers:
+  - { target: x86_64-unknown-linux-musl, prefix: x86_64-linux-musl }
+  - { target: aarch64-unknown-linux-musl, prefix: aarch64-linux-musl }
+rust_cross_bin_dir: /opt/homebrew/bin

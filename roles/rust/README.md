@@ -1,0 +1,1 @@
+`rust` — rustup (pinned rustup-init, sha256-checked) with fallback toolchain + clippy/rustfmt/rust-src/llvm-tools, musl/glibc Linux targets, pinned cargo tools (nextest, llvm-cov, zigbuild, audit, sea-orm-cli), sccache and musl linkers in a managed `~/.cargo/config.toml`; repos' `rust-toolchain.toml` always wins.

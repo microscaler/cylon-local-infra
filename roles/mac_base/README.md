@@ -1,0 +1,1 @@
+`mac_base` — always-on macOS base for the Mac minis: hostname (scutil), pmset no-sleep/auto-restart/WoL, FileVault-off assert, launchd maxfiles/maxproc, Spotlight + Time Machine exclusions for build paths, software-update policy.

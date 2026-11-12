@@ -1,0 +1,15 @@
+---
+# Settings are read at start-up; restart only if Docker Desktop is running.
+# (The pgrep pattern is assembled at run time so it never matches this shell.)
+- name: Restart Docker Desktop
+  ansible.builtin.shell: |
+    set -u
+    pat="Docker.app/Contents/"; pat="${pat}MacOS/"
+    if /usr/bin/pgrep -qf "$pat"; then
+      /usr/bin/osascript -e 'quit app "Docker Desktop"' || /usr/bin/osascript -e 'quit app "Docker"' || true
+      for _ in $(seq 1 30); do /usr/bin/pgrep -qf "$pat" || break; sleep 2; done
+      /usr/bin/open -ga "{{ docker_desktop_app }}"
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: true

@@ -1,0 +1,1 @@
+`dev_workspace` — `~/Workspace/microscaler`, global git identity (mirrors picolino) and default branch, per-host ed25519 GitHub key (printed for Charles to add), GitHub host key pinned, `gh auth status` check; deliberately no ancestor `.cargo/config.toml`.

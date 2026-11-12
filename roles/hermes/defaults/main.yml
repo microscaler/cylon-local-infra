@@ -1,0 +1,29 @@
+---
+# hermes — Nous Research Hermes agent via its upstream installer
+# (https://hermes-agent.nousresearch.com/docs/getting-started/installation),
+# pinned with --commit, run --non-interactive (no setup wizard, no gateway),
+# then pointed at the Sparks' vLLM with the same vars ms02 uses.
+
+hermes_user: "{{ ansible_user | default('casibbald') }}"
+hermes_user_home: "/Users/{{ hermes_user }}"
+hermes_home: "{{ hermes_user_home }}/.hermes"
+hermes_install_dir: "{{ hermes_home }}/hermes-agent"
+hermes_bin: "{{ hermes_user_home }}/.local/bin/hermes"
+
+# Release v2026.9.24 (peeled tag commit). The installer is fetched from the
+# same tag, so script and checkout match.
+hermes_release_tag: v2026.9.24
+hermes_commit: f97608f178d1ffeca59860195ab7da295f7c8e5f
+hermes_installer_url: "https://raw.githubusercontent.com/NousResearch/hermes-agent/{{ hermes_release_tag }}/scripts/install.sh"
+hermes_installer_args: [--non-interactive, --skip-browser, --skip-computer-use]
+
+# OpenAI-compatible endpoint — same variables as ms02 (inventory/group_vars/
+# dev_hosts.yml; mac_minis.yml reads them through ms02's hostvars).
+hermes_agent_openai_base_url: "http://nvidia1:8000/v1"
+hermes_agent_openai_model_id: "Qwen/Qwen3.8-27B-FP8"
+hermes_agent_provider: custom
+
+# API key for the endpoint: never in git. Read on picolino from the
+# environment at run time (e.g. HERMES_OPENAI_API_KEY="$(sops -d --extract …)").
+# Empty = leave whatever key is configured on the mini alone.
+hermes_agent_openai_api_key: "{{ lookup('ansible.builtin.env', 'HERMES_OPENAI_API_KEY') }}"

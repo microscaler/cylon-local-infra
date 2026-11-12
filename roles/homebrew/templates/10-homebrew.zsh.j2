@@ -1,0 +1,11 @@
+# {{ ansible_managed }} :: roles/homebrew
+eval "$({{ homebrew_brew }} shellenv)"
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1
+# libpq is keg-only: psql, pg_dump, pg_config.
+path=("{{ homebrew_prefix }}/opt/libpq/bin" $path)
+{% if homebrew_gnu_tools_first %}
+# GNU userland first — the repos' scripts were written on Linux (ms02).
+{% for f in homebrew_gnu_tool_formulae %}
+[[ -d "{{ homebrew_prefix }}/opt/{{ f }}/libexec/gnubin" ]] && path=("{{ homebrew_prefix }}/opt/{{ f }}/libexec/gnubin" $path)
+{% endfor %}
+{% endif %}

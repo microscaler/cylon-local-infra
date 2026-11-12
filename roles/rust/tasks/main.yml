@@ -1,0 +1,208 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "rust targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+# ── rustup ───────────────────────────────────────────────────────────────
+- name: Check for rustup
+  ansible.builtin.stat:
+    path: "{{ rust_rustup }}"
+  register: rust_rustup_stat
+  tags: [mac, rust]
+
+- name: Download pinned rustup-init
+  ansible.builtin.get_url:
+    url: "{{ rust_rustup_init_url }}"
+    checksum: "sha256:{{ rust_rustup_init_url }}.sha256"
+    dest: "/tmp/rustup-init-{{ rust_rustup_version }}"
+    mode: "0755"
+  when: not rust_rustup_stat.stat.exists
+  tags: [mac, rust]
+
+- name: Install rustup (no PATH edits; minimal profile)
+  ansible.builtin.command:
+    argv:
+      - "/tmp/rustup-init-{{ rust_rustup_version }}"
+      - -y
+      - --no-modify-path
+      - --profile
+      - minimal
+      - --default-toolchain
+      - "{{ rust_default_toolchain }}"
+  environment:
+    CARGO_HOME: "{{ rust_cargo_home }}"
+    RUSTUP_HOME: "{{ rust_rustup_home }}"
+  args:
+    creates: "{{ rust_rustup }}"
+  when: not rust_rustup_stat.stat.exists
+  tags: [mac, rust]
+
+# ── Toolchains, components, targets ──────────────────────────────────────
+- name: List installed toolchains
+  ansible.builtin.command: "{{ rust_rustup }} toolchain list"
+  register: rust_toolchains_now
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, rust]
+
+- name: Install pinned toolchains with components and targets
+  ansible.builtin.command:
+    argv: >-
+      {{ [rust_rustup, 'toolchain', 'install', item, '--profile', 'minimal', '--no-self-update']
+         + (rust_components | map('regex_replace', '^', '--component=') | list)
+         + (rust_targets | map('regex_replace', '^', '--target=') | list) }}
+  loop: "{{ [rust_default_toolchain] + rust_extra_toolchains }}"
+  when: >-
+    rust_toolchains_now.rc | default(1) != 0
+    or (rust_toolchains_now.stdout_lines | select('match', '^' ~ (item | regex_escape) ~ '-') | list | length) == 0
+  changed_when: true
+  tags: [mac, rust]
+
+- name: List installed components and targets per toolchain
+  ansible.builtin.command: "{{ rust_rustup }} component list --installed --toolchain {{ item }}"
+  loop: "{{ [rust_default_toolchain] + rust_extra_toolchains }}"
+  register: rust_components_now
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, rust]
+
+- name: Add missing components
+  ansible.builtin.command:
+    argv: "{{ [rust_rustup, 'component', 'add', '--toolchain', item.item] + rust_components }}"
+  loop: "{{ rust_components_now.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: >-
+    item.rc | default(1) == 0
+    and (rust_components | reject('in', item.stdout_lines | map('regex_replace', '-(aarch64|x86_64)-.*$', '') | list) | list | length) > 0
+  changed_when: true
+  tags: [mac, rust]
+
+- name: Add missing cross targets
+  ansible.builtin.command:
+    argv: "{{ [rust_rustup, 'target', 'add', '--toolchain', item.item] + rust_targets }}"
+  loop: "{{ rust_components_now.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: >-
+    item.rc | default(1) == 0
+    and (rust_targets | map('regex_replace', '^', 'rust-std-') | reject('in', item.stdout_lines) | list | length) > 0
+  changed_when: true
+  tags: [mac, rust]
+
+- name: Set the fallback default toolchain
+  ansible.builtin.command: "{{ rust_rustup }} default {{ rust_default_toolchain }}"
+  register: rust_default_set
+  when: >-
+    rust_toolchains_now.rc | default(1) == 0
+    and (rust_toolchains_now.stdout_lines | select('search', '\(.*default.*\)')
+         | select('match', '^' ~ (rust_default_toolchain | regex_escape) ~ '-') | list | length) == 0
+  changed_when: true
+  tags: [mac, rust]
+
+# ── CARGO_HOME config: sccache + musl linkers (no [patch] — see dev_workspace) ─
+- name: Stat ~/.cargo/config.toml
+  ansible.builtin.stat:
+    path: "{{ rust_cargo_home }}/config.toml"
+  register: rust_cargo_config_stat
+  tags: [mac, rust, sccache]
+
+- name: Read ~/.cargo/config.toml header
+  ansible.builtin.command: "head -n 1 {{ rust_cargo_home }}/config.toml"
+  register: rust_cargo_config_head
+  changed_when: false
+  check_mode: false
+  when: rust_cargo_config_stat.stat.exists
+  tags: [mac, rust, sccache]
+
+- name: Refuse to overwrite a hand-written ~/.cargo/config.toml
+  ansible.builtin.fail:
+    msg: >-
+      {{ rust_cargo_home }}/config.toml exists and is not managed by cylon-local-infra.
+      Move it aside (its settings belong in the repo's own .cargo/config.toml) and re-run.
+  when:
+    - rust_cargo_config_stat.stat.exists
+    - "'cylon-local-infra' not in rust_cargo_config_head.stdout | default('')"
+  tags: [mac, rust, sccache]
+
+- name: Ensure CARGO_HOME exists
+  ansible.builtin.file:
+    path: "{{ rust_cargo_home }}"
+    state: directory
+    mode: "0755"
+  tags: [mac, rust, sccache]
+
+- name: Write managed ~/.cargo/config.toml (sccache, musl linkers)
+  ansible.builtin.template:
+    src: cargo-config.toml.j2
+    dest: "{{ rust_cargo_home }}/config.toml"
+    mode: "0644"
+  tags: [mac, rust, sccache]
+
+# ── cargo tools at pinned versions ───────────────────────────────────────
+- name: List installed cargo tools
+  ansible.builtin.command: "{{ rust_cargo }} install --list"
+  register: rust_cargo_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, rust, cargo_tools]
+
+- name: Install pinned cargo tools
+  ansible.builtin.command:
+    argv:
+      - "{{ rust_cargo }}"
+      - "+{{ rust_default_toolchain }}"
+      - install
+      - --locked
+      - "{{ item.name }}"
+      - --version
+      - "{{ item.version }}"
+  loop: "{{ rust_cargo_tools }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.version }}"
+  when: (item.name ~ ' v' ~ item.version ~ ':') not in (rust_cargo_installed.stdout | default(''))
+  changed_when: true
+  tags: [mac, rust, cargo_tools]
+
+- name: Install Rust shell drop-in
+  ansible.builtin.template:
+    src: 20-rust.zsh.j2
+    dest: "{{ rust_user_home }}/.zshrc.d/20-rust.zsh"
+    mode: "0644"
+  tags: [mac, rust, zshrc]
+
+- name: Exclude Rust homes from Time Machine
+  ansible.builtin.include_role:
+    name: mac_base
+    tasks_from: tm_exclude.yml
+  vars:
+    mac_base_tm_path: "{{ item }}"
+  loop:
+    - "{{ rust_cargo_home }}"
+    - "{{ rust_rustup_home }}"
+  tags: [mac, rust, time_machine]
+
+- name: Read rustc version
+  ansible.builtin.command: "{{ rust_rustup }} run {{ rust_default_toolchain }} rustc --version"
+  register: rust_rustc_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, rust, summary]
+
+- name: Summarize Rust
+  ansible.builtin.debug:
+    msg:
+      - "default:    {{ rust_rustc_version.stdout | default('not installed yet') }} (fallback; rust-toolchain.toml wins)"
+      - "toolchains: {{ ([rust_default_toolchain] + rust_extra_toolchains) | join(', ') }}"
+      - "targets:    {{ rust_targets | join(', ') }}"
+      - "tools:      {{ rust_cargo_tools | map(attribute='name') | zip(rust_cargo_tools | map(attribute='version')) | map('join', ' ') | join(', ') }}"
+      - "sccache:    rustc-wrapper via {{ rust_cargo_home }}/config.toml (cache {{ rust_sccache_cache_size }})"
+  tags: [mac, rust, summary]

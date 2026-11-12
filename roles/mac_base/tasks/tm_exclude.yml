@@ -1,0 +1,29 @@
+---
+# Exclude one path from Time Machine. Shared by toolchain roles:
+#   - ansible.builtin.include_role:
+#       name: mac_base
+#       tasks_from: tm_exclude.yml
+#     vars:
+#       mac_base_tm_path: "{{ rust_cargo_home }}"
+# Paths that do not exist (yet) are skipped, so a check run stays quiet.
+
+- name: Check Time Machine exclusion for {{ mac_base_tm_path | basename }}
+  ansible.builtin.shell: |
+    set -eu
+    [ -e "{{ mac_base_tm_path }}" ] || { echo absent; exit 0; }
+    /usr/bin/tmutil isexcluded "{{ mac_base_tm_path }}"
+  args:
+    executable: /bin/bash
+  register: mac_base_tm_state
+  changed_when: false
+  check_mode: false
+  tags: [mac, mac_base, time_machine]
+
+- name: Add Time Machine exclusion for {{ mac_base_tm_path | basename }}
+  become: true
+  ansible.builtin.command: /usr/bin/tmutil addexclusion -p "{{ mac_base_tm_path }}"
+  when:
+    - "'absent' not in mac_base_tm_state.stdout"
+    - "'[Excluded]' not in mac_base_tm_state.stdout"
+  changed_when: true
+  tags: [mac, mac_base, time_machine]

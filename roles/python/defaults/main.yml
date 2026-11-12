@@ -1,0 +1,31 @@
+---
+# python — pyenv owns interpreters (honours .python-version), uv owns
+# environments and tools. uv is told to use pyenv's interpreters only, so one
+# .python-version file drives both.
+
+python_user: "{{ ansible_user | default('casibbald') }}"
+python_user_home: "/Users/{{ python_user }}"
+python_pyenv_root: "{{ python_user_home }}/.pyenv"
+python_pyenv: "{{ python_pyenv_root }}/bin/pyenv"
+
+# pyenv pinned to a release tag (git checkout).
+python_pyenv_repo: https://github.com/pyenv/pyenv.git
+python_pyenv_version: v2.8.15
+
+# python-build's macOS dependencies.
+python_brew_deps: [openssl@3, readline, sqlite3, xz, zlib, tcl-tk]
+
+# Fallback global interpreter + extra interpreters repos pin in CI
+# (BRRTRouter tooling CI: 3.10, rerp: 3.12; all pyproject: >=3.10).
+python_global_version: "3.13.18"
+python_extra_versions: ["3.12.16", "3.10.20"]
+
+# uv, pinned release binary (sha256-checked) into ~/.local/bin.
+python_uv_version: "0.13.7"
+python_uv_asset: uv-aarch64-apple-darwin
+python_uv_url: "https://github.com/astral-sh/uv/releases/download/{{ python_uv_version }}/{{ python_uv_asset }}.tar.gz"
+python_uv_bin_dir: "{{ python_user_home }}/.local/bin"
+
+# uv uses pyenv's interpreters, never its own downloads.
+python_uv_python_preference: only-system
+python_uv_python_downloads: never

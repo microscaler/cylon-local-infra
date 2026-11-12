@@ -1,0 +1,110 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "dev_workspace targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Ensure ~/Workspace/microscaler exists
+  ansible.builtin.file:
+    path: "{{ dev_workspace_root }}"
+    state: directory
+    mode: "0755"
+  tags: [mac, dev_workspace, dirs]
+
+# ms02 has an ANCESTOR cargo config at ~/Workspace/microscaler/.cargo/config.toml
+# with [patch] path overrides to sibling checkouts. Building with it rewrote the
+# repos' Cargo.lock files, so it is deliberately NOT replicated here.
+- name: Check for an ancestor cargo config in the workspace (must not exist)
+  ansible.builtin.stat:
+    path: "{{ dev_workspace_root }}/.cargo/config.toml"
+  register: dev_workspace_ancestor_cargo
+  tags: [mac, dev_workspace, dirs]
+
+- name: Warn about an ancestor cargo config
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ dev_workspace_root }}/.cargo/config.toml exists. Path [patch] overrides there rewrite
+      repos' Cargo.lock (the ms02 layout); remove it unless you are deliberately co-developing crates.
+  when: dev_workspace_ancestor_cargo.stat.exists
+  tags: [mac, dev_workspace, dirs]
+
+# ── git identity ─────────────────────────────────────────────────────────
+- name: Set global git identity and defaults
+  community.general.git_config:
+    scope: global
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+  loop: >-
+    {{ ({'user.name': dev_workspace_git_user_name, 'user.email': dev_workspace_git_user_email,
+         'init.defaultBranch': dev_workspace_git_default_branch} | combine(dev_workspace_git_extra))
+       | dict2items | selectattr('value', 'truthy') | list }}
+  loop_control:
+    label: "{{ item.key }}"
+  tags: [mac, dev_workspace, git]
+
+# ── SSH key for GitHub (generated here, never copied between machines) ───
+- name: Ensure ~/.ssh exists
+  ansible.builtin.file:
+    path: "{{ dev_workspace_user_home }}/.ssh"
+    state: directory
+    mode: "0700"
+  tags: [mac, dev_workspace, ssh]
+
+- name: Generate a per-host ed25519 key if missing
+  ansible.builtin.command:
+    argv: [ssh-keygen, -q, -t, ed25519, -N, "", -C, "{{ dev_workspace_ssh_key_comment }}", -f, "{{ dev_workspace_ssh_key }}"]
+    creates: "{{ dev_workspace_ssh_key }}"
+  tags: [mac, dev_workspace, ssh]
+
+- name: Pin GitHub's SSH host key
+  ansible.builtin.known_hosts:
+    name: github.com
+    key: "{{ item }}"
+    path: "{{ dev_workspace_user_home }}/.ssh/known_hosts"
+    state: present
+  loop: "{{ dev_workspace_github_known_hosts }}"
+  tags: [mac, dev_workspace, ssh]
+
+- name: Read the public key
+  ansible.builtin.command: "cat {{ dev_workspace_ssh_key }}.pub"
+  register: dev_workspace_pubkey
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, dev_workspace, ssh]
+
+- name: Check whether GitHub accepts the key
+  ansible.builtin.command: ssh -T -o BatchMode=yes -o ConnectTimeout=10 git@github.com
+  register: dev_workspace_github_ssh
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, dev_workspace, ssh]
+
+- name: Check gh auth status
+  ansible.builtin.command: /opt/homebrew/bin/gh auth status
+  register: dev_workspace_gh_auth
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, dev_workspace, gh]
+
+- name: Record GitHub key state
+  ansible.builtin.set_fact:
+    dev_workspace_pubkey_summary: >-
+      {{ 'accepted by GitHub' if 'successfully authenticated' in (dev_workspace_github_ssh.stderr | default(''))
+         else 'NOT on GitHub yet — add this key at https://github.com/settings/ssh/new: ' ~ (dev_workspace_pubkey.stdout | default('(not generated yet)')) }}
+  tags: [always]
+
+- name: Summarize dev workspace
+  ansible.builtin.debug:
+    msg:
+      - "workspace:  {{ dev_workspace_root }} (no ancestor .cargo/config.toml — see docs/mac-minis.md)"
+      - "git:        {{ dev_workspace_git_user_name }} <{{ dev_workspace_git_user_email }}>, default branch {{ dev_workspace_git_default_branch }}"
+      - "ssh key:    {{ dev_workspace_pubkey.stdout | default('(not generated yet)') }}"
+      - "GitHub ssh: {{ dev_workspace_pubkey_summary }}"
+      - "gh auth:    {{ 'logged in' if dev_workspace_gh_auth.rc == 0 else 'NOT logged in — run `gh auth login` on the mini' }}"
+  tags: [mac, dev_workspace, summary]

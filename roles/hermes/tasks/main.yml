@@ -1,0 +1,103 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "hermes targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Read installed Hermes commit  # noqa: command-instead-of-module
+  ansible.builtin.command: "git -C {{ hermes_install_dir }} rev-parse HEAD"
+  register: hermes_commit_now
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, hermes]
+
+- name: Install pinned Hermes with the upstream installer
+  when: (hermes_commit_now.stdout | default('') | trim) != hermes_commit
+  tags: [mac, hermes]
+  block:
+    - name: Download the installer from the release tag
+      ansible.builtin.get_url:
+        url: "{{ hermes_installer_url }}"
+        dest: "/tmp/hermes-install-{{ hermes_release_tag }}.sh"
+        mode: "0755"
+      tags: [mac, hermes]
+
+    - name: Run the installer pinned to the release commit (rc files guarded)
+      ansible.builtin.command:
+        argv: >-
+          {{ [hermes_user_home ~ '/.local/libexec/cylon-rc-guard', '/bin/bash',
+              '/tmp/hermes-install-' ~ hermes_release_tag ~ '.sh', '--commit', hermes_commit, '--force-commit']
+             + hermes_installer_args }}
+      environment:
+        HERMES_HOME: "{{ hermes_home }}"
+      changed_when: true
+      tags: [mac, hermes]
+
+# ── Point Hermes at the Sparks' vLLM ─────────────────────────────────────
+- name: Stat Hermes config
+  ansible.builtin.stat:
+    path: "{{ hermes_home }}/config.yaml"
+  register: hermes_config_stat
+  tags: [mac, hermes, config]
+
+- name: Read Hermes config
+  ansible.builtin.slurp:
+    src: "{{ hermes_home }}/config.yaml"
+  register: hermes_config_raw
+  when: hermes_config_stat.stat.exists
+  no_log: true   # config.yaml may hold the endpoint key
+  tags: [mac, hermes, config]
+
+- name: Set model endpoint, model id and provider
+  vars:
+    hermes_model_now: "{{ ((hermes_config_raw.content | b64decode | from_yaml) if hermes_config_stat.stat.exists else {}).get('model', {}) or {} }}"
+  ansible.builtin.command:
+    argv: ["{{ hermes_bin }}", config, set, "model.{{ item.key }}", "{{ item.value }}"]
+  environment:
+    HERMES_HOME: "{{ hermes_home }}"
+  loop:
+    - { key: provider, value: "{{ hermes_agent_provider }}" }
+    - { key: base_url, value: "{{ hermes_agent_openai_base_url }}" }
+    - { key: default, value: "{{ hermes_agent_openai_model_id }}" }
+  loop_control:
+    label: "model.{{ item.key }}={{ item.value }}"
+  when: (hermes_model_now[item.key] | default('') | string) != item.value
+  changed_when: true
+  tags: [mac, hermes, config]
+
+- name: Set the endpoint API key from the operator's environment
+  vars:
+    hermes_model_now: "{{ ((hermes_config_raw.content | b64decode | from_yaml) if hermes_config_stat.stat.exists else {}).get('model', {}) or {} }}"
+  ansible.builtin.command:
+    argv: ["{{ hermes_bin }}", config, set, model.api_key, "{{ hermes_agent_openai_api_key }}"]
+  environment:
+    HERMES_HOME: "{{ hermes_home }}"
+  when:
+    - hermes_agent_openai_api_key | length > 0
+    - (hermes_model_now.api_key | default('') | string) != hermes_agent_openai_api_key
+  changed_when: true
+  no_log: true
+  tags: [mac, hermes, config]
+
+- name: Verify hermes --version
+  ansible.builtin.command: "{{ hermes_bin }} --version"
+  environment:
+    HERMES_HOME: "{{ hermes_home }}"
+  register: hermes_version_out
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, hermes, summary]
+
+- name: Summarize Hermes
+  ansible.builtin.debug:
+    msg:
+      - "hermes:   {{ (hermes_version_out.stdout_lines | default(['not installed yet']))[0] | default('') }}"
+      - "pinned:   {{ hermes_release_tag }} @ {{ hermes_commit[:12] }}"
+      - "endpoint: {{ hermes_agent_openai_base_url }} model {{ hermes_agent_openai_model_id }} (provider {{ hermes_agent_provider }})"
+      - "api key:  {{ 'set from HERMES_OPENAI_API_KEY this run' if hermes_agent_openai_api_key | length > 0 else 'not supplied this run (left as is)' }}"
+  tags: [mac, hermes, summary]

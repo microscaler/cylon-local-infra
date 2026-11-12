@@ -1,0 +1,112 @@
+---
+# Provision the Mac mini development machines (group mac_minis) — code and
+# builds live here; ms02 becomes a Kubernetes node later (docs/mac-minis.md).
+#
+# Never targets `macs` (picolino): both plays are pinned to mac_minis, and the
+# Darwin assert below refuses anything that is not macOS.
+#
+# Prerequisite (the one manual step): `just mac-mini-bootstrap host=<ip>`
+# (Remote Login on + picolino's SSH key). Everything else is here.
+#
+# Run (Charles types the sudo password; nothing stores it):
+#   just mac-mini-provision host=mini1
+#   just mac-mini-provision-check host=mini1          # --check --diff
+#   ansible-playbook playbooks/mac_dev.yml -l mini1 --ask-become-pass --tags rust
+#
+# Optional run-time secrets (read on picolino from the environment, never
+# written to git or to disk by this repo):
+#   TAILSCALE_AUTH_KEY      fresh one-off auth key → non-interactive `tailscale up`
+#   HERMES_OPENAI_API_KEY   key for the Sparks' vLLM endpoint (e.g. from `sops -d`)
+#
+# Role order: base OS → shell include (+ rc guard) → package manager → language toolchains →
+# Docker → agents → network → workspace.
+
+# Command Line Tools first, with `raw`: until CLT exists /usr/bin/python3 is
+# only a stub that pops a GUI installer, so no normal module can run yet.
+- name: Bootstrap Command Line Tools (headless) on Mac minis
+  hosts: mac_minis
+  gather_facts: false
+  tags: [mac_dev, bootstrap, clt]
+  tasks:
+    - name: Probe for Command Line Tools
+      ansible.builtin.raw: >-
+        /usr/bin/xcode-select -p >/dev/null 2>&1
+        && test -x /Library/Developer/CommandLineTools/usr/bin/python3
+        && echo present || echo missing
+      register: mac_dev_clt_probe
+      changed_when: false
+      check_mode: false
+      tags: [mac_dev, bootstrap, clt]
+
+    - name: Install Command Line Tools via softwareupdate (no GUI)
+      ansible.builtin.raw: |
+        set -eu
+        marker=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+        touch "$marker"
+        label=$(softwareupdate -l 2>/dev/null | sed -n 's/^[* ]*Label: \(Command Line Tools for Xcode.*\)$/\1/p' | sort -V | tail -n1)
+        if [ -z "$label" ]; then rm -f "$marker"; echo "no Command Line Tools label offered by softwareupdate" >&2; exit 1; fi
+        softwareupdate -i "$label" --verbose
+        rm -f "$marker"
+      become: true
+      when:
+        - "'missing' in mac_dev_clt_probe.stdout"
+        - not ansible_check_mode
+      changed_when: true
+      tags: [mac_dev, bootstrap, clt]
+
+- name: Provision Mac mini development machines
+  hosts: mac_minis
+  gather_facts: true
+  environment:
+    PATH: "{{ mac_dev_env_path }}"
+    HOMEBREW_NO_AUTO_UPDATE: "1"
+    HOMEBREW_NO_ANALYTICS: "1"
+    HOMEBREW_NO_ENV_HINTS: "1"
+    NONINTERACTIVE: "1"
+  pre_tasks:
+    - name: Refuse anything that is not a macOS Mac mini target
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['system'] == 'Darwin'
+          - inventory_hostname in groups['mac_minis']
+          - inventory_hostname not in groups.get('macs', [])
+          - ansible_connection | default('ssh') != 'local'
+        fail_msg: "mac_dev.yml targets the mac_minis group over SSH only (got {{ inventory_hostname }} / {{ ansible_facts['system'] }})"
+        quiet: true
+      tags: [always]
+  roles:
+    - role: mac_base
+      tags: [mac_dev, mac_base]
+    - role: shell_env
+      tags: [mac_dev, shell_env]
+    - role: homebrew
+      tags: [mac_dev, homebrew]
+    - role: rust
+      tags: [mac_dev, rust]
+    - role: golang
+      tags: [mac_dev, golang]
+    - role: python
+      tags: [mac_dev, python]
+    - role: node
+      tags: [mac_dev, node]
+    - role: docker_desktop
+      tags: [mac_dev, docker_desktop, docker]
+    - role: claude
+      tags: [mac_dev, claude]
+    - role: hermes
+      tags: [mac_dev, hermes]
+    - role: tailscale
+      tags: [mac_dev, tailscale]
+    - role: dev_workspace
+      tags: [mac_dev, dev_workspace]
+  post_tasks:
+    - name: Summarize what still needs Charles on this mini
+      ansible.builtin.debug:
+        msg:
+          - "host:        {{ inventory_hostname }} ({{ ansible_host }}) role={{ mac_mini_role | default('unset') }}"
+          - "docker:      {{ docker_desktop_state_summary | default('not checked') }}"
+          - "tailscale:   {{ tailscale_state_summary | default('not checked') }}"
+          - "claude:      sign in with `claude` on the mini (role only checks the version)"
+          - "github key:  {{ dev_workspace_pubkey_summary | default('not checked') }}"
+          - "smoke test:  just mac-mini-check host={{ inventory_hostname }}"
+      tags: [always, summary]

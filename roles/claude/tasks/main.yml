@@ -1,0 +1,91 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "claude targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Read installed Claude Code version
+  ansible.builtin.command: "{{ claude_bin }} --version"
+  register: claude_version_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, claude]
+
+- name: Install pinned Claude Code with the official installer
+  when: not (claude_version_before.stdout | default('')).startswith(claude_version ~ ' ')
+  tags: [mac, claude]
+  block:
+    - name: Download the official installer
+      ansible.builtin.get_url:
+        url: "{{ claude_installer_url }}"
+        dest: /tmp/claude-install.sh
+        mode: "0755"
+        force: true
+      tags: [mac, claude]
+
+    - name: Run the installer for the pinned version (rc files guarded)
+      ansible.builtin.command:
+        argv:
+          - "{{ claude_user_home }}/.local/libexec/cylon-rc-guard"
+          - /bin/bash
+          - /tmp/claude-install.sh
+          - "{{ claude_version }}"
+      changed_when: true
+      tags: [mac, claude]
+
+- name: Stat Claude settings
+  ansible.builtin.stat:
+    path: "{{ claude_settings_file }}"
+  register: claude_settings_stat
+  when: claude_disable_autoupdater | bool
+  tags: [mac, claude, settings]
+
+- name: Read Claude settings
+  ansible.builtin.slurp:
+    src: "{{ claude_settings_file }}"
+  register: claude_settings_raw
+  when:
+    - claude_disable_autoupdater | bool
+    - claude_settings_stat.stat.exists
+  tags: [mac, claude, settings]
+
+- name: Ensure ~/.claude exists
+  ansible.builtin.file:
+    path: "{{ claude_settings_file | dirname }}"
+    state: directory
+    mode: "0700"
+  when: claude_disable_autoupdater | bool
+  tags: [mac, claude, settings]
+
+- name: Merge DISABLE_AUTOUPDATER into Claude settings (keeps the pin)
+  vars:
+    claude_settings_now: "{{ (claude_settings_raw.content | b64decode | from_json) if claude_settings_stat.stat.exists else {} }}"
+    claude_settings_want: "{{ claude_settings_now | combine({'env': {'DISABLE_AUTOUPDATER': '1'}}, recursive=true) }}"
+  ansible.builtin.copy:
+    content: "{{ claude_settings_want | to_nice_json(indent=2) }}\n"
+    dest: "{{ claude_settings_file }}"
+    mode: "0600"
+  when:
+    - claude_disable_autoupdater | bool
+    - claude_settings_want != claude_settings_now or not claude_settings_stat.stat.exists
+  tags: [mac, claude, settings]
+
+- name: Verify claude --version
+  ansible.builtin.command: "{{ claude_bin }} --version"
+  register: claude_version_after
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, claude, summary]
+
+- name: Summarize Claude Code
+  ansible.builtin.debug:
+    msg:
+      - "claude:   {{ claude_version_after.stdout | default('not installed yet') }} (pinned {{ claude_version }})"
+      - "updates:  auto-update {{ 'off (DISABLE_AUTOUPDATER)' if claude_disable_autoupdater else 'on' }}"
+      - "sign-in:  Charles runs `claude` on the mini and completes the browser login"
+  tags: [mac, claude, summary]

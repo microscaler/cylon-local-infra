@@ -1,0 +1,19 @@
+---
+# tailscale — the minis join the tailnet (not the repo's WireGuard mesh).
+# Open-source tailscaled from Homebrew, run as a system LaunchDaemon so it is
+# up at boot with nobody logged in (the App Store/GUI app needs a login).
+#
+# Joining is Charles's: interactively (`sudo tailscale up` prints a login URL)
+# or with a FRESH one-off auth key exported on picolino for that run only:
+#   TAILSCALE_AUTH_KEY=tskey-auth-… just mac-mini-provision host=mini1
+# The key is never written anywhere; never reuse an old or revoked key.
+
+tailscale_formula: tailscale
+tailscale_bin: /opt/homebrew/bin/tailscale
+tailscale_daemon_bin: /opt/homebrew/bin/tailscaled
+tailscale_daemon_plist: /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+tailscale_hostname: "{{ mac_base_hostname | default(inventory_hostname) }}"
+tailscale_operator: "{{ ansible_user | default('casibbald') }}"
+tailscale_up_extra_args: []
+
+tailscale_auth_key: "{{ lookup('ansible.builtin.env', 'TAILSCALE_AUTH_KEY') }}"

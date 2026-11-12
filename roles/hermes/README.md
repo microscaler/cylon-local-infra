@@ -1,0 +1,1 @@
+`hermes` — Hermes agent via its upstream installer pinned to a release commit (non-interactive, rc files guarded), configured with the same `hermes_agent_openai_*` vars as ms02; API key only from the operator's environment.

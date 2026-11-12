@@ -1,0 +1,100 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "python targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Install python-build's Homebrew dependencies
+  community.general.homebrew:
+    name: "{{ python_brew_deps }}"
+    state: present
+    path: /opt/homebrew/bin
+  tags: [mac, python]
+
+- name: Check out pyenv at the pinned tag
+  ansible.builtin.git:
+    repo: "{{ python_pyenv_repo }}"
+    dest: "{{ python_pyenv_root }}"
+    version: "{{ python_pyenv_version }}"
+    update: true
+  tags: [mac, python, pyenv]
+
+- name: Install Python interpreters with pyenv
+  ansible.builtin.command:
+    argv: ["{{ python_pyenv }}", install, --skip-existing, "{{ item }}"]
+    creates: "{{ python_pyenv_root }}/versions/{{ item }}/bin/python3"
+  environment:
+    PYENV_ROOT: "{{ python_pyenv_root }}"
+  loop: "{{ [python_global_version] + python_extra_versions }}"
+  tags: [mac, python, pyenv]
+
+- name: Set the fallback global interpreter
+  ansible.builtin.copy:
+    content: "{{ python_global_version }}\n"
+    dest: "{{ python_pyenv_root }}/version"
+    mode: "0644"
+  tags: [mac, python, pyenv]
+
+- name: Read uv version
+  ansible.builtin.command: "{{ python_uv_bin_dir }}/uv --version"
+  register: python_uv_current
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, python, uv]
+
+- name: Install pinned uv
+  when: python_uv_version not in (python_uv_current.stdout | default(''))
+  tags: [mac, python, uv]
+  block:
+    - name: Download uv release
+      ansible.builtin.get_url:
+        url: "{{ python_uv_url }}"
+        checksum: "sha256:{{ python_uv_url }}.sha256"
+        dest: "/tmp/{{ python_uv_asset }}-{{ python_uv_version }}.tar.gz"
+        mode: "0644"
+      tags: [mac, python, uv]
+
+    - name: Unpack uv and uvx into ~/.local/bin
+      ansible.builtin.unarchive:
+        src: "/tmp/{{ python_uv_asset }}-{{ python_uv_version }}.tar.gz"
+        dest: "{{ python_uv_bin_dir }}"
+        remote_src: true
+        extra_opts: [--strip-components=1]
+        mode: "0755"
+      tags: [mac, python, uv]
+
+- name: Install Python shell drop-in
+  ansible.builtin.template:
+    src: 40-python.zsh.j2
+    dest: "{{ python_user_home }}/.zshrc.d/40-python.zsh"
+    mode: "0644"
+  tags: [mac, python, zshrc]
+
+- name: Exclude pyenv from Time Machine
+  ansible.builtin.include_role:
+    name: mac_base
+    tasks_from: tm_exclude.yml
+  vars:
+    mac_base_tm_path: "{{ python_pyenv_root }}"
+  tags: [mac, python, time_machine]
+
+- name: Read global python version
+  ansible.builtin.command: "{{ python_pyenv_root }}/versions/{{ python_global_version }}/bin/python3 --version"
+  register: python_global_out
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, python, summary]
+
+- name: Summarize Python
+  ansible.builtin.debug:
+    msg:
+      - "pyenv:    {{ python_pyenv_version }} → {{ ([python_global_version] + python_extra_versions) | join(', ') }}"
+      - "global:   {{ python_global_out.stdout | default('not installed yet') }} (fallback; .python-version wins)"
+      - "uv:       {{ python_uv_version }} (UV_PYTHON_PREFERENCE={{ python_uv_python_preference }})"
+      - "BRRTRouter tooling: `just init` in the repo creates tooling/.venv from python3 (pyenv) — needs >=3.10 with venv"
+  tags: [mac, python, summary]

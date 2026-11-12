@@ -1,0 +1,1 @@
+`docker_desktop` — Docker Desktop cask, settings merged from facts (CPU/RAM/disk, VZ + Rosetta, containerd store, start at login), buildx linux/amd64+arm64 verified; detects and reports (never accepts) the first-launch licence and missing Rosetta.

@@ -1,0 +1,19 @@
+---
+# claude — Claude Code CLI via Anthropic's official native installer
+# (https://code.claude.com/docs/en/install): `install.sh <version>` installs an
+# exact version to ~/.local/bin/claude. Sign-in is Charles's (`claude` on the
+# mini); this role only installs and verifies `claude --version`.
+
+claude_user: "{{ ansible_user | default('casibbald') }}"
+claude_user_home: "/Users/{{ claude_user }}"
+claude_installer_url: https://claude.ai/install.sh
+claude_bin: "{{ claude_user_home }}/.local/bin/claude"
+
+# Pinned version (stable channel on 2026-11-12). Bump here to upgrade.
+claude_version: "2.1.311"
+
+# Keep the pin: native installs auto-update in the background unless
+# DISABLE_AUTOUPDATER is set in ~/.claude/settings.json "env". Merged into
+# the user's settings, other keys untouched.
+claude_disable_autoupdater: true
+claude_settings_file: "{{ claude_user_home }}/.claude/settings.json"

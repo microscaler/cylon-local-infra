@@ -1,0 +1,65 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "shell_env targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Ensure ~/.zshrc.d and ~/.local dirs exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ shell_env_dropin_dir }}"
+    - "{{ shell_env_user_home }}/.local/bin"
+    - "{{ shell_env_user_home }}/.local/libexec"
+  tags: [mac, shell_env, zshrc]
+
+- name: Stat ~/.zshrc
+  ansible.builtin.stat:
+    path: "{{ shell_env_zshrc }}"
+  register: shell_env_zshrc_stat
+  tags: [mac, shell_env, zshrc]
+
+# Existing file: add/replace only our marked line, leave everything else.
+- name: Ensure the single include line in existing ~/.zshrc
+  ansible.builtin.lineinfile:
+    path: "{{ shell_env_zshrc }}"
+    regexp: "{{ shell_env_include_marker | regex_escape }}$"
+    line: "{{ shell_env_include_line }}"
+    insertafter: EOF
+  when: shell_env_zshrc_stat.stat.exists
+  tags: [mac, shell_env, zshrc]
+
+- name: Create ~/.zshrc with only the include line (fresh mini)
+  ansible.builtin.lineinfile:
+    path: "{{ shell_env_zshrc }}"
+    line: "{{ shell_env_include_line }}"
+    create: true
+    mode: "0644"
+  when: not shell_env_zshrc_stat.stat.exists
+  tags: [mac, shell_env, zshrc]
+
+- name: Install base drop-in (~/.local/bin on PATH)
+  ansible.builtin.template:
+    src: 00-base.zsh.j2
+    dest: "{{ shell_env_dropin_dir }}/00-base.zsh"
+    mode: "0644"
+  tags: [mac, shell_env, zshrc]
+
+- name: Install rc guard used to wrap third-party installers
+  ansible.builtin.copy:
+    src: cylon-rc-guard.sh
+    dest: "{{ shell_env_rc_guard }}"
+    mode: "0755"
+  tags: [mac, shell_env, rc_guard]
+
+- name: Summarize shell_env
+  ansible.builtin.debug:
+    msg:
+      - "~/.zshrc:    one managed line → sources {{ shell_env_dropin_dir }}/*.zsh"
+      - "rc guard:    {{ shell_env_rc_guard }} (wraps installers that edit rc files)"
+  tags: [mac, shell_env, summary]

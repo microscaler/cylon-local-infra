@@ -1,0 +1,8 @@
+# {{ ansible_managed }} :: roles/rust
+# rustup proxies on PATH. The toolchain comes from the repo's
+# rust-toolchain.toml; {{ rust_default_toolchain }} is only the fallback.
+# (Never export RUSTUP_TOOLCHAIN here: it would override every repo's pin.)
+export CARGO_HOME="{{ rust_cargo_home }}" RUSTUP_HOME="{{ rust_rustup_home }}"
+typeset -U path
+path=("$CARGO_HOME/bin" $path)
+export SCCACHE_CACHE_SIZE="{{ rust_sccache_cache_size }}"

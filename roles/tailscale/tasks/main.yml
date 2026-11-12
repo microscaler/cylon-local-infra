@@ -1,0 +1,80 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "tailscale targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Install Tailscale (open-source tailscaled)
+  community.general.homebrew:
+    name: "{{ tailscale_formula }}"
+    state: present
+    path: /opt/homebrew/bin
+  tags: [mac, tailscale]
+
+- name: Install tailscaled as a system LaunchDaemon (starts at boot)
+  become: true
+  ansible.builtin.command: "{{ tailscale_daemon_bin }} install-system-daemon"
+  args:
+    creates: "{{ tailscale_daemon_plist }}"
+  tags: [mac, tailscale]
+
+- name: Read Tailscale state
+  ansible.builtin.command: "{{ tailscale_bin }} status --json --peers=false"
+  register: tailscale_status_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, tailscale]
+
+- name: Parse Tailscale state
+  ansible.builtin.set_fact:
+    tailscale_backend_state: >-
+      {{ (tailscale_status_raw.stdout | from_json).BackendState | default('Unknown')
+         if tailscale_status_raw.rc == 0 and tailscale_status_raw.stdout | length > 0 else 'NoDaemon' }}
+  tags: [mac, tailscale]
+
+- name: Join the tailnet with the operator-supplied fresh auth key
+  become: true
+  ansible.builtin.command:
+    argv: >-
+      {{ [tailscale_bin, 'up', '--auth-key=' ~ tailscale_auth_key, '--hostname=' ~ tailscale_hostname,
+          '--operator=' ~ tailscale_operator] + tailscale_up_extra_args }}
+  when:
+    - tailscale_auth_key | length > 0
+    - tailscale_backend_state in ['NeedsLogin', 'Stopped', 'NoState']
+  changed_when: true
+  no_log: true
+  tags: [mac, tailscale]
+
+- name: Re-read Tailscale state
+  ansible.builtin.command: "{{ tailscale_bin }} status --json --peers=false"
+  register: tailscale_status_after
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, tailscale]
+
+- name: Record Tailscale state
+  vars:
+    tailscale_json: >-
+      {{ tailscale_status_after.stdout | from_json
+         if tailscale_status_after.rc == 0 and tailscale_status_after.stdout | length > 0 else {} }}
+    tailscale_joined: "{{ tailscale_json.BackendState | default('') == 'Running' }}"
+    tailscale_join_cmd: >-
+      ssh -t {{ ansible_user }}@{{ ansible_host }} sudo {{ tailscale_bin }} up
+      --hostname={{ tailscale_hostname }} --operator={{ tailscale_operator }}
+  ansible.builtin.set_fact:
+    tailscale_state_summary: >-
+      {{ ('joined as ' ~ (tailscale_json.Self.HostName | default('?')) ~ ' ' ~ ((tailscale_json.Self.TailscaleIPs | default(['?']))[0]))
+         if tailscale_joined | bool else
+         ('NOT JOINED (state ' ~ (tailscale_json.BackendState | default('daemon not running')) ~ ') - run `' ~ tailscale_join_cmd
+          ~ '` and open the login URL, or re-provision with a fresh TAILSCALE_AUTH_KEY') }}
+  tags: [always]
+
+- name: Summarize Tailscale
+  ansible.builtin.debug:
+    msg: "tailscale: {{ tailscale_state_summary }}"
+  tags: [mac, tailscale, summary]

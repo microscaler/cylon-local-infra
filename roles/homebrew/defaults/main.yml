@@ -1,0 +1,36 @@
+---
+# homebrew — Homebrew at /opt/homebrew, installed without the interactive
+# installer, plus the pinned Brewfile (files/Brewfile) of CLI tools the
+# Microscaler repos' justfiles, Tiltfiles and CI call.
+
+homebrew_user: "{{ ansible_user | default('casibbald') }}"
+homebrew_user_home: "/Users/{{ homebrew_user }}"
+homebrew_prefix: /opt/homebrew
+homebrew_brew: "{{ homebrew_prefix }}/bin/brew"
+
+# Homebrew itself, pinned to a release tag (git checkout of Homebrew/brew into
+# the prefix — the "untar anywhere" layout, at the default ARM prefix so
+# bottles pour). Auto-update is off in the play env and the drop-in, so brew
+# stays on this tag until it is bumped here.
+homebrew_repo: https://github.com/Homebrew/brew
+homebrew_version: "7.0.13"
+
+# The Brewfile in files/ is the package list. `brew bundle --no-upgrade`
+# installs what is missing and never upgrades what is there.
+homebrew_brewfile: "{{ homebrew_user_home }}/.config/cylon/Brewfile"
+
+# Cluster-facing CLIs held at their installed version (`brew pin`) so a stray
+# `brew upgrade` cannot move them away from what the clusters/CI use.
+homebrew_pinned_formulae:
+  - kubernetes-cli
+  - helm
+  - flux
+  - tilt
+  - kind
+  - sops
+
+# Put GNU coreutils/sed/grep/find/tar first on PATH in interactive shells. The
+# repos' scripts were written on Linux (ms02) and assume GNU flags
+# (`sed -i`, `date -d`, `readlink -f`, `timeout`).
+homebrew_gnu_tools_first: true
+homebrew_gnu_tool_formulae: [coreutils, gnu-sed, grep, findutils, gnu-tar, gawk]

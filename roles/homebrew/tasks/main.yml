@@ -1,0 +1,100 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "homebrew targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+# ── Install Homebrew without the interactive installer ───────────────────
+- name: Create Homebrew prefix owned by the operator
+  become: true
+  ansible.builtin.file:
+    path: "{{ homebrew_prefix }}"
+    state: directory
+    owner: "{{ homebrew_user }}"
+    group: admin
+    mode: "0755"
+  tags: [mac, homebrew]
+
+- name: Check out Homebrew at the pinned tag
+  ansible.builtin.git:
+    repo: "{{ homebrew_repo }}"
+    dest: "{{ homebrew_prefix }}"
+    version: "{{ homebrew_version }}"
+    update: true
+  tags: [mac, homebrew]
+
+- name: Verify brew runs
+  ansible.builtin.command: "{{ homebrew_brew }} --version"
+  register: homebrew_brew_version_out
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  tags: [mac, homebrew]
+
+# ── Brewfile ─────────────────────────────────────────────────────────────
+- name: Ensure ~/.config/cylon exists
+  ansible.builtin.file:
+    path: "{{ homebrew_brewfile | dirname }}"
+    state: directory
+    mode: "0755"
+  tags: [mac, homebrew, brewfile]
+
+- name: Install the pinned Brewfile
+  ansible.builtin.copy:
+    src: Brewfile
+    dest: "{{ homebrew_brewfile }}"
+    mode: "0644"
+  tags: [mac, homebrew, brewfile]
+
+- name: Check whether every Brewfile entry is installed
+  ansible.builtin.command: "{{ homebrew_brew }} bundle check --no-upgrade --file {{ homebrew_brewfile }}"
+  register: homebrew_bundle_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: homebrew_brew_version_out.rc == 0
+  tags: [mac, homebrew, brewfile]
+
+- name: Install missing Brewfile entries (never upgrades)
+  ansible.builtin.command: "{{ homebrew_brew }} bundle install --no-upgrade --file {{ homebrew_brewfile }}"
+  when:
+    - homebrew_brew_version_out.rc == 0
+    - homebrew_bundle_check.rc | default(1) != 0
+  changed_when: true
+  tags: [mac, homebrew, brewfile]
+
+- name: List pinned formulae
+  ansible.builtin.command: "{{ homebrew_brew }} list --pinned"
+  register: homebrew_pinned_now
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: homebrew_brew_version_out.rc == 0
+  tags: [mac, homebrew, brewfile]
+
+- name: Pin cluster-facing formulae
+  ansible.builtin.command: "{{ homebrew_brew }} pin {{ item }}"
+  loop: "{{ homebrew_pinned_formulae }}"
+  when:
+    - homebrew_brew_version_out.rc == 0
+    - item not in (homebrew_pinned_now.stdout_lines | default([]))
+  changed_when: true
+  tags: [mac, homebrew, brewfile]
+
+- name: Install Homebrew shell drop-in
+  ansible.builtin.template:
+    src: 10-homebrew.zsh.j2
+    dest: "{{ homebrew_user_home }}/.zshrc.d/10-homebrew.zsh"
+    mode: "0644"
+  tags: [mac, homebrew, zshrc]
+
+- name: Summarize Homebrew
+  ansible.builtin.debug:
+    msg:
+      - "brew:     {{ (homebrew_brew_version_out.stdout_lines | default(['not installed yet']))[0] }} (pinned tag {{ homebrew_version }})"
+      - "Brewfile: {{ homebrew_brewfile }} ({{ 'complete' if (homebrew_bundle_check.rc | default(1)) == 0 else 'installed missing entries' }})"
+      - "pinned:   {{ homebrew_pinned_formulae | join(', ') }}"
+  tags: [mac, homebrew, summary]

@@ -1,0 +1,21 @@
+# {{ ansible_managed }} :: roles/golang
+[[ -s "{{ golang_gvm_root }}/scripts/gvm" ]] && source "{{ golang_gvm_root }}/scripts/gvm"
+
+# go.mod `go`/`toolchain` lines: Go downloads the exact toolchain a module needs.
+export GOTOOLCHAIN=auto
+
+# .go-version (nearest ancestor): switch with gvm on cd.
+_cylon_go_version() {
+  local d=$PWD f=
+  while [[ -n $d && $d != / ]]; do
+    [[ -f $d/.go-version ]] && { f=$d/.go-version; break; }
+    d=${d:h}
+  done
+  [[ -n $f ]] || return 0
+  local v=$(<"$f"); v=${v//[[:space:]]/}; [[ $v == go* ]] || v="go$v"
+  [[ "$(go env GOVERSION 2>/dev/null)" == "$v" ]] && return 0
+  gvm use "$v" >/dev/null 2>&1 || print -u2 "golang: $v from $f is not installed — gvm install $v -B"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook chpwd _cylon_go_version
+_cylon_go_version

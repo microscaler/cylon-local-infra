@@ -1,0 +1,21 @@
+---
+# golang — gvm (Charles's choice), Go installed from binaries (`gvm install -B`).
+# Per-repo versions: go.mod `go`/`toolchain` lines via GOTOOLCHAIN=auto (Go
+# fetches the exact toolchain a module asks for) and `.go-version` via a zsh
+# chpwd hook that runs `gvm use`.
+
+golang_user: "{{ ansible_user | default('casibbald') }}"
+golang_user_home: "/Users/{{ golang_user }}"
+golang_gvm_root: "{{ golang_user_home }}/.gvm"
+
+# gvm pinned to a commit of moovweb/gvm (installer and checkout both).
+golang_gvm_commit: dd652539fa4b771840846f8319fad303c7d0a8d2
+golang_gvm_installer_url: "https://raw.githubusercontent.com/moovweb/gvm/{{ golang_gvm_commit }}/binscripts/gvm-installer"
+
+# gvm's macOS brew dependencies (README: Command Line Tools + mercurial).
+golang_brew_deps: [mercurial]
+
+# Fallback default (newest stable; source-controller, flux2, kustomize-controller
+# go.mod say go 1.27.0). Extra versions to pre-install from binaries.
+golang_default_version: go1.27.4
+golang_extra_versions: []

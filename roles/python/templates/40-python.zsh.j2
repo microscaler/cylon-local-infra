@@ -1,0 +1,7 @@
+# {{ ansible_managed }} :: roles/python
+# pyenv shims honour .python-version; uv uses the same interpreters.
+export PYENV_ROOT="{{ python_pyenv_root }}"
+typeset -U path
+path=("$PYENV_ROOT/bin" $path)
+eval "$(pyenv init - zsh)"
+export UV_PYTHON_PREFERENCE={{ python_uv_python_preference }} UV_PYTHON_DOWNLOADS={{ python_uv_python_downloads }}

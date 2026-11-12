@@ -1,0 +1,1 @@
+`homebrew` — Homebrew checked out at a pinned tag into `/opt/homebrew` (no interactive installer) and the pinned `files/Brewfile` (CLI tools the Microscaler repos call), installed with `brew bundle --no-upgrade`.

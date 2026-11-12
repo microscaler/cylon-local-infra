@@ -1,0 +1,4 @@
+# {{ ansible_managed }} :: roles/shell_env
+# ~/.local/bin: Claude Code, Hermes, uv, fnm and other per-user binaries.
+typeset -U path
+path=("$HOME/.local/bin" $path)

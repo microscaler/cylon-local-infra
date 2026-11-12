@@ -1,0 +1,4 @@
+# {{ ansible_managed }} :: roles/node
+# fnm: .nvmrc / .node-version / package.json engines switch Node on cd.
+export FNM_DIR="{{ node_fnm_dir }}"
+eval "$({{ node_fnm }} env {{ node_fnm_env_flags }} --shell zsh)"

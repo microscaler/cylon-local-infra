@@ -1,0 +1,7 @@
+# {{ ansible_managed }} :: roles/docker_desktop
+typeset -U path
+path=("{{ docker_desktop_app }}/Contents/Resources/bin" $path)
+{% if docker_desktop_default_platform %}
+# Cluster images are {{ docker_desktop_default_platform }} (GKE pp/prod). Override per command with --platform.
+export DOCKER_DEFAULT_PLATFORM={{ docker_desktop_default_platform }}
+{% endif %}

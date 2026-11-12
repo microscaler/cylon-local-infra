@@ -1,0 +1,80 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "node targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Read fnm version
+  ansible.builtin.command: "{{ node_fnm }} --version"
+  register: node_fnm_current
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, node, fnm]
+
+- name: Install pinned fnm
+  when: (node_fnm_version | regex_replace('^v', '')) not in (node_fnm_current.stdout | default(''))
+  tags: [mac, node, fnm]
+  block:
+    - name: Download fnm release
+      ansible.builtin.get_url:
+        url: "{{ node_fnm_url }}"
+        dest: "/tmp/fnm-{{ node_fnm_version }}.zip"
+        mode: "0644"
+      tags: [mac, node, fnm]
+
+    - name: Unpack fnm into ~/.local/bin
+      ansible.builtin.unarchive:
+        src: "/tmp/fnm-{{ node_fnm_version }}.zip"
+        dest: "{{ node_fnm_bin_dir }}"
+        remote_src: true
+        mode: "0755"
+      tags: [mac, node, fnm]
+
+- name: List installed Node versions
+  ansible.builtin.command: "{{ node_fnm }} list"
+  environment:
+    FNM_DIR: "{{ node_fnm_dir }}"
+  register: node_fnm_list
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, node]
+
+- name: Install Node versions (corepack enabled)
+  ansible.builtin.command:
+    argv: ["{{ node_fnm }}", install, "{{ item }}"]
+  environment:
+    FNM_DIR: "{{ node_fnm_dir }}"
+    FNM_COREPACK_ENABLED: "true"
+  loop: "{{ [node_default_version] + node_extra_versions }}"
+  when: ('v' ~ item) not in (node_fnm_list.stdout | default(''))
+  changed_when: true
+  tags: [mac, node]
+
+- name: Set the fallback default Node
+  ansible.builtin.command:
+    argv: ["{{ node_fnm }}", default, "{{ node_default_version }}"]
+  environment:
+    FNM_DIR: "{{ node_fnm_dir }}"
+  when: node_fnm_list.stdout | default('') is not search('v' ~ (node_default_version | regex_escape) ~ '.*default')
+  changed_when: true
+  tags: [mac, node]
+
+- name: Install Node shell drop-in
+  ansible.builtin.template:
+    src: 50-node.zsh.j2
+    dest: "{{ node_user_home }}/.zshrc.d/50-node.zsh"
+    mode: "0644"
+  tags: [mac, node, zshrc]
+
+- name: Summarize Node
+  ansible.builtin.debug:
+    msg:
+      - "fnm:      {{ node_fnm_version }} ({{ node_fnm_dir }})"
+      - "default:  v{{ node_default_version }} (fallback; .nvmrc / .node-version / engines win on cd)"
+      - "extra:    {{ node_extra_versions | join(', ') }}"
+  tags: [mac, node, summary]

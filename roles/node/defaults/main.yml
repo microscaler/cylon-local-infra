@@ -1,0 +1,26 @@
+---
+# node — fnm (Fast Node Manager) for Node.js.
+#
+# Why fnm over nvm: fnm is a single Rust binary whose shell hook switches on
+# `cd` in milliseconds, and it reads .nvmrc, .node-version AND package.json
+# "engines" (--resolve-engines) — nvm only reads .nvmrc and adds ~0.5 s of
+# shell-function start-up to every terminal. Same .nvmrc files work unchanged.
+
+node_user: "{{ ansible_user | default('casibbald') }}"
+node_user_home: "/Users/{{ node_user }}"
+node_fnm_version: v1.39.0
+node_fnm_url: "https://github.com/Schniz/fnm/releases/download/{{ node_fnm_version }}/fnm-macos.zip"
+node_fnm_bin_dir: "{{ node_user_home }}/.local/bin"
+node_fnm: "{{ node_fnm_bin_dir }}/fnm"
+node_fnm_dir: "{{ node_user_home }}/.local/share/fnm"
+
+# Fallback default (LTS 24 still bundles corepack; 25+ dropped it) plus the
+# majors repos pin: .nvmrc 22 / v22.12.0 (sesame-idam, supabase, minion-farm),
+# 24.14.1 (openapi-ts). Others are fetched by `fnm install` on first use.
+node_default_version: "24.22.3"
+node_extra_versions: ["22.23.5"]
+
+# Hook flags: switch on cd, look in parent dirs, honour package.json engines,
+# enable corepack (pnpm/yarn from packageManager) on install.
+node_fnm_env_flags: >-
+  --use-on-cd --version-file-strategy=recursive --resolve-engines --corepack-enabled

@@ -1,0 +1,25 @@
+---
+# dev_workspace — ~/Workspace/microscaler, git identity, gh auth check, and a
+# per-host SSH key for GitHub (generated on the mini; private keys never move).
+
+dev_workspace_user: "{{ ansible_user | default('casibbald') }}"
+dev_workspace_user_home: "/Users/{{ dev_workspace_user }}"
+dev_workspace_root: "{{ dev_workspace_user_home }}/Workspace/microscaler"
+
+# Same identity as picolino (read from the controller's global git config at
+# run time, so no name/email is committed here). Override in group_vars if needed.
+dev_workspace_git_user_name: "{{ lookup('ansible.builtin.pipe', 'git config --global user.name') }}"
+dev_workspace_git_user_email: "{{ lookup('ansible.builtin.pipe', 'git config --global user.email') }}"
+dev_workspace_git_default_branch: main
+dev_workspace_git_extra:
+  pull.rebase: "true"
+  push.autoSetupRemote: "true"
+  fetch.prune: "true"
+
+dev_workspace_ssh_key: "{{ dev_workspace_user_home }}/.ssh/id_ed25519"
+dev_workspace_ssh_key_comment: "{{ dev_workspace_user }}@{{ inventory_hostname }}"
+
+# GitHub's published SSH host key (docs.github.com "GitHub's SSH key
+# fingerprints") — pinned instead of trusting a first ssh-keyscan.
+dev_workspace_github_known_hosts:
+  - "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"

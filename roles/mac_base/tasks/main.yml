@@ -1,0 +1,198 @@
+---
+# mac_base — per-task become, check-mode friendly, idempotent.
+
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "mac_base targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+# ── Hostname ─────────────────────────────────────────────────────────────
+- name: Read current scutil names
+  ansible.builtin.command: "scutil --get {{ item }}"
+  loop: [ComputerName, HostName, LocalHostName]
+  register: mac_base_scutil_current
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, mac_base, hostname]
+
+- name: Set scutil names
+  become: true
+  ansible.builtin.command: "scutil --set {{ item.item }} {{ mac_base_hostname }}"
+  loop: "{{ mac_base_scutil_current.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stdout | default('') != mac_base_hostname
+  changed_when: true
+  tags: [mac, mac_base, hostname]
+
+# ── Power: always on ─────────────────────────────────────────────────────
+- name: Read current pmset values
+  ansible.builtin.command: pmset -g
+  register: mac_base_pmset_raw
+  changed_when: false
+  check_mode: false
+  tags: [mac, mac_base, pmset]
+
+- name: Parse pmset values
+  ansible.builtin.set_fact:
+    mac_base_pmset_current: >-
+      {{ dict(mac_base_pmset_raw.stdout_lines | map('trim')
+         | select('match', '^[A-Za-z]+\s+-?[0-9]+')
+         | map('regex_replace', '^(\S+)\s+(-?[0-9]+).*$', '\1 \2')
+         | map('split', ' ') | list) }}
+  tags: [mac, mac_base, pmset]
+
+- name: Apply pmset settings that differ
+  become: true
+  ansible.builtin.command: "pmset -a {{ item.key }} {{ item.value }}"
+  loop: "{{ mac_base_pmset | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  when: (mac_base_pmset_current[item.key] | default('')) != (item.value | string)
+  changed_when: true
+  tags: [mac, mac_base, pmset]
+
+# ── FileVault: must be off (never changed by Ansible) ────────────────────
+- name: Read FileVault status
+  ansible.builtin.command: fdesetup status
+  register: mac_base_filevault
+  changed_when: false
+  check_mode: false
+  tags: [mac, mac_base, filevault]
+
+- name: Fail when FileVault is on (Charles turns it off himself)
+  ansible.builtin.fail:
+    msg:
+      - "FileVault is ON on {{ inventory_hostname }}: '{{ mac_base_filevault.stdout | trim }}'"
+      - "An encrypted mini waits at the FileVault unlock screen after a power cut, so it cannot restart unattended."
+      - "Turn it off yourself: System Settings > Privacy & Security > FileVault > Turn Off (or `sudo fdesetup disable` on the mini)."
+      - "Decryption runs in the background; re-run provisioning once `fdesetup status` says Off or 'Decryption in progress'."
+  when:
+    - mac_base_filevault_enforce | bool
+    - "'FileVault is On' in mac_base_filevault.stdout"
+    - "'Decryption in progress' not in mac_base_filevault.stdout"
+  tags: [mac, mac_base, filevault]
+
+- name: Warn when FileVault is on (enforcement disabled)
+  ansible.builtin.debug:
+    msg: "WARNING: FileVault is on ({{ mac_base_filevault.stdout | trim }}); the mini will not restart unattended."
+  when:
+    - not (mac_base_filevault_enforce | bool)
+    - "'FileVault is Off' not in mac_base_filevault.stdout"
+  tags: [mac, mac_base, filevault]
+
+# ── launchd maxfiles / maxproc ───────────────────────────────────────────
+- name: Read kern.maxproc
+  ansible.builtin.command: sysctl -n kern.maxproc
+  register: mac_base_kern_maxproc
+  changed_when: false
+  check_mode: false
+  tags: [mac, mac_base, limits]
+
+- name: Install LaunchDaemon that raises maxfiles / maxproc at boot
+  become: true
+  ansible.builtin.template:
+    src: dev-limits.plist.j2
+    dest: "{{ mac_base_limits_plist }}"
+    owner: root
+    group: wheel
+    mode: "0644"
+  notify: Reload limits LaunchDaemon
+  tags: [mac, mac_base, limits]
+
+# ── Spotlight: exclude ~/Workspace ───────────────────────────────────────
+- name: Ensure Workspace exists
+  ansible.builtin.file:
+    path: "{{ mac_base_workspace }}"
+    state: directory
+    mode: "0755"
+  tags: [mac, mac_base, spotlight, dirs]
+
+- name: Drop .metadata_never_index marker in excluded paths
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ item }}/.metadata_never_index"
+    force: false
+    mode: "0644"
+  loop: "{{ mac_base_spotlight_excluded_paths }}"
+  tags: [mac, mac_base, spotlight]
+
+# The Privacy list lives in a root-only plist; reading it needs Full Disk Access
+# for sshd ("Allow full disk access for remote users" under Remote Login).
+- name: Read Spotlight Privacy exclusions
+  become: true
+  ansible.builtin.command: /usr/libexec/PlistBuddy -c "Print :Exclusions" {{ mac_base_spotlight_volume_config }}
+  register: mac_base_spotlight_exclusions
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, mac_base, spotlight]
+
+- name: Add paths to Spotlight Privacy exclusions
+  become: true
+  ansible.builtin.shell: |
+    set -eu
+    pb=/usr/libexec/PlistBuddy
+    cfg="{{ mac_base_spotlight_volume_config }}"
+    $pb -c "Print :Exclusions" "$cfg" >/dev/null 2>&1 || $pb -c "Add :Exclusions array" "$cfg"
+    $pb -c "Add :Exclusions: string {{ item }}" "$cfg"
+  args:
+    executable: /bin/bash
+  loop: "{{ mac_base_spotlight_excluded_paths }}"
+  when:
+    - mac_base_spotlight_exclusions.rc in [0, 1]
+    - "'Permission denied' not in mac_base_spotlight_exclusions.stderr | default('')"
+    - "'Operation not permitted' not in mac_base_spotlight_exclusions.stderr | default('')"
+    - "item not in mac_base_spotlight_exclusions.stdout | default('')"
+  register: mac_base_spotlight_added
+  changed_when: true
+  notify: Restart mds
+  tags: [mac, mac_base, spotlight]
+
+- name: Report when the Spotlight Privacy list is not readable over SSH
+  ansible.builtin.debug:
+    msg: >-
+      Could not read {{ mac_base_spotlight_volume_config }} ({{ mac_base_spotlight_exclusions.stderr | default('') | trim }}).
+      The .metadata_never_index marker is in place; for the Privacy-list entry enable
+      "Allow full disk access for remote users" under System Settings > General > Sharing > Remote Login and re-run.
+  when: >-
+    'Permission denied' in mac_base_spotlight_exclusions.stderr | default('')
+    or 'Operation not permitted' in mac_base_spotlight_exclusions.stderr | default('')
+  tags: [mac, mac_base, spotlight]
+
+# ── Time Machine: exclude disposable build paths ────────────────────────
+- name: Exclude build paths from Time Machine
+  ansible.builtin.include_tasks: tm_exclude.yml
+  loop: "{{ mac_base_tm_excluded_paths }}"
+  loop_control:
+    loop_var: mac_base_tm_path
+  tags: [mac, mac_base, time_machine]
+
+# ── Software update policy ───────────────────────────────────────────────
+- name: Set software update policy
+  become: true
+  community.general.osx_defaults:
+    domain: /Library/Preferences/com.apple.SoftwareUpdate
+    key: "{{ item.key }}"
+    type: "{{ item.type }}"
+    value: "{{ item.value }}"
+  loop: "{{ mac_base_softwareupdate_prefs }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  tags: [mac, mac_base, softwareupdate]
+
+- name: Summarize mac_base state
+  ansible.builtin.debug:
+    msg:
+      - "hostname:   {{ mac_base_hostname }}"
+      - "pmset:      {{ mac_base_pmset | dict2items | map(attribute='key') | zip(mac_base_pmset.values()) | map('join', '=') | join(' ') }}"
+      - "FileVault:  {{ mac_base_filevault.stdout | default('') | trim }}"
+      - "maxfiles:   {{ mac_base_maxfiles_soft }}/{{ mac_base_maxfiles_hard }}"
+      - "maxproc:    {{ mac_base_maxproc_soft }}/{{ mac_base_maxproc_hard }} capped at kern.maxproc {{ mac_base_kern_maxproc.stdout | default('?') }}"
+      - "Spotlight:  {{ mac_base_spotlight_excluded_paths | join(', ') }}"
+      - "TimeMach.:  {{ mac_base_tm_excluded_paths | join(', ') }} (+ toolchain roots)"
+  tags: [mac, mac_base, summary]

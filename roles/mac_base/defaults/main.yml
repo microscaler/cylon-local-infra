@@ -1,0 +1,56 @@
+---
+# mac_base — always-on macOS base for the Mac mini dev machines (mac_minis).
+# Hostname, power, FileVault check, launchd limits, Spotlight/Time Machine
+# exclusions for build paths, software-update policy.
+
+mac_base_user: "{{ ansible_user | default('casibbald') }}"
+mac_base_user_home: "/Users/{{ mac_base_user }}"
+
+# scutil ComputerName / HostName / LocalHostName. Placeholder per host in
+# inventory/host_vars/mini<N>.yml until the real names are known.
+mac_base_hostname: "{{ inventory_hostname }}"
+
+# pmset -a <key> <value>: never sleep, come back after a power cut, wake on LAN.
+mac_base_pmset:
+  sleep: 0
+  disksleep: 0
+  displaysleep: 15
+  autorestart: 1
+  womp: 1
+  powernap: 0
+  tcpkeepalive: 1
+
+# FileVault must be OFF so the mini reboots unattended after a power loss
+# (Charles's decision). The role never changes disk encryption: it fails with
+# instructions when FileVault is on. Set false to downgrade to a warning.
+mac_base_filevault_enforce: true
+
+# launchd limits (applied at boot by a LaunchDaemon, and now when it changes).
+# maxproc is clamped to kern.maxproc at run time.
+mac_base_limits_label: com.microscaler.dev-limits
+mac_base_limits_plist: "/Library/LaunchDaemons/{{ mac_base_limits_label }}.plist"
+mac_base_maxfiles_soft: 524288
+mac_base_maxfiles_hard: 524288
+mac_base_maxproc_soft: 8000
+mac_base_maxproc_hard: 8000
+
+# Spotlight: never index the build tree.
+mac_base_workspace: "{{ mac_base_user_home }}/Workspace"
+mac_base_spotlight_excluded_paths:
+  - "{{ mac_base_workspace }}"
+mac_base_spotlight_volume_config: /System/Volumes/Data/.Spotlight-V100/VolumeConfiguration.plist
+
+# Time Machine: build paths are disposable. Toolchain roles add their own roots
+# through tasks_from: tm_exclude.yml once those roots exist.
+mac_base_tm_excluded_paths:
+  - "{{ mac_base_workspace }}"
+  - "{{ mac_base_user_home }}/Library/Caches"
+
+# Software update: check and download automatically, install security/config
+# data, but never install macOS updates (and reboot) on its own.
+mac_base_softwareupdate_prefs:
+  - { key: AutomaticCheckEnabled, type: bool, value: true }
+  - { key: AutomaticDownload, type: bool, value: true }
+  - { key: CriticalUpdateInstall, type: bool, value: true }
+  - { key: ConfigDataInstall, type: bool, value: true }
+  - { key: AutomaticallyInstallMacOSUpdates, type: bool, value: false }

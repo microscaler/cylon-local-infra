@@ -1,0 +1,1 @@
+`python` — pyenv at a pinned tag (interpreters, honours `.python-version`) with pinned global + extra interpreters, and a pinned uv release binary (environments/tools) configured to use pyenv's interpreters only.

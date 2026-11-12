@@ -1,0 +1,42 @@
+---
+# docker_desktop — Docker Desktop (Homebrew cask), sized from facts, starts at
+# login, buildx + Rosetta for linux/amd64 (what the pp/prod GKE images and the
+# gcp-infrastructure image workflows target).
+#
+# Licence: Docker Desktop's first launch shows the Docker Subscription Service
+# Agreement. This role NEVER accepts it (no accept-licence install flag); it
+# detects that the engine is not up yet and tells Charles to click it.
+
+docker_desktop_user: "{{ ansible_user | default('casibbald') }}"
+docker_desktop_user_home: "/Users/{{ docker_desktop_user }}"
+docker_desktop_cask: docker-desktop
+docker_desktop_app: /Applications/Docker.app
+docker_desktop_cli: "{{ docker_desktop_app }}/Contents/Resources/bin/docker"
+docker_desktop_settings_file: "{{ docker_desktop_user_home }}/Library/Group Containers/group.com.docker/settings-store.json"
+
+# Resources from facts: all cores but two, half the RAM, a fixed disk image.
+docker_desktop_reserved_cpus: 2
+docker_desktop_memory_fraction: 0.5
+docker_desktop_disk_gib: 256
+docker_desktop_swap_mib: 2048
+
+# Cross builds: images for the clusters are linux/amd64 (PriceWhisperer Tiltfile:
+# "the cluster is amd64 whatever the host is"; gcp-infrastructure image
+# workflows build linux/amd64). Exported as DOCKER_DEFAULT_PLATFORM in the
+# drop-in so `docker build`/`buildx` from Tilt and justfiles produce amd64.
+# Set "" to build for the host (arm64) by default.
+docker_desktop_default_platform: linux/amd64
+docker_desktop_required_platforms: [linux/amd64, linux/arm64]
+
+# Settings merged into settings-store.json (other keys are left alone).
+docker_desktop_settings:
+  Cpus: "{{ [2, (ansible_facts['processor_vcpus'] | default(ansible_facts['processor_cores']) | int) - docker_desktop_reserved_cpus] | max }}"
+  MemoryMiB: "{{ ((ansible_facts['memtotal_mb'] | int) * docker_desktop_memory_fraction / 1024) | int * 1024 }}"
+  DiskSizeMiB: "{{ docker_desktop_disk_gib * 1024 }}"
+  SwapMiB: "{{ docker_desktop_swap_mib }}"
+  UseVirtualizationFramework: true
+  UseVirtualizationFrameworkRosetta: true
+  UseContainerdSnapshotter: true
+  AutoStart: true
+  OpenUIOnStartupDisabled: true
+  AnalyticsEnabled: false

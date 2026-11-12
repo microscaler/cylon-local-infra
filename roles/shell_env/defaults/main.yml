@@ -1,0 +1,20 @@
+---
+# shell_env — ~/.zshrc gets exactly ONE managed line that sources
+# ~/.zshrc.d/*.zsh; every tool's init lives in a drop-in owned by its role.
+# The user's own rc files are never rewritten.
+
+shell_env_user: "{{ ansible_user | default('casibbald') }}"
+shell_env_user_home: "/Users/{{ shell_env_user }}"
+shell_env_zshrc: "{{ shell_env_user_home }}/.zshrc"
+shell_env_dropin_dir: "{{ shell_env_user_home }}/.zshrc.d"
+
+# The single include line. The trailing marker is how tests and re-runs find it.
+shell_env_include_marker: "# managed: cylon-local-infra shell_env"
+shell_env_include_line: >-
+  for _cylon_rc in ~/.zshrc.d/*.zsh(N); do source "$_cylon_rc"; done; unset _cylon_rc
+  {{ shell_env_include_marker }}
+
+# Wrapper that third-party installers (Claude, Hermes, gvm, …) run under: it
+# snapshots the user's rc files, runs the installer, and puts back any rc file
+# the installer appended to. Keeps the one-line ~/.zshrc rule true.
+shell_env_rc_guard: "{{ shell_env_user_home }}/.local/libexec/cylon-rc-guard"

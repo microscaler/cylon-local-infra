@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- {{ ansible_managed }} :: roles/mac_base -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+{% set maxproc_cap = (mac_base_kern_maxproc.stdout | default(mac_base_maxproc_hard) | int) %}
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ mac_base_limits_label }}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>/usr/sbin/sysctl -w kern.maxfiles={{ mac_base_maxfiles_hard }} kern.maxfilesperproc={{ mac_base_maxfiles_hard }}; /bin/launchctl limit maxfiles {{ mac_base_maxfiles_soft }} {{ mac_base_maxfiles_hard }}; /bin/launchctl limit maxproc {{ [mac_base_maxproc_soft, maxproc_cap] | min }} {{ [mac_base_maxproc_hard, maxproc_cap] | min }}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>

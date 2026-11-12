@@ -1,0 +1,61 @@
+# Managed by cylon-local-infra :: roles/homebrew (installed with --no-upgrade).
+# Built from what the Microscaler repos' justfiles, Tiltfiles and CI actually
+# call (grepped read-only on ms02, Nov 2026). Language toolchains are NOT here:
+# rust/golang/python/node roles own rustup, gvm, pyenv+uv and fnm.
+
+tap "filosottile/musl-cross"
+
+# ── Core dev CLIs ─────────────────────────────────────────────────────────
+brew "git"
+brew "gh"
+brew "just"
+brew "jq"
+brew "yq"             # cylon, cylon-guard-validate
+brew "ripgrep"
+brew "fd"
+brew "wget"
+brew "watch"
+brew "shellcheck"     # cylon
+brew "pre-commit"     # BRRTRouter, rerp, sesame-idam, mayfly, obsctl, …
+
+# ── GNU userland (Linux-written scripts) ─────────────────────────────────
+brew "coreutils"
+brew "gnu-sed"
+brew "grep"
+brew "findutils"
+brew "gnu-tar"
+brew "gawk"
+
+# ── Native build deps ────────────────────────────────────────────────────
+brew "cmake"
+brew "pkgconf"        # provides pkg-config
+brew "openssl@3"
+brew "protobuf"
+brew "libpq"          # psql / libpq for sqlx, lifeguard (keg-only; PATH via drop-in)
+brew "sccache"
+brew "zig"            # cargo-zigbuild (BRRTRouter pet_store musl build)
+brew "filosottile/musl-cross/musl-cross"  # x86_64/aarch64-linux-musl-gcc for --target *-linux-musl (PW Tilt workers)
+
+# ── Kubernetes / GitOps ──────────────────────────────────────────────────
+brew "kubernetes-cli"
+brew "kubectx"
+brew "helm"
+brew "flux"           # FluxCD CLI
+brew "kustomize"      # BRRTRouter, DCops, hauliage, shared-gitops-k8s-cluster
+brew "kind"           # BRRTRouter, hauliage, sesame-idam, cylon (Tilt dev clusters)
+brew "k9s"
+brew "tilt"
+brew "skaffold"       # PriceWhisperer, microscaler-supabase
+brew "sops"
+brew "age"
+
+# ── Service clients used by recipes ──────────────────────────────────────
+brew "grpcurl"        # cylon
+brew "buf"            # cylon
+brew "step"           # BRRTRouter, DCops, hauliage, lifeguard, sesame-idam (dev certs)
+brew "minio-mc"       # cylon (`mc`)
+brew "redis"          # redis-cli in lifeguard / hauliage recipes
+brew "mdbook"         # cylon, mayfly docs
+
+# ── Cloud ────────────────────────────────────────────────────────────────
+cask "gcloud-cli"     # gcp-infrastructure recipes

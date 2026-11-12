@@ -1,0 +1,23 @@
+# Managed by cylon-local-infra :: roles/rust ({{ ansible_managed }})
+# CARGO_HOME config: the LOWEST-priority cargo config. A repo's own
+# .cargo/config.toml overrides anything here.
+#
+# Deliberately NO [patch] sections: ms02's ancestor
+# ~/Workspace/microscaler/.cargo/config.toml path patches rewrote repos'
+# Cargo.lock files. Repos build from their pinned git deps here.
+
+[build]
+rustc-wrapper = "{{ rust_sccache }}"
+
+{% for x in rust_cross_linkers %}
+[target.{{ x.target }}]
+linker = "{{ rust_cross_bin_dir }}/{{ x.prefix }}-gcc"
+
+{% endfor %}
+[env]
+SCCACHE_CACHE_SIZE = "{{ rust_sccache_cache_size }}"
+{% for x in rust_cross_linkers %}
+CC_{{ x.target | replace('-', '_') }} = "{{ rust_cross_bin_dir }}/{{ x.prefix }}-gcc"
+CXX_{{ x.target | replace('-', '_') }} = "{{ rust_cross_bin_dir }}/{{ x.prefix }}-g++"
+AR_{{ x.target | replace('-', '_') }} = "{{ rust_cross_bin_dir }}/{{ x.prefix }}-ar"
+{% endfor %}

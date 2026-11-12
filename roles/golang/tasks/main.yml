@@ -1,0 +1,109 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "golang targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Install gvm's Homebrew dependencies
+  community.general.homebrew:
+    name: "{{ golang_brew_deps }}"
+    state: present
+    path: /opt/homebrew/bin
+  tags: [mac, golang]
+
+- name: Check for gvm
+  ansible.builtin.stat:
+    path: "{{ golang_gvm_root }}/scripts/gvm"
+  register: golang_gvm_stat
+  tags: [mac, golang]
+
+- name: Download pinned gvm installer
+  ansible.builtin.get_url:
+    url: "{{ golang_gvm_installer_url }}"
+    dest: "/tmp/gvm-installer-{{ golang_gvm_commit[:12] }}"
+    mode: "0755"
+  when: not golang_gvm_stat.stat.exists
+  tags: [mac, golang]
+
+# GVM_NO_UPDATE_PROFILE stops it appending to shell rc files; the rc guard is the
+# belt to that brace.
+- name: Install gvm at the pinned commit
+  ansible.builtin.command:
+    argv:
+      - "{{ golang_user_home }}/.local/libexec/cylon-rc-guard"
+      - /bin/bash
+      - "/tmp/gvm-installer-{{ golang_gvm_commit[:12] }}"
+      - "{{ golang_gvm_commit }}"
+      - "{{ golang_user_home }}"
+  environment:
+    GVM_NO_UPDATE_PROFILE: "1"
+  args:
+    creates: "{{ golang_gvm_root }}/scripts/gvm"
+  when: not golang_gvm_stat.stat.exists
+  tags: [mac, golang]
+
+- name: Install Go versions from binaries
+  ansible.builtin.shell: |
+    set -eu
+    source "{{ golang_gvm_root }}/scripts/gvm"
+    gvm install "{{ item }}" -B
+  args:
+    executable: /bin/bash
+    creates: "{{ golang_gvm_root }}/gos/{{ item }}/bin/go"
+  loop: "{{ [golang_default_version] + golang_extra_versions }}"
+  tags: [mac, golang]
+
+- name: Read gvm default environment
+  ansible.builtin.command: "cat {{ golang_gvm_root }}/environments/default"
+  register: golang_gvm_default_env
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, golang]
+
+- name: Set the fallback default Go
+  ansible.builtin.shell: |
+    set -eu
+    source "{{ golang_gvm_root }}/scripts/gvm"
+    gvm use "{{ golang_default_version }}" --default
+  args:
+    executable: /bin/bash
+  when: >-
+    golang_gvm_default_env.stdout | default('')
+    is not search('/gos/' ~ (golang_default_version | regex_escape) ~ '(\"|\\s|$)', multiline=True)
+  changed_when: true
+  tags: [mac, golang]
+
+- name: Install Go shell drop-in
+  ansible.builtin.template:
+    src: 30-golang.zsh.j2
+    dest: "{{ golang_user_home }}/.zshrc.d/30-golang.zsh"
+    mode: "0644"
+  tags: [mac, golang, zshrc]
+
+- name: Exclude gvm from Time Machine
+  ansible.builtin.include_role:
+    name: mac_base
+    tasks_from: tm_exclude.yml
+  vars:
+    mac_base_tm_path: "{{ golang_gvm_root }}"
+  tags: [mac, golang, time_machine]
+
+- name: Read go version
+  ansible.builtin.command: "{{ golang_gvm_root }}/gos/{{ golang_default_version }}/bin/go version"
+  register: golang_go_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, golang, summary]
+
+- name: Summarize Go
+  ansible.builtin.debug:
+    msg:
+      - "gvm:      {{ golang_gvm_root }} @ {{ golang_gvm_commit[:12] }}"
+      - "default:  {{ golang_go_version.stdout | default('not installed yet') }} (fallback)"
+      - "per repo: go.mod go/toolchain lines (GOTOOLCHAIN=auto) and .go-version (chpwd → gvm use)"
+  tags: [mac, golang, summary]

@@ -1,0 +1,1 @@
+`golang` — gvm at a pinned commit (with its macOS brew deps), Go from binaries (`gvm install -B`), fallback default; per-repo `go.mod` toolchains via `GOTOOLCHAIN=auto` and `.go-version` via a chpwd `gvm use` hook.

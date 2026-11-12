@@ -1,0 +1,125 @@
+---
+- name: Sanity-check that we're on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts["system"] == "Darwin"
+    fail_msg: "docker_desktop targets Darwin only (got {{ ansible_facts['system'] }})"
+    quiet: true
+  tags: [always]
+
+- name: Install Docker Desktop cask
+  community.general.homebrew_cask:
+    name: "{{ docker_desktop_cask }}"
+    state: present
+    path: /opt/homebrew/bin
+  tags: [mac, docker_desktop, docker]
+
+# ── Rosetta (needed for fast linux/amd64) — its licence is Charles's to accept ─
+- name: Check whether Rosetta 2 is installed
+  ansible.builtin.command: /usr/bin/arch -x86_64 /usr/bin/true
+  register: docker_desktop_rosetta
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, docker_desktop, docker, rosetta]
+
+# ── Settings (merged, never replaced) ────────────────────────────────────
+- name: Stat Docker Desktop settings
+  ansible.builtin.stat:
+    path: "{{ docker_desktop_settings_file }}"
+  register: docker_desktop_settings_stat
+  tags: [mac, docker_desktop, docker, settings]
+
+- name: Read Docker Desktop settings
+  ansible.builtin.slurp:
+    src: "{{ docker_desktop_settings_file }}"
+  register: docker_desktop_settings_raw
+  when: docker_desktop_settings_stat.stat.exists
+  tags: [mac, docker_desktop, docker, settings]
+
+- name: Ensure the settings directory exists
+  ansible.builtin.file:
+    path: "{{ docker_desktop_settings_file | dirname }}"
+    state: directory
+    mode: "0700"
+  tags: [mac, docker_desktop, docker, settings]
+
+- name: Merge managed keys into settings-store.json
+  ansible.builtin.copy:
+    content: >-
+      {{ ((docker_desktop_settings_raw.content | b64decode | from_json) if docker_desktop_settings_stat.stat.exists else {})
+         | combine(docker_desktop_settings) | to_nice_json(indent=2) }}
+    dest: "{{ docker_desktop_settings_file }}"
+    mode: "0644"
+  when: >-
+    not docker_desktop_settings_stat.stat.exists
+    or ((docker_desktop_settings_raw.content | b64decode | from_json) | combine(docker_desktop_settings))
+       != (docker_desktop_settings_raw.content | b64decode | from_json)
+  notify: Restart Docker Desktop
+  tags: [mac, docker_desktop, docker, settings]
+
+# ── Running? Licence accepted? ───────────────────────────────────────────
+- name: Check whether Docker Desktop is running
+  ansible.builtin.command: /usr/bin/pgrep -qf "Docker.app/Contents/MacOS/"
+  register: docker_desktop_running
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, docker_desktop, docker]
+
+# Opening the app is what puts the licence screen in front of Charles; the role
+# never clicks it. AutoStart (above) takes over from the next login.
+- name: Launch Docker Desktop (first run shows the licence to Charles)
+  ansible.builtin.command: /usr/bin/open -ga "{{ docker_desktop_app }}"
+  when:
+    - docker_desktop_running.rc != 0
+    - not ansible_check_mode
+  changed_when: true
+  tags: [mac, docker_desktop, docker]
+
+- name: Wait briefly for the Docker engine
+  ansible.builtin.command: "{{ docker_desktop_cli }} info --format '{{ '{{' }}.ServerVersion{{ '}}' }}'"
+  register: docker_desktop_info
+  until: docker_desktop_info.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [mac, docker_desktop, docker]
+
+- name: Inspect the default buildx builder platforms
+  ansible.builtin.command: "{{ docker_desktop_cli }} buildx inspect --bootstrap"
+  register: docker_desktop_buildx
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: docker_desktop_info.rc == 0
+  tags: [mac, docker_desktop, docker, buildx]
+
+- name: Record Docker Desktop state
+  ansible.builtin.set_fact:
+    docker_desktop_state_summary: >-
+      {% if docker_desktop_info.rc == 0 %}engine {{ docker_desktop_info.stdout }} up;
+      buildx {{ 'ok (' ~ (docker_desktop_required_platforms | join(', ')) ~ ')'
+               if (docker_desktop_required_platforms | reject('in', docker_desktop_buildx.stdout | default('')) | list | length) == 0
+               else 'MISSING ' ~ (docker_desktop_required_platforms | reject('in', docker_desktop_buildx.stdout | default('')) | join(', ')) }}
+      {%- else %}ENGINE NOT UP — open Docker Desktop on the mini and accept the Docker Subscription Service Agreement
+      (Charles's click; Ansible never accepts it), then re-run{% endif %};
+      Rosetta {{ 'installed' if docker_desktop_rosetta.rc == 0 else 'MISSING — on the mini run `softwareupdate --install-rosetta` and accept its licence' }}
+  tags: [always]
+
+- name: Install Docker shell drop-in
+  ansible.builtin.template:
+    src: 60-docker.zsh.j2
+    dest: "{{ docker_desktop_user_home }}/.zshrc.d/60-docker.zsh"
+    mode: "0644"
+  tags: [mac, docker_desktop, docker, zshrc]
+
+- name: Summarize Docker Desktop
+  ansible.builtin.debug:
+    msg:
+      - "state:     {{ docker_desktop_state_summary }}"
+      - "resources: {{ docker_desktop_settings.Cpus }} CPU, {{ docker_desktop_settings.MemoryMiB }} MiB RAM, {{ docker_desktop_settings.DiskSizeMiB }} MiB disk"
+      - "default platform: {{ docker_desktop_default_platform | default('host', true) }}"
+  tags: [mac, docker_desktop, docker, summary]
