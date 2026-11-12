@@ -1,0 +1,16 @@
+---
+# Mac mini #3 — development machine (group mac_minis, playbooks/mac_dev.yml).
+# PLACEHOLDER: replace with the real DHCP-reserved LAN address (192.168.1.2xx,
+# same range as the Sparks). This is the only place the IP lives: /etc/hosts on
+# picolino (mac_workstation) and the just recipes derive it from here.
+ansible_host: 192.168.1.203
+
+# PLACEHOLDER hostname (scutil ComputerName/HostName/LocalHostName). Rename
+# this file and the inventory entry together when the real name is chosen.
+mac_base_hostname: mini3
+
+# What this mini is for (reserved for later scheduling/labels; not used yet).
+#   speed    — fast inner-loop builds / tests
+#   feature  — long-lived feature work, Tilt stacks
+#   training — model-training / data jobs (vector-one etc.)
+mac_mini_role: training

@@ -1,0 +1,18 @@
+---
+# Mac mini development machines (group mac_minis) — playbooks/mac_dev.yml.
+# Pinned versions live in each role's defaults/main.yml; override here only
+# when the minis must differ from the role default. See docs/mac-minis.md.
+
+# ── Hermes → the Sparks' vLLM ──────────────────────────────────────────────
+# Single source of truth is inventory/group_vars/dev_hosts.yml (what ms02 uses,
+# kept aligned with the Sparks' --served-model-name). Read through ms02's
+# hostvars so a model cutover updates ms02 and the minis together.
+hermes_agent_openai_base_url: "{{ hostvars['ms02']['hermes_agent_openai_base_url'] }}"
+hermes_agent_openai_model_id: "{{ hostvars['ms02']['hermes_agent_openai_model_id'] }}"
+
+# ── PATH for Ansible's own commands on the minis ──────────────────────────
+# Ansible's SSH sessions are non-interactive and never read ~/.zshrc, so the
+# play sets PATH explicitly (roles also call tools by absolute path).
+mac_dev_user_home: "/Users/{{ ansible_user }}"
+mac_dev_env_path: >-
+  {{ mac_dev_user_home }}/.local/bin:{{ mac_dev_user_home }}/.cargo/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
