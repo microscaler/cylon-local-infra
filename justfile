@@ -551,6 +551,115 @@ mac-sudoers:
 mac-sudoers-check:
     ansible-playbook playbooks/mac_workstation.yml --tags sudoers --check --diff --ask-become-pass
 
+# ── Mac mini dev machines (group mac_minis; docs/mac-minis.md) ─────────────
+#
+# One manual step per mini (Remote Login + picolino's key), then Ansible:
+#   just mac-mini-bootstrap host=192.168.1.201   # or host=mini1
+#   just mac-mini-provision-check host=mini1     # --check --diff first
+#   just mac-mini-provision host=mini1           # Charles types the sudo password
+#   just mac-mini-check host=mini1               # smoke test on the mini
+# Optional run-time secrets (env on picolino, never stored):
+#   TAILSCALE_AUTH_KEY=… HERMES_OPENAI_API_KEY=… just mac-mini-provision host=mini1
+
+# Resolve host=<inventory name | ansible_host> → "<name> <ip>" (mac_minis only).
+_mac-mini-resolve host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    h="{{host}}"; h="${h#host=}"
+    ansible-inventory --list 2>/dev/null | python3 -c '
+    import json, sys
+    want = sys.argv[1]
+    inv = json.load(sys.stdin)
+    hv = inv.get("_meta", {}).get("hostvars", {})
+    for name in inv.get("mac_minis", {}).get("hosts", []):
+        ip = hv.get(name, {}).get("ansible_host", name)
+        if want in (name, ip):
+            print(name, ip); sys.exit(0)
+    sys.exit("not a mac_minis host: %s (see inventory/host_vars/mini<N>.yml)" % want)
+    ' "$h"
+
+# Bootstrap: install picolino's SSH key on a new mini (the only manual step).
+mac-mini-bootstrap host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    h="{{host}}"; h="${h#host=}"
+    if read -r name ip < <(just _mac-mini-resolve "$h" 2>/dev/null); then :; else name="$h"; ip="$h"; fi
+    user=casibbald
+    key=""
+    for k in "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_rsa.pub"; do [ -f "$k" ] && { key="$k"; break; }; done
+    [ -n "$key" ] || { echo "✗ no ~/.ssh/id_ed25519.pub or id_rsa.pub on picolino"; exit 1; }
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 "$user@$ip" true 2>/dev/null; then
+        echo "✓ $user@$ip already accepts picolino's key — next: just mac-mini-provision host=$name"; exit 0
+    fi
+    if ! nc -z -G 5 "$ip" 22 2>/dev/null; then
+        echo "✗ $ip:22 is closed — Remote Login is off (or the mini is not on the LAN yet)."
+        echo
+        echo "  On the mini, signed in as $user:"
+        echo "    System Settings → General → Sharing → Remote Login: ON"
+        echo "    (i) next to Remote Login → Allow access for: Only these users → $user"
+        echo "    Optional: tick 'Allow full disk access for remote users' (lets Ansible add the Spotlight exclusion)"
+        echo
+        echo "  Then re-run: just mac-mini-bootstrap host=$h"
+        exit 1
+    fi
+    echo "→ Installing $key on $user@$ip (type the mini's login password when asked)"
+    ssh-copy-id -i "$key" -o StrictHostKeyChecking=accept-new "$user@$ip"
+    ssh -o BatchMode=yes "$user@$ip" 'echo "✓ $(scutil --get ComputerName 2>/dev/null) macOS $(sw_vers -productVersion) $(uname -m)"'
+    echo "Next: just mac-mini-provision-check host=$name && just mac-mini-provision host=$name"
+
+# Full provision (playbooks/mac_dev.yml). Prompts for the mini's sudo password.
+mac-mini-provision host *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    read -r name ip < <(just _mac-mini-resolve "{{host}}")
+    ansible-playbook playbooks/mac_dev.yml -l "$name" --ask-become-pass {{extra}}
+
+# Dry run (--check --diff).
+mac-mini-provision-check host *extra:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    read -r name ip < <(just _mac-mini-resolve "{{host}}")
+    ansible-playbook playbooks/mac_dev.yml -l "$name" --ask-become-pass --check --diff {{extra}}
+
+# Smoke test ON the mini: toolchain versions, Docker, agents, Tailscale, and a
+# clone + build (+ amd64 musl cross-build run under Docker) of a small public crate.
+mac-mini-check host:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    read -r name ip < <(just _mac-mini-resolve "{{host}}") || exit 1
+    ssh -o BatchMode=yes "casibbald@$ip" 'zsh -s' <<'REMOTE'
+    for f in ~/.zshrc.d/*.zsh(N); do source "$f"; done
+    fail=0
+    step() { local label=$1; shift; printf '── %s\n' "$label"; if "$@"; then :; else echo "✗ $label FAILED"; fail=1; fi; }
+    step "rustc"      rustc --version
+    step "cargo"      cargo --version
+    step "go"         go version
+    step "python"     python --version
+    step "uv"         uv --version
+    step "node"       node --version
+    step "docker"     docker run --rm --platform linux/amd64 hello-world
+    step "buildx"     sh -c 'docker buildx inspect | grep -E "^ *Platforms:"'
+    step "claude"     claude --version
+    step "hermes"     hermes --version
+    step "tailscale"  tailscale status --peers=false
+    tmp=$(mktemp -d)
+    step "clone itoa" git clone --quiet --depth 1 https://github.com/dtolnay/itoa "$tmp/itoa"
+    step "build itoa" sh -c "cd '$tmp/itoa' && cargo build --release --quiet && cargo test --quiet"
+    step "cross bin"  sh -c "cd '$tmp' && cargo new --quiet --bin hello && cd hello && cargo build --release --quiet --target x86_64-unknown-linux-musl"
+    step "run amd64"  docker run --rm --platform linux/amd64 -v "$tmp/hello/target/x86_64-unknown-linux-musl/release:/x:ro" alpine:3 /x/hello
+    rm -rf "$tmp"
+    [ "$fail" = 0 ] && echo "✓ all checks passed on $(hostname -s)" || { echo "✗ some checks failed"; exit 1; }
+    REMOTE
+
+# Lint + tests for the Mac mini Ansible (ansible-lint installed with uv if missing).
+mac-mini-lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v ansible-lint >/dev/null || uv tool install --with ansible ansible-lint
+    ansible-playbook playbooks/mac_dev.yml --syntax-check
+    ansible-lint playbooks/mac_dev.yml
+    python3 -m pytest -q tests/test_mac_minis_ansible.py
+
 # ── MetalLB / Multipass L3 route (Mac ↔ 10.177.76.0/24 via ms02) ───────────
 #
 # ms02 forwards between home LAN (192.168.1.0/24) and Multipass bridge
