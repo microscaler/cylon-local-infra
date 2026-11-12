@@ -8,6 +8,14 @@
 
 ## TL;DR — where are you?
 
+> **Nov 2026: the Mac minis own code and builds.** Three Mac minis (`mac_minis`
+> group: `mini1`–`mini3`, `192.168.1.2xx`, on Tailscale) are now the
+> development machines: clone, edit, compile, test and `docker build` **on a
+> mini** (`ssh casibbald@<mini>`; toolchains per repo pin — see
+> [`mac-minis.md`](mac-minis.md)). ms02 is being drained of development and
+> will become a Kubernetes node only (next phase). The ms02/NFS guidance below
+> stays valid until that migration is done; for new work, prefer a mini.
+
 You are running on **`picolino`** (macOS laptop, `ansible_user: casibbald`, UID 502). **You are not on the machine that owns the code.** Most repos live on **`ms02`** (Linux dev host) and are surfaced to the Mac over NFSv4 at `~/Workspace/remote`. The Kind cluster runs on `ms02`. The LLM inference stack runs on the **DGX Spark cluster** (`nvidia1` + `nvidia2`).
 
 If you need to "run a command on ms02", you **SSH to ms02**. Editing a file in `~/Workspace/remote/...` writes to ms02 over NFS; executing a binary in `~/Workspace/remote/...` executes it on the **Mac** against code-on-ms02 (usually wrong — most tools need to run where the code lives).
@@ -164,7 +172,8 @@ just nfs-reconnect  # down + up atomically
 | Operation | Runs on | How to invoke |
 |---|---|---|
 | Edit source file in `~/Workspace/remote/microscaler/<repo>/…` | Writes to `ms02` (over NFS) | Any editor on the Mac |
-| Build / test Rust / Go / Python / Node code | `ms02` | `ssh ms02 'cd ~/Workspace/microscaler/<repo> && <cmd>'` |
+| Build / test Rust / Go / Python / Node code | **a Mac mini** (ms02 until migrated) | `ssh casibbald@<mini> 'cd ~/Workspace/microscaler/<repo> && <cmd>'` |
+| `docker build` for cluster images (linux/amd64) | **a Mac mini** (Docker Desktop + Rosetta) | `DOCKER_DEFAULT_PLATFORM=linux/amd64` is preset on the minis |
 | `docker build` / `docker compose` | `ms02` (that's where the Docker daemon and image cache live) | SSH to `ms02` |
 | `kubectl` / `k9s` against the dev Kind cluster | `ms02` | SSH to `ms02`, or `kubectl --context kind-dev` on the Mac if kubeconfig is forwarded |
 | `tilt up` for a repo | `ms02` (builds via local daemon, pushes to Kind registry on ms02) | SSH to `ms02`, cd into the repo, `tilt up` — view the UI through an SSH LocalForward to `:10350` |
@@ -315,6 +324,7 @@ Per-topic depth lives in the cylon-local-infra wiki:
 | DGX Spark provisioning | [`docs/provision_sparks.md`](./provision_sparks.md), [`docs/PRD-spark-stacking-nvidia2.md`](./PRD-spark-stacking-nvidia2.md) |
 | HF model cache layout | [`docs/hf-cache-sparks.md`](./hf-cache-sparks.md) |
 | ms02 docker + dev tooling | [`docs/dev_hosts.md`](./dev_hosts.md), [`docs/docker-dev-host.md`](./docker-dev-host.md) |
+| Mac mini dev machines (provisioning, version pins, sign-ins) | [`docs/mac-minis.md`](./mac-minis.md) |
 
 ---
 

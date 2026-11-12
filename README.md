@@ -8,6 +8,8 @@ Idempotent, repeatable setup for:
   [NVIDIA stacked Sparks](https://build.nvidia.com/spark/vllm/stacked-sparks).
 - **Dev hosts** (`ms02`): Docker CE + buildx + compose for Kind / `act` / local builds —
   separate from Sparks; see [`docs/docker-dev-host.md`](docs/docker-dev-host.md).
+- **Mac minis** (`mini1`–`mini3`, group `mac_minis`): the development machines — code and
+  builds live here; see [`docs/mac-minis.md`](docs/mac-minis.md).
 
 GPU workloads on Sparks run as `nvidia`, not `root`. See
 [`docs/PRD-nvidia-user-exo-transition.md`](docs/PRD-nvidia-user-exo-transition.md).
@@ -47,6 +49,8 @@ Pattern: [Karpathy — LLM Wiki](https://gist.github.com/karpathy/442a6bf5559148
 - **Sparks**: `nvidia1`, `nvidia2` (group `sparks`). Vars in
   [`inventory/group_vars/sparks.yml`](inventory/group_vars/sparks.yml).
 - **Dev hosts**: `ms02` (group `dev_hosts`). Vars in `inventory/group_vars/dev_hosts.yml`.
+- **Mac minis**: `mini1`–`mini3` (group `mac_minis`, SSH from picolino; placeholder IPs in
+  `inventory/host_vars/mini<N>.yml`). Vars in `inventory/group_vars/mac_minis.yml`.
 
 Per-host overrides live in `inventory/host_vars/<host>.yml` — e.g. the LAN IPv6 disable
 (`spark_lan_disable_ipv6_on_interface`) mitigating the ASGI-hang failure mode documented
@@ -115,6 +119,17 @@ ansible-playbook playbooks/docker_dev_engine.yml -l ms02
 ansible-playbook playbooks/dev_hosts.yml -l ms02
 ```
 
+### Mac minis (development machines)
+
+```bash
+just mac-mini-bootstrap host=192.168.1.201   # Remote Login + picolino's key (the one manual step)
+just mac-mini-provision-check host=mini1     # --check --diff
+just mac-mini-provision host=mini1           # playbooks/mac_dev.yml (--ask-become-pass)
+just mac-mini-check host=mini1               # smoke test: toolchains, Docker, agents, a crate build
+```
+
+See [`docs/mac-minis.md`](docs/mac-minis.md).
+
 ### Routed WireGuard mesh
 
 ```bash
@@ -163,6 +178,7 @@ playbooks/
   nccl_sparks.yml               # NCCL build + all_gather test (separate)
   dev_hosts.yml                 # ms02 sudoers + docker group + firewall + Kind
   docker_dev_engine.yml         # one-time Docker CE on dev hosts
+  mac_dev.yml                   # Mac mini dev machines (group mac_minis)
 roles/
   spark_provision/              # orchestrates all Spark phases
   vllm_stacked_container/       # NGC Docker Ray + vllm serve (the vLLM path)
@@ -171,6 +187,14 @@ roles/
   vllm_stack_autoupgrade/       # leader-only systemd daemon — promotes a newer image into the running stack after quiet window
   sudoers/ docker/ firewall/ cuda/ spark_apt/ spark_diagnostics/ nccl_sparks/
   docker_ce/ kind/              # dev_hosts only
+  # mac_minis only (playbooks/mac_dev.yml) — one role per component:
+  mac_base/                     # hostname, pmset always-on, FileVault-off assert, limits, Spotlight/TM, updates
+  shell_env/                    # one ~/.zshrc include line → ~/.zshrc.d/*.zsh drop-ins; rc guard
+  homebrew/                     # pinned Homebrew + Brewfile (CLI tools the repos call)
+  rust/ golang/ python/ node/   # rustup / gvm / pyenv+uv / fnm — repos' own pins win
+  docker_desktop/               # Docker Desktop sized from facts, buildx linux/amd64, licence left to Charles
+  claude/ hermes/               # Claude Code (pinned) and Hermes → Sparks' vLLM
+  tailscale/ dev_workspace/     # tailnet join (manual/fresh key), ~/Workspace/microscaler, git, GitHub key
 docs/                           # architectural + reference docs
 llmwiki/                        # persistent LLM-maintained knowledge base
 ```
