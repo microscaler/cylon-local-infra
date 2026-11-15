@@ -1,5 +1,5 @@
 ---
-# One image: context → docker build (native arm64) → k3s containerd → pin → push to zot.
+# One image: context → docker build (native arm64) → k3s containerd → pin → push to zot (chunked) → verify.
 - name: "{{ img_name }}: image ref"
   ansible.builtin.set_fact:
     img_ref: "{{ cylon_workload_registry }}/cylon/{{ img_name }}:{{ img_tag }}"
@@ -55,8 +55,13 @@
     argv: [k3s, ctr, -n, k8s.io, images, label, "{{ img_ref }}", io.cri-containerd.pinned=pinned]
   changed_when: false
 
-# Best effort: the pods run from the node-local pinned image (IfNotPresent). zot drops the
-# single ~5.7 GiB torch layer upload after ~60 s (3 Nov 2026), so a failed push only warns.
+# Push to zot, chunked. The vector-one image's ~5.7 GiB torch layer cannot go up in one request: zot (v2.1.17)
+# drops any request still reading its body after 60 s ("read tcp ...: i/o timeout", the blob PUT answers 500), and
+# `k3s ctr images push` and `docker push` send each blob as a single request (~15 MiB/s node -> zot, so ~6.5 min).
+# regctl pushes blobs above blobMax as a series of PATCH chunks, each a few seconds. The image goes out of k3s
+# containerd as an OCI archive (`ctr images export`), so zot gets the OCI manifest containerd holds (zot also
+# accepts Docker schema2 now, compat docker2s2). A failed push fails the play: the pods run from the node-local
+# pinned image, but an image that is not in zot cannot be scheduled anywhere else.
 - name: "{{ img_name }}: already in zot?"
   ansible.builtin.uri:
     url: "http://{{ cylon_workload_registry }}/v2/cylon/{{ img_name }}/manifests/{{ img_tag }}"
@@ -65,21 +70,62 @@
       Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json
     status_code: [200, 404]
   register: img_zot
-  failed_when: false
 
-- name: "{{ img_name }}: push to zot (plain HTTP, best effort)"
-  when: img_zot.status | default(0) != 200
-  ansible.builtin.command:
-    argv: [k3s, ctr, -n, k8s.io, images, push, --plain-http, "{{ img_ref }}"]
-  register: img_push
-  changed_when: false
-  failed_when: false
-  async: 3600
-  poll: 15
+- name: "{{ img_name }}: push to zot"
+  when: img_zot.status != 200
+  block:
+    - name: "{{ img_name }}: regctl {{ cylon_regctl_version }}"
+      ansible.builtin.get_url:
+        url: "https://github.com/regclient/regclient/releases/download/{{ cylon_regctl_version }}/regctl-linux-{{ cylon_regctl_arch }}"
+        dest: "{{ cylon_regctl_bin }}"
+        checksum: "sha256:{{ cylon_regctl_sha256[cylon_regctl_arch] }}"
+        mode: "0755"
 
-- name: "{{ img_name }}: push result"
+    - name: "{{ img_name }}: regctl config for zot (plain HTTP, chunked blobs)"
+      ansible.builtin.command:
+        argv: ["{{ cylon_regctl_bin }}", registry, set, --tls, disabled,
+               --blob-chunk, "{{ cylon_regctl_blob_chunk }}", --blob-max, "{{ cylon_regctl_blob_chunk * 2 }}",
+               "{{ cylon_workload_registry }}"]
+      environment:
+        REGCTL_CONFIG: "{{ cylon_workload_build_root }}/regctl.json"
+      changed_when: false
+
+    - name: "{{ img_name }}: export from k3s containerd (OCI archive)"
+      ansible.builtin.command:
+        argv: [k3s, ctr, -n, k8s.io, images, export, --platform, "linux/{{ cylon_regctl_arch }}",
+               "{{ cylon_workload_build_root }}/{{ img_name }}-{{ img_tag }}.oci.tar", "{{ img_ref }}"]
+      async: 1800
+      poll: 10
+      changed_when: true
+
+    - name: "{{ img_name }}: push (chunked)"
+      ansible.builtin.command:
+        argv: ["{{ cylon_regctl_bin }}", image, import, "{{ img_ref }}",
+               "{{ cylon_workload_build_root }}/{{ img_name }}-{{ img_tag }}.oci.tar"]
+      environment:
+        REGCTL_CONFIG: "{{ cylon_workload_build_root }}/regctl.json"
+      async: 5400
+      poll: 20
+      changed_when: true
+
+  always:
+    - name: "{{ img_name }}: remove the OCI archive"
+      ansible.builtin.file:
+        path: "{{ cylon_workload_build_root }}/{{ img_name }}-{{ img_tag }}.oci.tar"
+        state: absent
+
+- name: "{{ img_name }}: in zot (manifest read back)"
+  ansible.builtin.uri:
+    url: "http://{{ cylon_workload_registry }}/v2/cylon/{{ img_name }}/manifests/{{ img_tag }}"
+    method: GET
+    headers:
+      Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json
+    status_code: 200
+  register: img_zot_after
+
+- name: "{{ img_name }}: zot manifest"
   ansible.builtin.debug:
-    msg: "{{ 'in zot' if img_push is skipped else 'pushed to zot' if img_push.rc | default(1) == 0 else 'zot push failed (node-local image is used): ' ~ (img_push.stderr | default('') | regex_search('ctr: .{0,160}') | default('?')) }}"
+    msg: "{{ img_ref }} in zot: {{ img_zot_after.content_type | default('?') }} {{ img_zot_after.docker_content_digest | default('') }}"
 
 - name: "{{ img_name }}: built"
   ansible.builtin.debug:

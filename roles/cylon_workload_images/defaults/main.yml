@@ -1,7 +1,8 @@
 ---
 # Workload images for the dedicated cylon nodes, built natively (arm64) with Docker on the
 # node, imported into k3s containerd, pinned against image GC and pushed to the ms02 zot
-# registry (plain HTTP via `k3s ctr push`, so Docker needs no insecure-registry change).
+# registry (plain HTTP via regctl with chunked blob uploads, so Docker needs no insecure-registry
+# change; tasks/build.yml says why chunked).
 # Pods reference the zot name with imagePullPolicy IfNotPresent.
 cylon_workload_registry: "10.177.76.220:5000"
 cylon_workload_build_root: /opt/cylon/images
@@ -20,3 +21,15 @@ cylon_timesfm_ref: "master"
 # vector-one training image: build context is `git archive` of this checkout's HEAD on the
 # controller (the Mac); the tag is the short commit sha.
 cylon_vector_one_repo: "{{ lookup('env', 'HOME') }}/Workspace/local/vector-one/vector_one"
+
+# regctl (regclient) pushes the images to zot in chunks: zot drops a request still uploading after 60 s,
+# which a single-request push of the 5.7 GiB torch layer always hits (15 Nov 2026).
+cylon_regctl_version: "v0.8.3"
+# the cylon nodes are arm64 (the play runs without fact gathering); amd64 is listed for an x86 node
+cylon_regctl_arch: arm64
+cylon_regctl_sha256:
+  arm64: 0bf9afd1b2f7f468cd450514a7656ca00c0df88428047765146c1bf3bd303ab0
+  amd64: b4f352d3acbe5cd3d2255ebac618a0f8da80b72f16ec30182275cb891f5e6ee5
+cylon_regctl_bin: /usr/local/bin/regctl
+# bytes per PATCH (32 MiB is ~2-3 s to zot); blobs above twice this go chunked
+cylon_regctl_blob_chunk: 33554432
